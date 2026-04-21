@@ -188,3 +188,4 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 - When you change severity or rule IDs, update `docs/checks.md` in the same change.
 
 Thank you for contributing.
+luhrhenz.
