@@ -1,6 +1,6 @@
-# Contributing to Soroban Guard Core
+# Contributing to Guard CLI
 
-Thank you for helping improve the static analyzer. This guide covers **local setup**, a **short `syn` tutorial with examples**, **how to add a check** (using `auth.rs` as a template), **how to write test contracts**, and links to **sister repositories** in the Veritas Vaults ecosystem.
+Thank you for helping improve the static analyzer. This guide covers **local setup**, a **short `syn` tutorial with examples**, **how to add a check** (using `auth.rs` as a template), and **how to write test contracts**.
 
 ## Local development setup
 
@@ -15,8 +15,8 @@ Thank you for helping improve the static analyzer. This guide covers **local set
 2. **Clone this repository** and `cd` into the workspace root:
 
    ```bash
-   git clone https://github.com/Veritas-Vaults-Network/soroban-guard-core.git
-   cd soroban-guard-core
+   git clone https://github.com/SorobanGuard/Guard-CLI.git
+   cd Guard-CLI
    ```
 
 3. **Build and run the full test suite:**
@@ -162,16 +162,6 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 
 ---
 
-## Sister repositories (3-repo ecosystem)
-
-| Project | Repository | Role |
-|---------|------------|------|
-| **Core (this repo)** | [soroban-guard-core](https://github.com/Veritas-Vaults-Network/soroban-guard-core) | CLI + `syn`-based analyzer |
-| **Web dashboard** | [Soroban-Guard-web](https://github.com/Veritas-Vaults-Network/Soroban-Guard-web) | UI for browsing and triaging findings |
-| **Contracts** | [soroban-guard-contracts](https://github.com/Veritas-Vaults-Network/soroban-guard-contracts) | Curated Soroban examples and regression contracts |
-
----
-
 ## Architecture constraints (for contributors)
 
 - **`syn` `full`** — New crates in this workspace should inherit workspace `syn` with `features = ["full", "visit"]` unless there is a strong reason not to.
@@ -188,4 +178,3 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 - When you change severity or rule IDs, update `docs/checks.md` in the same change.
 
 Thank you for contributing.
-luhrhenz.

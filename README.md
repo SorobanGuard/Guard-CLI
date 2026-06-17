@@ -1,16 +1,8 @@
-# Soroban Guard Core
+# Guard CLI
 
 > Static analysis engine for [Soroban](https://soroban.stellar.org/) smart contracts — securing the Stellar blockchain, one contract at a time.
 
-Soroban Guard Core is a CLI-based static analyzer for Rust smart contracts deployed on the **Stellar network** via the Soroban smart contract platform. It detects vulnerabilities before your code ever touches the chain.
-
-This is the **core engine** in a three-repo setup:
-
-| Repo | URL |
-|------|-----|
-| **Core** (this) | [github.com/Veritas-Vaults-Network/Soroban-Guard-Core](https://github.com/Veritas-Vaults-Network/Soroban-Guard-Core) |
-| **Web dashboard** | [github.com/Veritas-Vaults-Network/Soroban-Guard-web](https://github.com/Veritas-Vaults-Network/Soroban-Guard-web) |
-| **Contracts** | [github.com/Veritas-Vaults-Network/soroban-guard-contracts](https://github.com/Veritas-Vaults-Network/soroban-guard-contracts) |
+Guard CLI is a CLI-based static analyzer for Rust smart contracts deployed on the **Stellar network** via the Soroban smart contract platform. It detects vulnerabilities before your code ever touches the chain.
 
 ---
 
@@ -77,7 +69,7 @@ cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --json
 ## Workspace Scaffold
 
 ```
-Soroban-Guard-Core/
+Guard-CLI/
 ├── Cargo.toml                  # workspace root
 ├── crates/
 │   ├── cli/                    # clap entrypoint & reporting
@@ -184,23 +176,51 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
 
 ---
 
-## Stellar Deployment Workflow
+## Stellar Integration
 
-Integrate Soroban Guard into your Stellar deployment pipeline:
+Guard CLI is designed to sit at the gate of your Stellar deployment pipeline. Soroban contracts are compiled to WASM and deployed to the Stellar network — Guard CLI catches vulnerabilities at the source level before any of that happens.
+
+### How it fits in
+
+```
+[Source code] → Guard CLI scan → [WASM build] → [Stellar deploy]
+```
+
+- Runs purely on Rust source — no Stellar SDK, no network connection, no wallet required.
+- Exit code `1` on High findings lets CI block a deploy automatically.
+- `--json` output can be piped into any dashboard or audit log.
+
+### Deployment workflow
 
 ```bash
-# 1. Analyze before building
+# 1. Scan before building — fails fast on High findings (exit 1)
 cargo run -p soroban-guard-cli -- scan ./my-contract --json > findings.json
 
-# 2. Fail fast on High findings (exit code 1)
-
-# 3. Build the WASM artifact
+# 2. Build the WASM artifact only if scan passed
 cargo build --target wasm32-unknown-unknown --release
 
-# 4. Deploy to Stellar Testnet
+# 3. Deploy to Stellar Testnet
 stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
+  --source <account-name> \
   --network testnet
+
+# 4. Or deploy to Mainnet
+stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
+  --source <account-name> \
+  --network mainnet
+```
+
+### CI example (GitHub Actions)
+
+```yaml
+- name: Guard CLI scan
+  run: cargo run -p soroban-guard-cli -- scan ./my-contract
+  # exits 1 on High findings — blocks the workflow
+
+- name: Build WASM
+  run: cargo build --target wasm32-unknown-unknown --release
 ```
 
 ---
@@ -213,7 +233,7 @@ stellar contract deploy \
 | `crates/analyzer` | Walk `.rs` files, parse with `syn`, run checks |
 | `crates/checks` | `Check` trait + individual detectors |
 
-See [docs/checks.md](docs/checks.md) for implemented rules and [CONTRIBUTING.md](CONTRIBUTING.md) to add a check.
+See `docs/checks.md` for implemented rules and `CONTRIBUTING.md` to add a check.
 
 ---
 
