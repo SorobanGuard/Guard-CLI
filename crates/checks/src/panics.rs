@@ -4,7 +4,7 @@ use crate::util::contractimpl_functions;
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprCall, ExprMacro, ExprMethodCall, File};
+use syn::{Expr, ExprCall, ExprMethodCall, File};
 
 const CHECK_NAME: &str = "panic-in-contract";
 
@@ -21,7 +21,10 @@ impl Check for PanicInContractCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions(file) {
             let fn_name = method.sig.ident.to_string();
-            let mut v = PanicVisitor { fn_name: fn_name.clone(), out: &mut out };
+            let mut v = PanicVisitor {
+                fn_name: fn_name.clone(),
+                out: &mut out,
+            };
             v.visit_block(&method.block);
         }
         out
@@ -58,17 +61,18 @@ impl PanicVisitor<'_> {
                 "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#panic-in-contract-medium"
                     .to_string(),
             ),
+                suggestion: None,
         });
     }
 }
 
 impl<'ast> Visit<'ast> for PanicVisitor<'_> {
-    fn visit_expr_macro(&mut self, i: &'ast ExprMacro) {
-        let name = macro_name(&i.mac);
+    fn visit_macro(&mut self, i: &'ast syn::Macro) {
+        let name = macro_name(i);
         if matches!(name.as_str(), "panic" | "unreachable") {
             self.push(i.span().start().line, &format!("{name}!"));
         }
-        visit::visit_expr_macro(self, i);
+        visit::visit_macro(self, i);
     }
 
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {

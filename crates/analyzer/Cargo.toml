@@ -12,3 +12,4 @@ serde.workspace = true
 walkdir.workspace = true
 glob.workspace = true
 thiserror.workspace = true
+rayon.workspace = true

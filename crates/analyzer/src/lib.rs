@@ -21,71 +21,54 @@ pub enum ScanError {
 ///
 /// `excludes` are glob patterns (e.g. `vendor/**`, `**/generated/*.rs`) matched against each
 /// file's path relative to `root`; matching files are skipped entirely.
-pub fn scan_directory(root: &Path, excludes: &[String]) -> Result<Vec<Finding>, ScanError> {
+pub fn scan_directory(
+    root: &Path,
+    excludes: &[String],
+) -> Result<(Vec<Finding>, usize), ScanError> {
     let root = root.canonicalize()?;
     let exclude_patterns: Vec<glob::Pattern> = excludes
         .iter()
-        .filter_map(|p| glob::Pattern::new(p).ok())
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
         .collect();
     let checks = default_checks();
-    let mut findings = Vec::new();
 
-    for entry in WalkDir::new(&root)
-        // Never follow symlinks: prevents infinite loops on symlink cycles (issue #43).
+    let entries: Vec<_> = WalkDir::new(&root)
+        // Never follow symlinks: prevents infinite loops on symlink cycles.
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path
-            .components()
-            .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
-        {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-            continue;
-        }
-
-        let file_label = path
-            .strip_prefix(&root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-
-        if exclude_patterns
-            .iter()
-            .any(|p| p.matches(&file_label) || p.matches_path(path))
-        {
-            continue;
-        }
-
-        let content = std::fs::read_to_string(path)?;
-        let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })?;
-
-        for check in &checks {
-            let mut from_check = check.run(&syn_file, &content);
-            for f in &mut from_check {
-                f.file_path = file_label.clone();
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            if !entry.file_type().is_file() {
+                return false;
             }
-            path.extension().and_then(|s| s.to_str()) == Some("rs")
+
+            let path = entry.path();
+            if path
+                .components()
+                .any(|component| matches!(component.as_os_str().to_str(), Some("target" | ".git")))
+            {
+                return false;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                return false;
+            }
+
+            let file_label = path.strip_prefix(&root).unwrap_or(path);
+            !exclude_patterns
+                .iter()
+                .any(|pattern| pattern.matches_path(file_label) || pattern.matches_path(path))
         })
         .collect();
+    let files_scanned = entries.len();
 
     let mut findings: Vec<Finding> = entries
         .par_iter()
         .map(|entry| {
             let path = entry.path();
             let content = std::fs::read_to_string(path)?;
-            let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
+            let syn_file = syn::parse_file(&content).map_err(|error| ScanError::Parse {
                 path: path.to_path_buf(),
-                message: e.to_string(),
+                message: error.to_string(),
             })?;
 
             let file_label = path
@@ -94,12 +77,12 @@ pub fn scan_directory(root: &Path, excludes: &[String]) -> Result<Vec<Finding>, 
                 .to_string_lossy()
                 .to_string();
 
-            let file_findings: Vec<Finding> = checks
+            let file_findings = checks
                 .iter()
                 .flat_map(|check| {
                     let mut from_check = check.run(&syn_file, &content);
-                    for f in &mut from_check {
-                        f.file_path.clone_from(&file_label);
+                    for finding in &mut from_check {
+                        finding.file_path.clone_from(&file_label);
                     }
                     from_check
                 })
@@ -118,5 +101,35 @@ pub fn scan_directory(root: &Path, excludes: &[String]) -> Result<Vec<Finding>, 
             .then_with(|| a.line.cmp(&b.line))
     });
 
-    Ok(findings)
+    Ok((findings, files_scanned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn reports_scanned_rust_file_count_after_filters() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-analyzer-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn included() {}").unwrap();
+        fs::write(root.join("src/excluded.rs"), "pub fn excluded() {}").unwrap();
+        fs::write(root.join("target/generated.rs"), "pub fn generated() {}").unwrap();
+        fs::write(root.join("README.md"), "not Rust").unwrap();
+
+        let (_, files_scanned) = scan_directory(&root, &["src/excluded.rs".to_string()]).unwrap();
+
+        assert_eq!(files_scanned, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

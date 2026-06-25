@@ -62,6 +62,7 @@ impl Check for MissingContractAnnotationCheck {
                                 "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-contract-annotation-low"
                                     .to_string(),
                             ),
+                            suggestion: None,
                         });
                     }
                 }
