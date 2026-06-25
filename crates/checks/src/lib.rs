@@ -1,6 +1,7 @@
 //! Vulnerability detectors for Soroban smart contracts.
 
 pub mod admin;
+pub mod annotations;
 pub mod auth;
 pub mod global_state;
 pub mod hardcoded_address;
@@ -8,9 +9,11 @@ pub mod overflow;
 pub mod std_imports;
 pub mod storage;
 pub mod ttl;
+pub mod xc_input;
 mod util;
 
 pub use admin::UnprotectedAdminCheck;
+pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
 pub use global_state::MutableGlobalStateCheck;
 pub use hardcoded_address::HardcodedAddressCheck;
@@ -18,6 +21,7 @@ pub use overflow::UncheckedArithmeticCheck;
 pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
 pub use ttl::MissingTtlExtensionCheck;
+pub use xc_input::UnsafeCrossContractInputCheck;
 
 use serde::Serialize;
 use syn::File;
@@ -68,6 +72,7 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(MissingTtlExtensionCheck),
         Box::new(ForbiddenStdImportsCheck),
         Box::new(HardcodedAddressCheck),
-        Box::new(MutableGlobalStateCheck),
+        Box::new(UnsafeCrossContractInputCheck),
+        Box::new(MissingContractAnnotationCheck),
     ]
 }

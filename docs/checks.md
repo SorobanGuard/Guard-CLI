@@ -17,7 +17,7 @@ In an `impl` block marked with `#[contractimpl]` or `#[soroban_sdk::contractimpl
 
 **Why it matters**
 
-Contract state updates should be gated. This rule only recognizes `env.require_auth()`, not `user.require_auth()` or `env.require_auth_for_args()`.
+Contract state updates should be gated. This rule recognizes both `env.require_auth()` and `env.require_auth_for_args(…)` as valid auth gates.
 
 **Limitations**
 
@@ -28,7 +28,7 @@ Contract state updates should be gated. This rule only recognizes `env.require_a
 
 ---
 
-## `unchecked-arithmetic` (Medium)
+## `unchecked-arithmetic` (High / Medium / Low)
 
 **Status:** Phase 2
 
@@ -39,13 +39,21 @@ Inside `#[contractimpl]` methods:
 - Binary `+`, `-`, `*` where **both** sides are not integer/string literals (so `1 + 2` is ignored, `a + b` is flagged).
 - Compound `+=`, `-=`, `*=` (syn 2 represents these as `ExprBinary` with `AddAssign` / `SubAssign` / `MulAssign`).
 
+**Severity heuristic (name-based)**
+
+| Operand name contains | Severity |
+|---|---|
+| `amount`, `balance`, `fee`, `price`, `supply`, `reward`, `stake`, `fund`, `value`, `total` | **High** |
+| `idx`, `index`, `count`, `len`, `offset`, `pos`, `step`, or single-char `i/j/k/n/x/y/z` | **Low** |
+| anything else | **Medium** |
+
 **Why it matters**
 
 Wrapping arithmetic on `i128` / `u128` amounts can silently overflow. Prefer `checked_*` or `saturating_*` for token math.
 
 **Limitations**
 
-- May flag harmless loop indices; review context.
+- Heuristic is purely name-based; review context before acting on Low findings.
 - Does not analyze types; it is syntactic.
 
 **Fixture:** `test-contracts/arithmetic-vulnerable/`, `test-contracts/arithmetic-safe/`
@@ -93,3 +101,45 @@ Names like `set_owner` strongly suggest privilege; without any auth call the sca
 - `Symbol::new` with a `const` or macro-expanded literal may still be flagged if it is not a `syn::Lit::Str`.
 
 **Fixture:** `test-contracts/storage-vulnerable/`, `test-contracts/storage-safe/`
+
+---
+
+## `unsafe-cross-contract-input` (High)
+
+**Status:** Phase 3
+
+**What it detects**
+
+In `#[contractimpl]` methods: a local binding assigned from `invoke_contract(…)` that flows directly into `env.storage().*.set(…, &binding)` without any intervening validation (no `if`, `match`, `unwrap_or*`, `ok_or*`, or `checked_*` expression between the binding and the storage write).
+
+**Why it matters**
+
+Cross-contract call return values are externally influenced. Writing them to persistent ledger storage without validation can corrupt contract state or enable injection attacks.
+
+**Limitations**
+
+- Binding-level taint only; multi-step transformations that preserve the raw value are not tracked.
+- Validation done inside a helper function is not visible to this check.
+
+**Fixture:** tests in `crates/checks/src/xc_input.rs`
+
+---
+
+## `missing-contract-annotation` (Low)
+
+**Status:** Phase 3
+
+**What it detects**
+
+A file containing a `#[contractimpl]` (or `#[soroban_sdk::contractimpl]`) `impl` block but no `#[contract]` struct in the same file.
+
+**Why it matters**
+
+The Soroban SDK requires a `#[contract]` struct to be present alongside `#[contractimpl]`. A mismatch is almost always a copy-paste error and will produce a compile error or unexpected runtime behaviour.
+
+**Limitations**
+
+- File-scoped only; does not resolve cross-file references.
+- Only `#[contract]` on a `struct` item is recognized.
+
+**Fixture:** tests in `crates/checks/src/annotations.rs`

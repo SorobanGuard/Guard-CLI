@@ -104,8 +104,8 @@ fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
     receiver_chain_contains_storage(&m.receiver)
 }
 
-fn is_env_require_auth(m: &ExprMethodCall, env_name: &str) -> bool {
-    if m.method != "require_auth" {
+fn is_env_require_auth(m: &ExprMethodCall) -> bool {
+    if m.method != "require_auth" && m.method != "require_auth_for_args" {
         return false;
     }
     match &*m.receiver {
@@ -254,7 +254,7 @@ impl Contract {
     }
 
     #[test]
-    fn still_flags_when_env_require_auth_for_args_only() -> Result<(), syn::Error> {
+    fn passes_when_env_require_auth_for_args_only() -> Result<(), syn::Error> {
         let hits = run_on_src(
             r#"
 use soroban_sdk::{contractimpl, Address, Env, Symbol};
@@ -270,7 +270,7 @@ impl Contract {
 }
 "#,
         )?;
-        assert_eq!(hits.len(), 1);
+        assert!(hits.is_empty(), "require_auth_for_args should be a valid auth gate");
         Ok(())
     }
 
