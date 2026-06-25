@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod global_state;
 pub mod hardcoded_address;
 pub mod overflow;
 pub mod std_imports;
@@ -11,6 +12,7 @@ mod util;
 
 pub use admin::UnprotectedAdminCheck;
 pub use auth::MissingRequireAuthCheck;
+pub use global_state::MutableGlobalStateCheck;
 pub use hardcoded_address::HardcodedAddressCheck;
 pub use overflow::UncheckedArithmeticCheck;
 pub use std_imports::ForbiddenStdImportsCheck;
@@ -66,5 +68,6 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(MissingTtlExtensionCheck),
         Box::new(ForbiddenStdImportsCheck),
         Box::new(HardcodedAddressCheck),
+        Box::new(MutableGlobalStateCheck),
     ]
 }
