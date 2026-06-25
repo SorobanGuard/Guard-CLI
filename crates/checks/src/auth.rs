@@ -39,6 +39,10 @@ impl Check for MissingRequireAuthCheck {
                      `env.require_auth()`. Callers may mutate contract state without proving \
                      they are authorized."
                 ),
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-require-auth-high"
+                        .to_string(),
+                ),
             });
         }
         out

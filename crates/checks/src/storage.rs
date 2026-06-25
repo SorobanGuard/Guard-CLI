@@ -80,18 +80,20 @@ fn is_symbol_new_path(expr: &Expr) -> bool {
     segs.len() == 2 && segs[0].ident == "Symbol" && segs[1].ident == "new"
 }
 
-/// Second argument to `Symbol::new` is a string literal → stable key, no finding.
+/// Second argument to `Symbol::new` is a string literal or a named constant path → stable key, no finding.
 fn symbol_new_second_arg_is_string_lit(call: &ExprCall) -> bool {
     let Some(arg1) = call.args.iter().nth(1) else {
         return false;
     };
-    matches!(
-        arg1,
+    match arg1 {
         Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Str(_),
             ..
-        })
-    )
+        }) => true,
+        // A bare path like `MY_CONST` or `crate::keys::FOO` is a named constant — treat as stable.
+        Expr::Path(_) => true,
+        _ => false,
+    }
 }
 
 struct StorageVisitor<'a> {
@@ -114,6 +116,10 @@ impl Visit<'_> for StorageVisitor<'_> {
                      long-lived balances or ownership.",
                     self.fn_name
                 ),
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
+                        .to_string(),
+                ),
             });
         }
         visit::visit_expr_method_call(self, i);
@@ -135,6 +141,10 @@ impl Visit<'_> for StorageVisitor<'_> {
                      caller input are easier to guess or collide with; prefer `symbol_short!` / \
                      fixed literals or a namespaced encoding you control.",
                     self.fn_name
+                ),
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
+                        .to_string(),
                 ),
             });
         }
@@ -211,6 +221,34 @@ impl C {
     pub fn put(env: Env) {
         env.require_auth();
         let sym = Symbol::new(&env, "fixed");
+        env.storage().persistent().set(&sym, &0u32);
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert!(
+            hits.iter().all(|h| !h.description.contains("Symbol::new")),
+            "{hits:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_symbol_new_with_named_const() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env, Symbol};
+
+pub struct C;
+
+const KEY: &str = "balance";
+
+#[contractimpl]
+impl C {
+    pub fn put(env: Env) {
+        env.require_auth();
+        let sym = Symbol::new(&env, KEY);
         env.storage().persistent().set(&sym, &0u32);
     }
 }

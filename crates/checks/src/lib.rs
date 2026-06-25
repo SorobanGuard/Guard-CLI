@@ -32,6 +32,9 @@ pub struct Finding {
     pub line: usize,
     pub function_name: String,
     pub description: String,
+    /// Link to the check's documentation section (exposed in `--json` output for dashboard integrations).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_url: Option<String>,
 }
 
 /// A static analyzer check implemented against a parsed `syn::File`.

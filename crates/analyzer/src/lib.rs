@@ -22,7 +22,12 @@ pub fn scan_directory(root: &Path) -> Result<Vec<Finding>, ScanError> {
     let checks = default_checks();
     let mut findings = Vec::new();
 
-    for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&root)
+        // Never follow symlinks: prevents infinite loops on symlink cycles (issue #43).
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -38,6 +43,8 @@ pub fn scan_directory(root: &Path) -> Result<Vec<Finding>, ScanError> {
         }
 
         let content = std::fs::read_to_string(path)?;
+        // The file is parsed once here and the resulting `syn::File` is shared across all checks
+        // (issue #42). No check re-parses the source; each receives a reference to the same AST.
         let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
             path: path.to_path_buf(),
             message: e.to_string(),
