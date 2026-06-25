@@ -4,12 +4,12 @@ use crate::util::contractimpl_functions;
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, Expr, ExprMethodCall, File};
+use syn::{Block, Expr, ExprMethodCall, File, FnArg, Pat, Type};
 
 const CHECK_NAME: &str = "missing-require-auth";
 
 /// Flags `#[contractimpl]` methods that write via `env.storage()` without calling
-/// `env.require_auth()` on the `Env` parameter (typically named `env`).
+/// `<env_param>.require_auth()` where `<env_param>` is the actual name of the `Env` parameter.
 pub struct MissingRequireAuthCheck;
 
 impl Check for MissingRequireAuthCheck {
@@ -20,7 +20,8 @@ impl Check for MissingRequireAuthCheck {
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         for method in contractimpl_functions(file) {
-            let mut scan = FuncBodyScan::default();
+            let env_param = env_param_name(&method.sig);
+            let mut scan = FuncBodyScan::new(env_param.as_deref());
             scan.visit_block(&method.block);
             if !scan.storage_write || scan.env_require_auth || scan.auth_helper_called {
                 continue;
@@ -28,6 +29,7 @@ impl Check for MissingRequireAuthCheck {
             let line = first_storage_write_line(&method.block)
                 .unwrap_or_else(|| method.sig.ident.span().start().line);
             let fn_name = method.sig.ident.to_string();
+            let env_name = env_param.as_deref().unwrap_or("env");
             out.push(Finding {
                 check_name: CHECK_NAME.to_string(),
                 severity: Severity::High,
@@ -35,18 +37,47 @@ impl Check for MissingRequireAuthCheck {
                 line,
                 function_name: fn_name.clone(),
                 description: format!(
-                    "Method `{fn_name}` writes to `env.storage()` but does not call \
-                     `env.require_auth()`. Callers may mutate contract state without proving \
+                    "Method `{fn_name}` writes to `{env_name}.storage()` but does not call \
+                     `{env_name}.require_auth()`. Callers may mutate contract state without proving \
                      they are authorized."
                 ),
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-require-auth-high"
                         .to_string(),
                 ),
+                suggestion: Some(format!(
+                    "Add `{env_name}.require_auth();` as the first statement in the function body."
+                )),
             });
         }
         out
     }
+}
+
+/// Returns the name of the first parameter whose type is `Env` (or `soroban_sdk::Env`).
+fn env_param_name(sig: &syn::Signature) -> Option<String> {
+    for arg in &sig.inputs {
+        let FnArg::Typed(pat_type) = arg else {
+            continue;
+        };
+        if !type_is_env(&pat_type.ty) {
+            continue;
+        }
+        if let Pat::Ident(ident) = &*pat_type.pat {
+            return Some(ident.ident.to_string());
+        }
+    }
+    None
+}
+
+fn type_is_env(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "Env")
 }
 
 fn receiver_chain_contains_storage(expr: &Expr) -> bool {
@@ -73,28 +104,39 @@ fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
     receiver_chain_contains_storage(&m.receiver)
 }
 
-fn is_env_require_auth(m: &ExprMethodCall) -> bool {
+fn is_env_require_auth(m: &ExprMethodCall, env_name: &str) -> bool {
     if m.method != "require_auth" {
         return false;
     }
     match &*m.receiver {
-        Expr::Path(p) => p.path.is_ident("env"),
+        Expr::Path(p) => p.path.is_ident(env_name),
         _ => false,
     }
 }
 
-fn is_auth_helper_method_call(m: &ExprMethodCall) -> bool {
+fn is_auth_helper_method_call(m: &ExprMethodCall, env_name: &str) -> bool {
     let name = m.method.to_string();
-    let is_helper = name.starts_with("assert_auth") || name.starts_with("check_auth") || 
-        (name.starts_with("require_auth") && !is_env_require_auth(m) && !matches!(&*m.receiver, Expr::Path(_)));
-    is_helper
+    name.starts_with("assert_auth")
+        || name.starts_with("check_auth")
+        || (name.starts_with("require_auth") && !is_env_require_auth(m, env_name) && !matches!(&*m.receiver, Expr::Path(_)))
 }
 
-#[derive(Default)]
 struct FuncBodyScan {
+    env_name: String,
     storage_write: bool,
     env_require_auth: bool,
     auth_helper_called: bool,
+}
+
+impl FuncBodyScan {
+    fn new(env_name: Option<&str>) -> Self {
+        Self {
+            env_name: env_name.unwrap_or("env").to_string(),
+            storage_write: false,
+            env_require_auth: false,
+            auth_helper_called: false,
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for FuncBodyScan {
@@ -102,10 +144,10 @@ impl<'ast> Visit<'ast> for FuncBodyScan {
         if is_storage_mutation_call(i) {
             self.storage_write = true;
         }
-        if is_env_require_auth(i) {
+        if is_env_require_auth(i, &self.env_name) {
             self.env_require_auth = true;
         }
-        if is_auth_helper_method_call(i) {
+        if is_auth_helper_method_call(i, &self.env_name) {
             self.auth_helper_called = true;
         }
         visit::visit_expr_method_call(self, i);
@@ -269,6 +311,47 @@ impl Contract {
 "#,
         )?;
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_when_env_param_renamed_and_no_auth() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn set_balance(e: Env, amount: i128) {
+        e.storage().persistent().set(&Symbol::new(&e, "bal"), &amount);
+    }
+}
+"#,
+        )?;
+        assert_eq!(hits.len(), 1, "renamed param `e` should still be flagged");
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_renamed_env_param_has_require_auth() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn set_balance(e: Env, amount: i128) {
+        e.require_auth();
+        e.storage().persistent().set(&Symbol::new(&e, "bal"), &amount);
+    }
+}
+"#,
+        )?;
+        assert!(hits.is_empty(), "e.require_auth() should satisfy the check");
         Ok(())
     }
 }
