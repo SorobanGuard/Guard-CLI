@@ -92,6 +92,9 @@ NO_COLOR=1 soroban-guard scan ./path/to/contract-crate
 
 ## Workspace Scaffold
 
+See [Architecture](docs/architecture.md) for the crate dependency graph, scan data flow, key
+types, and extension points.
+
 ```
 Guard-CLI/
 ├── Cargo.toml                  # workspace root

@@ -2,6 +2,9 @@
 
 Thank you for helping improve the static analyzer. This guide covers **local setup**, a **short `syn` tutorial with examples**, **how to add a check** (using `auth.rs` as a template), and **how to write test contracts**.
 
+Read the [architecture overview](docs/architecture.md) first for the crate dependency graph,
+scan data flow, and core types.
+
 ## Local development setup
 
 1. **Install Rust** (1.74 or newer recommended) using [rustup](https://rustup.rs/):
