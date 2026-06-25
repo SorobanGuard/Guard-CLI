@@ -4,7 +4,7 @@ use crate::util::contractimpl_functions;
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, ExprMethodCall, File, Visibility};
+use syn::{Block, Expr, ExprIf, ExprMethodCall, File, Visibility};
 
 const CHECK_NAME: &str = "unprotected-admin";
 
@@ -69,15 +69,34 @@ impl Check for UnprotectedAdminCheck {
     }
 }
 
+fn receiver_chain_contains_storage(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(m) => {
+            if m.method == "storage" {
+                return true;
+            }
+            receiver_chain_contains_storage(&m.receiver)
+        }
+        Expr::Field(f) => receiver_chain_contains_storage(&f.base),
+        _ => false,
+    }
+}
+
+fn is_storage_read_call(m: &ExprMethodCall) -> bool {
+    m.method == "get" && receiver_chain_contains_storage(&m.receiver)
+}
+
 fn body_has_auth_gate(block: &Block) -> bool {
     let mut v = AuthGateScan::default();
     v.visit_block(block);
-    v.found
+    v.found || v.storage_read_and_conditional
 }
 
 #[derive(Default)]
 struct AuthGateScan {
     found: bool,
+    storage_read: bool,
+    storage_read_and_conditional: bool,
 }
 
 impl<'ast> Visit<'ast> for AuthGateScan {
@@ -86,7 +105,18 @@ impl<'ast> Visit<'ast> for AuthGateScan {
         if matches!(m.as_str(), "require_auth" | "require_auth_for_args") {
             self.found = true;
         }
+        if is_storage_read_call(i) {
+            self.storage_read = true;
+        }
         visit::visit_expr_method_call(self, i);
+    }
+
+    fn visit_expr_if(&mut self, i: &'ast ExprIf) {
+        let had_storage_read_before = self.storage_read;
+        visit::visit_expr_if(self, i);
+        if had_storage_read_before {
+            self.storage_read_and_conditional = true;
+        }
     }
 }
 

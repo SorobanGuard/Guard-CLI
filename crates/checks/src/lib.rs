@@ -2,12 +2,16 @@
 
 pub mod admin;
 pub mod auth;
+pub mod events;
+pub mod key_collision;
 pub mod overflow;
 pub mod storage;
 mod util;
 
 pub use admin::UnprotectedAdminCheck;
 pub use auth::MissingRequireAuthCheck;
+pub use events::MissingEventEmissionCheck;
+pub use key_collision::SymbolKeyCollisionCheck;
 pub use overflow::UncheckedArithmeticCheck;
 pub use storage::UnsafeStoragePatternsCheck;
 
@@ -51,5 +55,7 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UncheckedArithmeticCheck),
         Box::new(UnprotectedAdminCheck),
         Box::new(UnsafeStoragePatternsCheck),
+        Box::new(SymbolKeyCollisionCheck),
+        Box::new(MissingEventEmissionCheck),
     ]
 }

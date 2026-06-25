@@ -22,7 +22,7 @@ impl Check for MissingRequireAuthCheck {
         for method in contractimpl_functions(file) {
             let mut scan = FuncBodyScan::default();
             scan.visit_block(&method.block);
-            if !scan.storage_write || scan.env_require_auth {
+            if !scan.storage_write || scan.env_require_auth || scan.auth_helper_called {
                 continue;
             }
             let line = first_storage_write_line(&method.block)
@@ -79,10 +79,18 @@ fn is_env_require_auth(m: &ExprMethodCall) -> bool {
     }
 }
 
+fn is_auth_helper_method_call(m: &ExprMethodCall) -> bool {
+    let name = m.method.to_string();
+    let is_helper = name.starts_with("assert_auth") || name.starts_with("check_auth") || 
+        (name.starts_with("require_auth") && !is_env_require_auth(m) && !matches!(&*m.receiver, Expr::Path(_)));
+    is_helper
+}
+
 #[derive(Default)]
 struct FuncBodyScan {
     storage_write: bool,
     env_require_auth: bool,
+    auth_helper_called: bool,
 }
 
 impl<'ast> Visit<'ast> for FuncBodyScan {
@@ -92,6 +100,9 @@ impl<'ast> Visit<'ast> for FuncBodyScan {
         }
         if is_env_require_auth(i) {
             self.env_require_auth = true;
+        }
+        if is_auth_helper_method_call(i) {
+            self.auth_helper_called = true;
         }
         visit::visit_expr_method_call(self, i);
     }
