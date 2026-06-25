@@ -4,7 +4,7 @@ use crate::util::contractimpl_functions;
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, ExprMethodCall, File, Visibility};
+use syn::{Block, Expr, ExprIf, ExprMethodCall, File, Visibility};
 
 const CHECK_NAME: &str = "unprotected-admin";
 
@@ -29,6 +29,10 @@ const SENSITIVE_NAMES: &[&str] = &[
     "kill",
 ];
 
+/// Prefixes that mark a function as sensitive (e.g., `set_admin_fee`, `pause_withdrawals`,
+/// `emergency_shutdown`).
+const SENSITIVE_PREFIXES: &[&str] = &["set_admin", "pause_", "emergency_"];
+
 /// `pub` methods whose name matches a sensitive admin pattern and whose body never calls
 /// `require_auth` or `require_auth_for_args` (any receiver).
 pub struct UnprotectedAdminCheck;
@@ -45,7 +49,7 @@ impl Check for UnprotectedAdminCheck {
                 continue;
             }
             let name = method.sig.ident.to_string();
-            if !SENSITIVE_NAMES.contains(&name.as_str()) {
+            if !is_sensitive_name(&name) {
                 continue;
             }
             if body_has_auth_gate(&method.block) {
@@ -73,15 +77,34 @@ impl Check for UnprotectedAdminCheck {
     }
 }
 
+fn receiver_chain_contains_storage(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(m) => {
+            if m.method == "storage" {
+                return true;
+            }
+            receiver_chain_contains_storage(&m.receiver)
+        }
+        Expr::Field(f) => receiver_chain_contains_storage(&f.base),
+        _ => false,
+    }
+}
+
+fn is_storage_read_call(m: &ExprMethodCall) -> bool {
+    m.method == "get" && receiver_chain_contains_storage(&m.receiver)
+}
+
 fn body_has_auth_gate(block: &Block) -> bool {
     let mut v = AuthGateScan::default();
     v.visit_block(block);
-    v.found
+    v.found || v.storage_read_and_conditional
 }
 
 #[derive(Default)]
 struct AuthGateScan {
     found: bool,
+    storage_read: bool,
+    storage_read_and_conditional: bool,
 }
 
 impl<'ast> Visit<'ast> for AuthGateScan {
@@ -90,7 +113,18 @@ impl<'ast> Visit<'ast> for AuthGateScan {
         if matches!(m.as_str(), "require_auth" | "require_auth_for_args") {
             self.found = true;
         }
+        if is_storage_read_call(i) {
+            self.storage_read = true;
+        }
         visit::visit_expr_method_call(self, i);
+    }
+
+    fn visit_expr_if(&mut self, i: &'ast ExprIf) {
+        let had_storage_read_before = self.storage_read;
+        visit::visit_expr_if(self, i);
+        if had_storage_read_before {
+            self.storage_read_and_conditional = true;
+        }
     }
 }
 
@@ -184,6 +218,50 @@ impl C {
         )?;
         let hits = UnprotectedAdminCheck.run(&file, "");
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prefix_match_set_admin_fee() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn set_admin_fee(env: Env, fee: i128) {
+        let _ = (env, fee);
+    }
+}
+"#,
+        )?;
+        let hits = UnprotectedAdminCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function_name, "set_admin_fee");
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prefix_match_pause_withdrawals() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn pause_withdrawals(env: Env) {
+        let _ = env;
+    }
+}
+"#,
+        )?;
+        let hits = UnprotectedAdminCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function_name, "pause_withdrawals");
         Ok(())
     }
 

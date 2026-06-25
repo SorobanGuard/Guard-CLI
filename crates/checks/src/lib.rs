@@ -2,14 +2,20 @@
 
 pub mod admin;
 pub mod auth;
+pub mod hardcoded_address;
 pub mod overflow;
+pub mod std_imports;
 pub mod storage;
+pub mod ttl;
 mod util;
 
 pub use admin::UnprotectedAdminCheck;
 pub use auth::MissingRequireAuthCheck;
+pub use hardcoded_address::HardcodedAddressCheck;
 pub use overflow::UncheckedArithmeticCheck;
+pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
+pub use ttl::MissingTtlExtensionCheck;
 
 use serde::Serialize;
 use syn::File;
@@ -54,5 +60,8 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UncheckedArithmeticCheck),
         Box::new(UnprotectedAdminCheck),
         Box::new(UnsafeStoragePatternsCheck),
+        Box::new(MissingTtlExtensionCheck),
+        Box::new(ForbiddenStdImportsCheck),
+        Box::new(HardcodedAddressCheck),
     ]
 }

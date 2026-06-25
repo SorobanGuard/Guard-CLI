@@ -10,4 +10,5 @@ soroban-guard-checks = { path = "../checks" }
 syn.workspace = true
 serde.workspace = true
 walkdir.workspace = true
+glob.workspace = true
 thiserror.workspace = true

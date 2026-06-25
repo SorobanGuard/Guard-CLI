@@ -56,6 +56,30 @@ Output as JSON (useful for CI pipelines or the web dashboard):
 cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --json
 ```
 
+Write JSON to a file instead of stdout:
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --json --output findings.json
+```
+
+Emit SARIF 2.1.0 for GitHub Code Scanning:
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --sarif > findings.sarif
+```
+
+List the checks that run by default:
+
+```bash
+cargo run -p soroban-guard-cli -- list-checks
+```
+
+For plain terminal output, disable ANSI colors with:
+
+```bash
+NO_COLOR=1 soroban-guard scan ./path/to/contract-crate
+```
+
 ### Exit codes
 
 | Code | Meaning |
@@ -189,6 +213,8 @@ Guard CLI is designed to sit at the gate of your Stellar deployment pipeline. So
 - Runs purely on Rust source — no Stellar SDK, no network connection, no wallet required.
 - Exit code `1` on High findings lets CI block a deploy automatically.
 - `--json` output can be piped into any dashboard or audit log.
+- `--sarif` emits SARIF 2.1.0 for GitHub Advanced Security and other code scanning integrations.
+- `--output findings.json` writes JSON output to disk for CI logs that should stay clean.
 
 ### Deployment workflow
 
@@ -216,7 +242,7 @@ stellar contract deploy \
 
 ```yaml
 - name: Guard CLI scan
-  run: cargo run -p soroban-guard-cli -- scan ./my-contract
+  run: cargo run -p soroban-guard-cli -- scan ./my-contract --sarif --output findings.sarif
   # exits 1 on High findings — blocks the workflow
 
 - name: Build WASM
