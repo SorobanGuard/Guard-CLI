@@ -56,3 +56,6 @@ jobs:
 
       - name: Run doc tests
         run: cargo test --doc --workspace --verbose
+
+      - name: Example SARIF export
+        run: cargo run -p soroban-guard-cli -- scan test-contracts/vulnerable --sarif --output /tmp/findings.sarif
