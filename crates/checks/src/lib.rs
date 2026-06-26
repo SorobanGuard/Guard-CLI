@@ -19,8 +19,6 @@ pub mod ttl;
 pub mod xc_input;
 pub mod zero_address;
 mod util;
-pub mod xc_input;
-pub mod zero_address;
 
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
@@ -98,5 +96,6 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(SymbolKeyCollisionCheck),
         Box::new(SelfTransferCheck),
         Box::new(MissingZeroAddressCheck),
+        Box::new(MutableGlobalStateCheck),
     ]
 }
