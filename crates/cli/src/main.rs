@@ -40,6 +40,9 @@ enum Commands {
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
+        /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
+        #[arg(long, default_value = "high")]
+        fail_on: String,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -56,6 +59,7 @@ fn main() {
             output,
             quiet,
             include,
+            fail_on,
         } => {
             // Mutual exclusion
             let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
@@ -67,15 +71,21 @@ fn main() {
                 std::process::exit(2);
             }
 
+            let fail_threshold = match fail_on.to_lowercase().as_str() {
+                "medium" => Severity::Medium,
+                "low" => Severity::Low,
+                _ => Severity::High,
+            };
+
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
                 Ok((findings, files_scanned)) => {
-                    let any_high = findings
+                    let should_fail = findings
                         .iter()
-                        .any(|f| matches!(f.severity, Severity::High));
+                        .any(|f| f.severity <= fail_threshold);
 
                     if json {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             match json_payload(&findings, files_scanned) {
                                 Ok(payload) => {
                                     if let Some(ref out_path) = output {
@@ -94,7 +104,7 @@ fn main() {
                             }
                         }
                     } else if sarif {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             let payload =
                                 serde_json::to_string_pretty(&build_sarif(&findings)).unwrap();
                             if let Some(ref out_path) = output {
@@ -107,17 +117,15 @@ fn main() {
                             }
                         }
                     } else if markdown {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             print_markdown(&findings);
                         }
-                    } else {
-                        if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
-                        }
-                        Some(files)
+                    } else if !quiet || should_fail {
+                        let (display, truncated) = truncate(&findings, 0);
+                        print_pretty(display, files_scanned, path.display().to_string(), truncated);
                     }
 
-                    if any_high {
+                    if should_fail {
                         std::process::exit(1);
                     }
                 }
