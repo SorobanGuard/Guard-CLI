@@ -112,11 +112,6 @@ impl Visit<'_> for ArithVisitor<'_> {
                 _ => "?",
             };
             let severity = infer_severity(i);
-            let url_fragment = match severity {
-                Severity::High => "unchecked-arithmetic-high",
-                Severity::Low => "unchecked-arithmetic-low",
-                _ => "unchecked-arithmetic-medium",
-            };
             self.out.push(Finding {
                 check_name: CHECK_NAME.to_string(),
                 severity,

@@ -33,7 +33,10 @@ impl Check for ForbiddenStdImportsCheck {
                          `std::` import will break the WASM build.",
                         trimmed.trim_end_matches(';')
                     ),
-                    rule_url: None,
+                    rule_url: Some(
+                        "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#forbidden-std-imports-high"
+                            .to_string(),
+                    ),
                     suggestion: Some(
                         "Remove the `use std::` import or replace with a `no_std`-compatible alternative."
                             .to_string(),

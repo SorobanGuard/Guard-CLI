@@ -21,7 +21,10 @@ impl Check for IntegerDivisionTruncationCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions(file) {
             let fn_name = method.sig.ident.to_string();
-            let mut v = DivVisitor { fn_name: fn_name.clone(), out: &mut out };
+            let mut v = DivVisitor {
+                fn_name: fn_name.clone(),
+                out: &mut out,
+            };
             v.visit_block(&method.block);
         }
         out
@@ -65,6 +68,7 @@ impl Visit<'_> for DivVisitor<'_> {
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#integer-division-truncation-medium"
                         .to_string(),
                 ),
+                suggestion: None,
             });
         }
         visit::visit_expr_binary(self, i);

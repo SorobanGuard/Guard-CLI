@@ -258,6 +258,26 @@ mod tests {
     }
 
     #[test]
+    fn json_payload_includes_rule_url() {
+        let rule_url =
+            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-require-auth-high";
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/lib.rs".to_string(),
+            line: 10,
+            function_name: "set_balance".to_string(),
+            description: "Missing auth".to_string(),
+            rule_url: Some(rule_url.to_string()),
+            suggestion: None,
+        }];
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&json_payload(&findings).unwrap()).unwrap();
+        assert_eq!(payload["findings"][0]["rule_url"], rule_url);
+    }
+
+    #[test]
     fn writes_payload_to_file() {
         let path = std::env::temp_dir().join(format!(
             "soroban-guard-test-{}-{}.json",

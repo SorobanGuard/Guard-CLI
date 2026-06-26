@@ -2,7 +2,6 @@
 
 use crate::util::contractimpl_functions;
 use crate::{Check, Finding, Severity};
-use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{File, FnArg, Pat, PatType, Type, TypePath};
 
@@ -81,9 +80,8 @@ impl<'ast> Visit<'ast> for BodyScan {
         visit::visit_expr_method_call(self, i);
     }
 
-    fn visit_expr_macro(&mut self, i: &'ast syn::ExprMacro) {
-        let name = i
-            .mac
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let name = mac
             .path
             .segments
             .last()
@@ -92,7 +90,7 @@ impl<'ast> Visit<'ast> for BodyScan {
         if matches!(name.as_str(), "assert" | "require") {
             self.has_guard = true;
         }
-        visit::visit_expr_macro(self, i);
+        visit::visit_macro(self, mac);
     }
 }
 
@@ -134,6 +132,7 @@ impl Check for MissingZeroAddressCheck {
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-zero-address-check-medium"
                         .to_string(),
                 ),
+                suggestion: None,
             });
         }
         out
