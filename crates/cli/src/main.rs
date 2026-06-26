@@ -114,6 +114,7 @@ fn main() {
                         if !quiet || any_high {
                             print_pretty(&findings, files_scanned, path.display().to_string());
                         }
+                        Some(files)
                     }
 
                     if any_high {
@@ -396,12 +397,17 @@ fn print_pretty(
                 Severity::Medium => "MEDIUM".magenta().bold(),
                 Severity::Low => "LOW".white(),
             };
+            let check = match f.severity {
+                Severity::High => f.check_name.red(),
+                Severity::Medium => f.check_name.magenta(),
+                Severity::Low => f.check_name.white(),
+            };
             println!(
                 "  {}  {}  {}  {}",
                 format!("[{}]", i + 1).dimmed(),
                 sev,
                 format!("{}:{}", f.file_path, f.line).bright_white(),
-                f.check_name.cyan()
+                check
             );
             println!("         {} `{}`", "function:".dimmed(), f.function_name);
             println!("         {}", f.description);

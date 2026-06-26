@@ -3,6 +3,7 @@
 //! Each [`Check`](soroban_guard_checks::Check) runs independently on the same parsed file;
 //! findings are concatenated with **no shared mutable state** between checks.
 
+use rayon::prelude::*;
 use soroban_guard_checks::{default_checks, Finding};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -84,8 +85,11 @@ pub fn scan_directory(
 
     let mut findings: Vec<Finding> = entries
         .par_iter()
-        .map(|entry| {
-            let path = entry.path();
+        .map(|path| {
+            if verbose {
+                let label = path.strip_prefix(&root).unwrap_or(path);
+                eprintln!("scanning {}", label.display());
+            }
             let content = std::fs::read_to_string(path)?;
             let syn_file = syn::parse_file(&content).map_err(|error| ScanError::Parse {
                 path: path.to_path_buf(),
