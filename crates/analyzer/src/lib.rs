@@ -22,75 +22,65 @@ pub enum ScanError {
 /// `excludes` are glob patterns (e.g. `vendor/**`, `**/generated/*.rs`) matched against each
 /// file's path relative to `root`; matching files are skipped entirely.
 ///
-/// When `files` is `Some`, only those relative paths are scanned instead of walking `root`.
-/// When `verbose` is `true`, each file path is printed to stderr before scanning.
+/// `includes` are glob patterns; when non-empty only files matching at least one pattern are
+/// scanned. When `includes` is empty all `.rs` files (minus excludes) are scanned.
 pub fn scan_directory(
     root: &Path,
     excludes: &[String],
-    verbose: bool,
-    files: Option<&[PathBuf]>,
+    includes: &[String],
 ) -> Result<(Vec<Finding>, usize), ScanError> {
     let root = root.canonicalize()?;
     let exclude_patterns: Vec<glob::Pattern> = excludes
         .iter()
         .filter_map(|pattern| glob::Pattern::new(pattern).ok())
         .collect();
+    let include_patterns: Vec<glob::Pattern> = includes
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
+        .collect();
     let checks = default_checks();
 
-    let entries: Vec<PathBuf> = if let Some(specific_files) = files {
-        specific_files
-            .iter()
-            .filter_map(|f| {
-                let full_path = root.join(f);
-                if !full_path.is_file() {
-                    return None;
-                }
-                if full_path
-                    .components()
-                    .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
-                {
-                    return None;
-                }
-                if full_path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                    return None;
-                }
-                let file_label = full_path.strip_prefix(&root).unwrap_or(&full_path);
-                if exclude_patterns
+    let entries: Vec<_> = WalkDir::new(&root)
+        // Never follow symlinks: prevents infinite loops on symlink cycles.
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            if !entry.file_type().is_file() {
+                return false;
+            }
+
+            let path = entry.path();
+            if path
+                .components()
+                .any(|component| matches!(component.as_os_str().to_str(), Some("target" | ".git")))
+            {
+                return false;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                return false;
+            }
+
+            let file_label = path.strip_prefix(&root).unwrap_or(path);
+
+            if exclude_patterns
+                .iter()
+                .any(|pattern| pattern.matches_path(file_label) || pattern.matches_path(path))
+            {
+                return false;
+            }
+
+            if !include_patterns.is_empty()
+                && !include_patterns
                     .iter()
-                    .any(|p| p.matches_path(file_label) || p.matches_path(&full_path))
-                {
-                    return None;
-                }
-                Some(full_path)
-            })
-            .collect()
-    } else {
-        WalkDir::new(&root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                if !entry.file_type().is_file() {
-                    return false;
-                }
-                let path = entry.path();
-                if path
-                    .components()
-                    .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
-                {
-                    return false;
-                }
-                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                    return false;
-                }
-                let file_label = path.strip_prefix(&root).unwrap_or(path);
-                !exclude_patterns
-                    .iter()
-                    .any(|p| p.matches_path(file_label) || p.matches_path(path))
-            })
-            .map(|entry| entry.path().to_path_buf())
-            .collect()
-    };
+                    .any(|pattern| pattern.matches_path(file_label) || pattern.matches_path(path))
+            {
+                return false;
+            }
+
+            true
+        })
+        .collect();
     let files_scanned = entries.len();
 
     let mut findings: Vec<Finding> = entries
@@ -162,7 +152,29 @@ mod tests {
         fs::write(root.join("target/generated.rs"), "pub fn generated() {}").unwrap();
         fs::write(root.join("README.md"), "not Rust").unwrap();
 
-        let (_, files_scanned) = scan_directory(&root, &["src/excluded.rs".to_string()], false, None).unwrap();
+        let (_, files_scanned) =
+            scan_directory(&root, &["src/excluded.rs".to_string()], &[]).unwrap();
+
+        assert_eq!(files_scanned, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn include_filter_limits_scanned_files() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-include-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn a() {}").unwrap();
+        fs::write(root.join("src/other.rs"), "pub fn b() {}").unwrap();
+
+        let (_, files_scanned) =
+            scan_directory(&root, &[], &["src/lib.rs".to_string()]).unwrap();
 
         assert_eq!(files_scanned, 1);
         fs::remove_dir_all(root).unwrap();
