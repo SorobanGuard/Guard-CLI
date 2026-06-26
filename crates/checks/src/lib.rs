@@ -128,6 +128,34 @@ pub fn group_by_file<'a>(findings: &'a [Finding]) -> BTreeMap<&'a str, Vec<&'a F
     map
 }
 
+/// Group a flat findings slice by [`Severity`].
+///
+/// Returns a [`BTreeMap`] whose iteration order is **High → Medium → Low** (most
+/// severe first) thanks to the manual [`Ord`] implementation on [`Severity`].
+///
+/// # Example
+/// ```
+/// use soroban_guard_checks::{Finding, Severity, group_by_severity};
+///
+/// let findings = vec![
+///     Finding {
+///         check_name: "a".into(), severity: Severity::Low,
+///         file_path: "src/lib.rs".into(), line: 1,
+///         function_name: "f".into(), description: "d".into(),
+///         rule_url: None, suggestion: None,
+///     },
+/// ];
+/// let grouped = group_by_severity(&findings);
+/// assert!(grouped.contains_key(&Severity::Low));
+/// ```
+pub fn group_by_severity<'a>(findings: &'a [Finding]) -> BTreeMap<Severity, Vec<&'a Finding>> {
+    let mut map: BTreeMap<Severity, Vec<&'a Finding>> = BTreeMap::new();
+    for finding in findings {
+        map.entry(finding.severity).or_default().push(finding);
+    }
+    map
+}
+
 /// All checks executed by the analyzer (extend here as you add detectors).
 ///
 /// Checks are **stateless and isolated**: implementations must not use shared
@@ -199,6 +227,34 @@ mod tests {
     #[test]
     fn group_by_file_empty_slice_returns_empty_map() {
         let grouped = group_by_file(&[]);
+        assert!(grouped.is_empty());
+    }
+
+    // ── Issue 2: group_by_severity ────────────────────────────────────────────
+
+    #[test]
+    fn group_by_severity_spans_all_three_levels() {
+        let findings = vec![
+            make_finding("src/a.rs", Severity::Low),
+            make_finding("src/b.rs", Severity::High),
+            make_finding("src/c.rs", Severity::Medium),
+            make_finding("src/d.rs", Severity::High),
+        ];
+
+        let grouped = group_by_severity(&findings);
+
+        assert_eq!(grouped[&Severity::High].len(), 2);
+        assert_eq!(grouped[&Severity::Medium].len(), 1);
+        assert_eq!(grouped[&Severity::Low].len(), 1);
+
+        // Iteration order must be High → Medium → Low
+        let order: Vec<Severity> = grouped.keys().copied().collect();
+        assert_eq!(order, vec![Severity::High, Severity::Medium, Severity::Low]);
+    }
+
+    #[test]
+    fn group_by_severity_empty_slice_returns_empty_map() {
+        let grouped = group_by_severity(&[]);
         assert!(grouped.is_empty());
     }
 }
