@@ -269,3 +269,23 @@ Setting an admin or owner to `Address::default()` (the zero address) can permane
 - External validation in helper functions is not tracked.
 
 **Fixture:** tests in `crates/checks/src/zero_address.rs`
+
+---
+
+## `forbidden-std-imports` (High)
+
+**Status:** Phase 2
+
+**What it detects**
+
+Inside #[contractimpl] methods, detects use std::... or use ::std::... imports in the source file.
+
+**Why it matters**
+
+Soroban contracts compile to WebAssembly using #![no_std]. Importing items from std causes compilation to fail for WASM targets and indicates the contract cannot be deployed.
+
+**Limitations**
+
+File-level check only. It does not detect indirect std usage through re-exported types.
+
+**Fixture:** tests in `crates/checks/src/std_imports.rs`
