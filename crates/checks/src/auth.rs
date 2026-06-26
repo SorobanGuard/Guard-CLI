@@ -74,10 +74,7 @@ fn type_is_env(ty: &Type) -> bool {
     let Type::Path(tp) = ty else {
         return false;
     };
-    tp.path
-        .segments
-        .last()
-        .is_some_and(|s| s.ident == "Env")
+    tp.path.segments.last().is_some_and(|s| s.ident == "Env")
 }
 
 fn receiver_chain_contains_storage(expr: &Expr) -> bool {
@@ -104,7 +101,7 @@ fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
     receiver_chain_contains_storage(&m.receiver)
 }
 
-fn is_env_require_auth(m: &ExprMethodCall) -> bool {
+fn is_env_require_auth(m: &ExprMethodCall, env_name: &str) -> bool {
     if m.method != "require_auth" && m.method != "require_auth_for_args" {
         return false;
     }
@@ -118,7 +115,9 @@ fn is_auth_helper_method_call(m: &ExprMethodCall, env_name: &str) -> bool {
     let name = m.method.to_string();
     name.starts_with("assert_auth")
         || name.starts_with("check_auth")
-        || (name.starts_with("require_auth") && !is_env_require_auth(m, env_name) && !matches!(&*m.receiver, Expr::Path(_)))
+        || (name.starts_with("require_auth")
+            && !is_env_require_auth(m, env_name)
+            && !matches!(&*m.receiver, Expr::Path(_)))
 }
 
 struct FuncBodyScan {
@@ -270,7 +269,10 @@ impl Contract {
 }
 "#,
         )?;
-        assert!(hits.is_empty(), "require_auth_for_args should be a valid auth gate");
+        assert!(
+            hits.is_empty(),
+            "require_auth_for_args should be a valid auth gate"
+        );
         Ok(())
     }
 

@@ -13,7 +13,9 @@ const INDEX_NAMES: &[&str] = &["idx", "index", "count", "len", "offset", "pos", 
 /// Single-char index variables (exact match).
 const INDEX_CHARS: &[&str] = &["i", "j", "k", "n", "x", "y", "z"];
 /// Variable-name fragments that suggest financial math → upgrade to High.
-const FINANCIAL_NAMES: &[&str] = &["amount", "balance", "fee", "price", "supply", "reward", "stake", "fund", "value", "total"];
+const FINANCIAL_NAMES: &[&str] = &[
+    "amount", "balance", "fee", "price", "supply", "reward", "stake", "fund", "value", "total",
+];
 
 fn severity_for_operand_name(name: &str) -> Option<Severity> {
     let lower = name.to_lowercase();
@@ -130,6 +132,7 @@ impl Visit<'_> for ArithVisitor<'_> {
                 rule_url: Some(format!(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#{url_fragment}"
                 )),
+                suggestion: None,
             });
         }
         visit::visit_expr_binary(self, i);

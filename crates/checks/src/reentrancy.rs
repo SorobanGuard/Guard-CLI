@@ -41,6 +41,7 @@ impl Check for ReentrancyRiskCheck {
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#reentrancy-risk-high"
                             .to_string(),
                     ),
+                    suggestion: None,
                 });
             }
         }
@@ -50,7 +51,10 @@ impl Check for ReentrancyRiskCheck {
 
 fn is_storage_write(m: &ExprMethodCall) -> bool {
     let name = m.method.to_string();
-    if !matches!(name.as_str(), "set" | "remove" | "extend_ttl" | "bump" | "append") {
+    if !matches!(
+        name.as_str(),
+        "set" | "remove" | "extend_ttl" | "bump" | "append"
+    ) {
         return false;
     }
     receiver_has_storage(&m.receiver)
