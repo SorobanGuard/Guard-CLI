@@ -3,7 +3,9 @@
 //! Each [`Check`](soroban_guard_checks::Check) runs independently on the same parsed file;
 //! findings are concatenated with **no shared mutable state** between checks.
 
+use rayon::prelude::*;
 use soroban_guard_checks::{default_checks, Finding};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -14,6 +16,12 @@ pub enum ScanError {
     Io(#[from] std::io::Error),
     #[error("Failed to parse {path}: {message}")]
     Parse { path: PathBuf, message: String },
+    #[error("Check `{check}` panicked on {path}: {message}")]
+    CheckPanic {
+        check: String,
+        path: PathBuf,
+        message: String,
+    },
 }
 
 /// Recursively scan `.rs` files under `root` and aggregate findings from every check.
@@ -101,11 +109,33 @@ pub fn scan_directory(
             let file_findings = checks
                 .iter()
                 .flat_map(|check| {
-                    let mut from_check = check.run(&syn_file, &content);
-                    for finding in &mut from_check {
-                        finding.file_path.clone_from(&file_label);
-                    }
-                    from_check
+                    let check_name = check.name().to_string();
+                    let from_check = catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content)));
+                    let mut findings = match from_check {
+                        Ok(mut hits) => {
+                            for finding in &mut hits {
+                                finding.file_path.clone_from(&file_label);
+                            }
+                            hits
+                        }
+                        Err(payload) => {
+                            let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                                msg.to_string()
+                            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                                msg.clone()
+                            } else {
+                                "panic payload was not a string".to_string()
+                            };
+                            let scan_error = ScanError::CheckPanic {
+                                check: check_name.clone(),
+                                path: path.to_path_buf(),
+                                message,
+                            };
+                            eprintln!("warning: {}", scan_error);
+                            Vec::new()
+                        }
+                    };
+                    findings
                 })
                 .collect();
 
@@ -129,7 +159,22 @@ pub fn scan_directory(
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn scan_error_check_panic_format() {
+        let err = ScanError::CheckPanic {
+            check: "example-check".to_string(),
+            path: PathBuf::from("src/lib.rs"),
+            message: "unexpected AST shape".to_string(),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "Check `example-check` panicked on src/lib.rs: unexpected AST shape"
+        );
+    }
 
     #[test]
     fn reports_scanned_rust_file_count_after_filters() {
