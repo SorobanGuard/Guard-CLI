@@ -269,3 +269,79 @@ Setting an admin or owner to `Address::default()` (the zero address) can permane
 - External validation in helper functions is not tracked.
 
 **Fixture:** tests in `crates/checks/src/zero_address.rs`
+
+---
+
+## `re-initialization-risk` (High)
+
+**What it detects**
+
+Public functions inside `#[contractimpl]` whose name contains `init`, `initialize`, or `setup`, that write to storage via `.set()` without a guard such as `.has()`, `.is_some()`, `.is_none()`, `require!`, or `panic!`.
+
+**Why it matters**
+
+Without a one-time guard, an attacker can call `initialize` again to overwrite the owner or reset critical contract state.
+
+**Limitations**
+
+- Name-based heuristic; rename-based patterns (e.g. `bootstrap`) are not detected.
+- Any `.has()` / `.is_some()` anywhere in the function body clears the finding regardless of control-flow.
+
+**Fixture:** `test-contracts/reinit-vulnerable/`, `test-contracts/reinit-safe/`
+
+---
+
+## `unchecked-invoke-return` (Medium)
+
+**What it detects**
+
+Inside `#[contractimpl]` methods, any call to `env.invoke_contract(…)` that appears as a standalone expression statement (semicolon-terminated, not bound to a variable), meaning the return value is silently discarded.
+
+**Why it matters**
+
+Cross-contract calls may fail. Discarding the return value silently swallows errors and can leave the calling contract in an inconsistent state.
+
+**Limitations**
+
+- Only flags the syntactic pattern of a bare statement; does not track data flow.
+- `let _ = env.invoke_contract(…);` suppresses the warning even though the value is technically dropped.
+
+**Fixture:** `test-contracts/invoke-return-vulnerable/`, `test-contracts/invoke-return-safe/`
+
+---
+
+## `missing-balance-check` (High)
+
+**What it detects**
+
+Inside `#[contractimpl]` methods, any call to `transfer` or `transfer_from` where the same function body contains no call to `balance()` or `authorized()`.
+
+**Why it matters**
+
+Attempting a transfer without verifying the sender has sufficient funds can cause a runtime panic, disrupting multi-step atomic operations.
+
+**Limitations**
+
+- Purely syntactic: the `balance()` call may be on a different token client or unrelated receiver.
+- Does not verify that the balance check precedes the transfer in control flow.
+
+**Fixture:** `test-contracts/balance-vulnerable/`, `test-contracts/balance-safe/`
+
+---
+
+## `unbounded-vec-growth` (Medium)
+
+**What it detects**
+
+Inside `#[contractimpl]` methods, any pattern where a value is read from storage via `.get()`, `.push()` / `.push_back()` / `.append()` is called on it, the result is written back via `.set()`, and no `.len()` call appears in the same function body.
+
+**Why it matters**
+
+Soroban ledger entries have a fixed size limit. A Vec that grows unboundedly across calls will eventually cause the entry to exceed the limit, permanently bricking the contract.
+
+**Limitations**
+
+- Heuristic: any `.len()` call in the function clears the finding even if no cap is enforced.
+- Does not detect growth via helper functions called from the flagged method.
+
+**Fixture:** `test-contracts/vec-growth-vulnerable/`, `test-contracts/vec-growth-safe/`
