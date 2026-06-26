@@ -11,6 +11,8 @@ pub mod global_state;
 pub mod hardcoded_address;
 pub mod invoke_return;
 pub mod key_collision;
+pub mod large_loop;
+pub mod missing_nonce;
 pub mod overflow;
 pub mod panics;
 pub mod reentrancy;
@@ -19,6 +21,8 @@ pub mod std_imports;
 pub mod storage;
 pub mod transfer;
 pub mod ttl;
+pub mod unchecked_token_amount;
+pub mod unprotected_upgrade;
 pub mod vec_growth;
 pub mod xc_input;
 pub mod zero_address;
@@ -35,6 +39,8 @@ pub use global_state::MutableGlobalStateCheck;
 pub use hardcoded_address::HardcodedAddressCheck;
 pub use invoke_return::UncheckedInvokeReturnCheck;
 pub use key_collision::SymbolKeyCollisionCheck;
+pub use large_loop::LargeLoopCheck;
+pub use missing_nonce::MissingNonceCheck;
 pub use overflow::UncheckedArithmeticCheck;
 pub use panics::PanicInContractCheck;
 pub use reentrancy::ReentrancyRiskCheck;
@@ -43,6 +49,8 @@ pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
 pub use transfer::SelfTransferCheck;
 pub use ttl::MissingTtlExtensionCheck;
+pub use unchecked_token_amount::UncheckedTokenAmountCheck;
+pub use unprotected_upgrade::UnprotectedUpgradeCheck;
 pub use vec_growth::UnboundedVecGrowthCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
@@ -198,5 +206,9 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UncheckedInvokeReturnCheck),
         Box::new(MissingBalanceCheck),
         Box::new(UnboundedVecGrowthCheck),
+        Box::new(UnprotectedUpgradeCheck),
+        Box::new(UncheckedTokenAmountCheck),
+        Box::new(MissingNonceCheck),
+        Box::new(LargeLoopCheck),
     ]
 }

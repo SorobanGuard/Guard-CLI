@@ -345,3 +345,79 @@ Soroban ledger entries have a fixed size limit. A Vec that grows unboundedly acr
 - Does not detect growth via helper functions called from the flagged method.
 
 **Fixture:** `test-contracts/vec-growth-vulnerable/`, `test-contracts/vec-growth-safe/`
+
+---
+
+## `unprotected-upgrade` (High)
+
+**What it detects**
+
+Public functions in `#[contractimpl]` whose name contains `upgrade`, `migrate`, `set_wasm`, or `replace_wasm`, and whose body contains no call to `env.require_auth()` or `env.require_auth_for_args()`.
+
+**Why it matters**
+
+Contract upgrade functions are among the most privileged operations. Leaving them unprotected lets any caller upgrade the contract to arbitrary bytecode, resulting in complete takeover.
+
+**Limitations**
+
+- Name-based heuristic; custom upgrade function names are not detected.
+- Any `require_auth` call anywhere in the body clears the finding.
+
+**Fixture:** `test-contracts/upgrade-vulnerable/`, `test-contracts/upgrade-safe/`
+
+---
+
+## `unchecked-token-amount` (Medium)
+
+**What it detects**
+
+Method calls to `transfer`, `transfer_from`, `xfer`, or `mint` inside `#[contractimpl]` methods where the amount parameter is not validated to be greater than zero before the call.
+
+**Why it matters**
+
+Transferring zero or negative token amounts can silently succeed but waste ledger resources and may signal a logic bug. Some token implementations also allow fee extraction on zero-amount transfers.
+
+**Limitations**
+
+- Heuristic guard detection; complex validation logic may not be recognized.
+- Does not verify the guard precedes the transfer in all code paths.
+
+**Fixture:** `test-contracts/token-amount-vulnerable/`, `test-contracts/token-amount-safe/`
+
+---
+
+## `missing-nonce` (Medium)
+
+**What it detects**
+
+Public `#[contractimpl]` methods that mutate storage (via `set`, `remove`, `append`, `push`) and accept an Address parameter, but include no reference to `nonce`, `sequence`, `seq_num`, or `replay` in the function body.
+
+**Why it matters**
+
+Without replay protection, signed messages or operations can be submitted multiple times, potentially draining balances or duplicating state changes.
+
+**Limitations**
+
+- Heuristic based on identifier names; sophisticated replay protection patterns may not be recognized.
+- Does not verify nonce is actually checked against prior values.
+
+**Fixture:** `test-contracts/nonce-vulnerable/`, `test-contracts/nonce-safe/`
+
+---
+
+## `large-loop` (Medium)
+
+**What it detects**
+
+Loop constructs (`loop { … }` and `while …`) inside public `#[contractimpl]` methods.
+
+**Why it matters**
+
+Soroban contracts run under a CPU instruction limit. An unbounded loop can exhaust the compute budget, causing the transaction to fail and potentially bricking contract state mid-update.
+
+**Limitations**
+
+- Does not distinguish between bounded (for-loop over iterator) and unbounded loops.
+- Flags all loops; not all are necessarily harmful if bounds are externally enforced.
+
+**Fixture:** `test-contracts/large-loop-vulnerable/`, `test-contracts/large-loop-safe/`
