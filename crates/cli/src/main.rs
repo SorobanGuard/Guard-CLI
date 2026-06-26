@@ -22,12 +22,24 @@ enum Commands {
     Scan {
         /// Path to the contract crate or folder containing Rust sources
         path: PathBuf,
-        /// Print findings as JSON (`{ "findings": [...] }`)
+        /// Print findings as JSON (`{ "summary": {...}, "findings": [...] }`)
         #[arg(long)]
         json: bool,
+        /// Print findings as a SARIF 2.1.0 document
+        #[arg(long)]
+        sarif: bool,
+        /// Print findings as a Markdown table
+        #[arg(long)]
+        markdown: bool,
+        /// Write output to a file instead of stdout (applies to --json and --sarif)
+        #[arg(long)]
+        output: Option<PathBuf>,
         /// Suppress all output when there are zero High findings
         #[arg(long)]
         quiet: bool,
+        /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
+        #[arg(long)]
+        include: Option<String>,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -36,39 +48,89 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Scan { path, json, quiet } => match scan_directory(&path, &[]) {
-            Ok((findings, files_scanned)) => {
-                let any_high = findings
-                    .iter()
-                    .any(|f| matches!(f.severity, Severity::High));
-
-                if json {
-                    if !quiet || any_high {
-                        if let Err(e) = print_json(&findings) {
-                            eprintln!("{} {}", "error:".red().bold(), e);
-                            std::process::exit(2);
-                        }
-                    }
-                } else {
-                    if !quiet || any_high {
-                        print_pretty(&findings, files_scanned, path.display().to_string());
-                    }
-                }
-
-                if any_high {
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                if json {
-                    let envelope = serde_json::json!({ "error": e.to_string() });
-                    println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
-                } else {
-                    eprintln!("{} {}", "error:".red().bold(), e);
-                }
+        Commands::Scan {
+            path,
+            json,
+            sarif,
+            markdown,
+            output,
+            quiet,
+            include,
+        } => {
+            // Mutual exclusion
+            let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
+            if format_count > 1 {
+                eprintln!(
+                    "{} --json, --sarif, and --markdown are mutually exclusive",
+                    "error:".red().bold()
+                );
                 std::process::exit(2);
             }
-        },
+
+            let includes: Vec<String> = include.into_iter().collect();
+            match scan_directory(&path, &[], &includes) {
+                Ok((findings, files_scanned)) => {
+                    let any_high = findings
+                        .iter()
+                        .any(|f| matches!(f.severity, Severity::High));
+
+                    if json {
+                        if !quiet || any_high {
+                            match json_payload(&findings, files_scanned) {
+                                Ok(payload) => {
+                                    if let Some(ref out_path) = output {
+                                        if let Err(e) = write_output(out_path, &payload) {
+                                            eprintln!("{} {}", "error:".red().bold(), e);
+                                            std::process::exit(2);
+                                        }
+                                    } else {
+                                        println!("{payload}");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("{} {}", "error:".red().bold(), e);
+                                    std::process::exit(2);
+                                }
+                            }
+                        }
+                    } else if sarif {
+                        if !quiet || any_high {
+                            let payload =
+                                serde_json::to_string_pretty(&build_sarif(&findings)).unwrap();
+                            if let Some(ref out_path) = output {
+                                if let Err(e) = write_output(out_path, &payload) {
+                                    eprintln!("{} {}", "error:".red().bold(), e);
+                                    std::process::exit(2);
+                                }
+                            } else {
+                                println!("{payload}");
+                            }
+                        }
+                    } else if markdown {
+                        if !quiet || any_high {
+                            print_markdown(&findings);
+                        }
+                    } else {
+                        if !quiet || any_high {
+                            print_pretty(&findings, files_scanned, path.display().to_string());
+                        }
+                    }
+
+                    if any_high {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    if json {
+                        let envelope = serde_json::json!({ "error": e.to_string() });
+                        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+                    } else {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                    }
+                    std::process::exit(2);
+                }
+            }
+        }
         Commands::ListChecks => {
             for check in default_checks() {
                 let (severity, description) = describe_check(check.name());
@@ -157,14 +219,77 @@ fn write_output(path: &Path, payload: &str) -> Result<(), std::io::Error> {
     fs::write(path, payload)
 }
 
-fn print_json(findings: &[Finding]) -> Result<(), serde_json::Error> {
-    #[derive(serde::Serialize)]
-    struct Out<'a> {
-        findings: &'a [Finding],
-    }
+fn json_payload(findings: &[Finding], files_scanned: usize) -> Result<String, serde_json::Error> {
+    let high = findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::High))
+        .count();
+    let medium = findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::Medium))
+        .count();
+    let low = findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::Low))
+        .count();
 
-    println!("{}", serde_json::to_string_pretty(&Out { findings })?);
-    Ok(())
+    let envelope = serde_json::json!({
+        "summary": {
+            "total": findings.len(),
+            "high": high,
+            "medium": medium,
+            "low": low,
+            "files_scanned": files_scanned
+        },
+        "findings": findings
+    });
+
+    serde_json::to_string_pretty(&envelope)
+}
+
+fn print_markdown(findings: &[Finding]) {
+    println!("## Soroban Guard Findings\n");
+    if findings.is_empty() {
+        println!("No issues found.");
+        return;
+    }
+    println!("| # | Severity | File | Line | Check | Function |");
+    println!("|---|----------|------|------|-------|----------|");
+    for (i, f) in findings.iter().enumerate() {
+        let sev = match f.severity {
+            Severity::High => "**HIGH**".to_string(),
+            Severity::Medium => "MEDIUM".to_string(),
+            Severity::Low => "LOW".to_string(),
+        };
+        println!(
+            "| {} | {} | {} | {} | {} | {} |",
+            i + 1,
+            sev,
+            f.file_path,
+            f.line,
+            f.check_name,
+            f.function_name
+        );
+    }
+    let high = findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::High))
+        .count();
+    let medium = findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::Medium))
+        .count();
+    let low = findings
+        .iter()
+        .filter(|f| matches!(f.severity, Severity::Low))
+        .count();
+    println!(
+        "\n**{} finding(s): {} High, {} Medium, {} Low**",
+        findings.len(),
+        high,
+        medium,
+        low
+    );
 }
 
 fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
@@ -204,7 +329,7 @@ fn print_pretty(findings: &[Finding], files_scanned: usize, root_label: String) 
         for (i, f) in findings.iter().enumerate() {
             let sev = match f.severity {
                 Severity::High => "HIGH".red().bold(),
-                Severity::Medium => "MEDIUM".magenta().bold(), // #46 bold magenta
+                Severity::Medium => "MEDIUM".magenta().bold(),
                 Severity::Low => "LOW".white(),
             };
             println!(
@@ -273,8 +398,42 @@ mod tests {
         }];
 
         let payload: serde_json::Value =
-            serde_json::from_str(&json_payload(&findings).unwrap()).unwrap();
+            serde_json::from_str(&json_payload(&findings, 1).unwrap()).unwrap();
         assert_eq!(payload["findings"][0]["rule_url"], rule_url);
+    }
+
+    #[test]
+    fn json_payload_includes_summary_keys() {
+        let findings = vec![
+            Finding {
+                check_name: "missing-require-auth".to_string(),
+                severity: Severity::High,
+                file_path: "src/lib.rs".to_string(),
+                line: 10,
+                function_name: "set_balance".to_string(),
+                description: "Missing auth".to_string(),
+                rule_url: None,
+                suggestion: None,
+            },
+            Finding {
+                check_name: "unchecked-arithmetic".to_string(),
+                severity: Severity::Medium,
+                file_path: "src/lib.rs".to_string(),
+                line: 20,
+                function_name: "update".to_string(),
+                description: "Unchecked arithmetic".to_string(),
+                rule_url: None,
+                suggestion: None,
+            },
+        ];
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&json_payload(&findings, 3).unwrap()).unwrap();
+        assert_eq!(payload["summary"]["total"], 2);
+        assert_eq!(payload["summary"]["high"], 1);
+        assert_eq!(payload["summary"]["medium"], 1);
+        assert_eq!(payload["summary"]["low"], 0);
+        assert_eq!(payload["summary"]["files_scanned"], 3);
     }
 
     #[test]
@@ -291,6 +450,36 @@ mod tests {
         assert!(path.exists());
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("ok"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sarif_written_to_file_when_output_provided() {
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/lib.rs".to_string(),
+            line: 10,
+            function_name: "set_balance".to_string(),
+            description: "Missing auth".to_string(),
+            rule_url: None,
+            suggestion: None,
+        }];
+
+        let path = std::env::temp_dir().join(format!(
+            "soroban-guard-sarif-{}-{}.sarif",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let payload = serde_json::to_string_pretty(&build_sarif(&findings)).unwrap();
+        write_output(&path, &payload).unwrap();
+        assert!(path.exists());
+        let contents = fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["version"], "2.1.0");
         let _ = fs::remove_file(path);
     }
 
