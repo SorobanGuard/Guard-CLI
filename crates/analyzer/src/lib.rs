@@ -20,12 +20,20 @@ pub enum ScanError {
 ///
 /// `excludes` are glob patterns (e.g. `vendor/**`, `**/generated/*.rs`) matched against each
 /// file's path relative to `root`; matching files are skipped entirely.
+///
+/// `includes` are glob patterns; when non-empty only files matching at least one pattern are
+/// scanned. When `includes` is empty all `.rs` files (minus excludes) are scanned.
 pub fn scan_directory(
     root: &Path,
     excludes: &[String],
+    includes: &[String],
 ) -> Result<(Vec<Finding>, usize), ScanError> {
     let root = root.canonicalize()?;
     let exclude_patterns: Vec<glob::Pattern> = excludes
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
+        .collect();
+    let include_patterns: Vec<glob::Pattern> = includes
         .iter()
         .filter_map(|pattern| glob::Pattern::new(pattern).ok())
         .collect();
@@ -53,9 +61,23 @@ pub fn scan_directory(
             }
 
             let file_label = path.strip_prefix(&root).unwrap_or(path);
-            !exclude_patterns
+
+            if exclude_patterns
                 .iter()
                 .any(|pattern| pattern.matches_path(file_label) || pattern.matches_path(path))
+            {
+                return false;
+            }
+
+            if !include_patterns.is_empty()
+                && !include_patterns
+                    .iter()
+                    .any(|pattern| pattern.matches_path(file_label) || pattern.matches_path(path))
+            {
+                return false;
+            }
+
+            true
         })
         .collect();
     let files_scanned = entries.len();
@@ -126,7 +148,29 @@ mod tests {
         fs::write(root.join("target/generated.rs"), "pub fn generated() {}").unwrap();
         fs::write(root.join("README.md"), "not Rust").unwrap();
 
-        let (_, files_scanned) = scan_directory(&root, &["src/excluded.rs".to_string()]).unwrap();
+        let (_, files_scanned) =
+            scan_directory(&root, &["src/excluded.rs".to_string()], &[]).unwrap();
+
+        assert_eq!(files_scanned, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn include_filter_limits_scanned_files() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-include-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn a() {}").unwrap();
+        fs::write(root.join("src/other.rs"), "pub fn b() {}").unwrap();
+
+        let (_, files_scanned) =
+            scan_directory(&root, &[], &["src/lib.rs".to_string()]).unwrap();
 
         assert_eq!(files_scanned, 1);
         fs::remove_dir_all(root).unwrap();
