@@ -162,8 +162,14 @@ pub fn group_by_severity<'a>(findings: &'a [Finding]) -> BTreeMap<Severity, Vec<
 /// mutable static state or assume a particular invocation order. The analyzer
 /// runs each check against the same parsed `syn::File` independently and
 /// concatenates `Finding`s.
+///
+/// # Panics
+///
+/// Panics immediately if any two checks share the same [`Check::name`] string.
+/// This catches copy-paste errors when adding a new detector before they can
+/// cause silent finding collisions at runtime.
 pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
-    vec![
+    let checks: Vec<Box<dyn Check + Send + Sync>> = vec![
         Box::new(MissingRequireAuthCheck),
         Box::new(UncheckedArithmeticCheck),
         Box::new(UnprotectedAdminCheck),
@@ -179,12 +185,33 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(SymbolKeyCollisionCheck),
         Box::new(SelfTransferCheck),
         Box::new(MissingZeroAddressCheck),
-    ]
+    ];
+
+    // Detect copy-paste errors: two checks with the same name() would cause
+    // findings from one to silently intermix with findings from the other.
+    let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
+    let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+    assert_eq!(
+        names.len(),
+        unique.len(),
+        "duplicate check names detected in default_checks(): {:?}",
+        {
+            let mut seen = std::collections::HashSet::new();
+            names
+                .iter()
+                .filter(|&&n| !seen.insert(n))
+                .copied()
+                .collect::<Vec<_>>()
+        }
+    );
+
+    checks
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syn::File;
 
     fn make_finding(file_path: &str, severity: Severity) -> Finding {
         Finding {
@@ -256,5 +283,49 @@ mod tests {
     fn group_by_severity_empty_slice_returns_empty_map() {
         let grouped = group_by_severity(&[]);
         assert!(grouped.is_empty());
+    }
+
+    // ── Issue 3: duplicate check name assertion ───────────────────────────────
+
+    #[test]
+    fn default_checks_has_no_duplicate_names() {
+        // Calling default_checks() must not panic — verifies no real duplicates exist.
+        let checks = default_checks();
+        let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate check names detected in default_checks()")]
+    fn duplicate_check_name_panics_with_readable_message() {
+        struct DupCheck;
+        impl Check for DupCheck {
+            fn name(&self) -> &str {
+                "intentional-duplicate"
+            }
+            fn run(&self, _file: &File, _source: &str) -> Vec<Finding> {
+                vec![]
+            }
+        }
+
+        let checks: Vec<Box<dyn Check + Send + Sync>> =
+            vec![Box::new(DupCheck), Box::new(DupCheck)];
+
+        let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "duplicate check names detected in default_checks(): {:?}",
+            {
+                let mut seen = std::collections::HashSet::new();
+                names
+                    .iter()
+                    .filter(|&&n| !seen.insert(n))
+                    .copied()
+                    .collect::<Vec<_>>()
+            }
+        );
     }
 }
