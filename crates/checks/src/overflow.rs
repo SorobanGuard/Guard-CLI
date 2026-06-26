@@ -125,7 +125,7 @@ impl Visit<'_> for ArithVisitor<'_> {
                     self.fn_name
                 ),
                 rule_url: Some(format!(
-                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#{url_fragment}"
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-arithmetic"
                 )),
                 suggestion: None,
             });

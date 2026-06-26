@@ -28,6 +28,15 @@ enum Commands {
         /// Suppress all output when there are zero High findings
         #[arg(long)]
         quiet: bool,
+        /// Only scan files changed in the last commit (git diff HEAD)
+        #[arg(long)]
+        changed_files: bool,
+        /// Exit with code 1 if any finding exists (not just High)
+        #[arg(long)]
+        fail_on_any: bool,
+        /// Print each file path to stderr as it is scanned
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -36,37 +45,58 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Scan { path, json, quiet } => match scan_directory(&path, &[]) {
-            Ok((findings, files_scanned)) => {
-                let any_high = findings
-                    .iter()
-                    .any(|f| matches!(f.severity, Severity::High));
+        Commands::Scan { path, json, quiet, changed_files, fail_on_any, verbose } => {
+            let files = if changed_files {
+                match get_changed_rs_files(&path) {
+                    Ok(files) => {
+                        if files.is_empty() && !json {
+                            eprintln!("{} No changed .rs files found.", "warning:".yellow().bold());
+                        }
+                        Some(files)
+                    }
+                    Err(e) => {
+                        if !json {
+                            eprintln!("{} {e} — falling back to full scan.", "warning:".yellow().bold());
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
-                if json {
-                    if !quiet || any_high {
-                        if let Err(e) = print_json(&findings) {
-                            eprintln!("{} {}", "error:".red().bold(), e);
-                            std::process::exit(2);
+            match scan_directory(&path, &[], verbose, files.as_deref()) {
+                Ok((findings, files_scanned)) => {
+                    let any_high = findings
+                        .iter()
+                        .any(|f| matches!(f.severity, Severity::High));
+
+                    if json {
+                        if !quiet || any_high {
+                            if let Err(e) = print_json(&findings) {
+                                eprintln!("{} {}", "error:".red().bold(), e);
+                                std::process::exit(2);
+                            }
+                        }
+                    } else {
+                        if !quiet || any_high {
+                            print_pretty(&findings, files_scanned, path.display().to_string());
                         }
                     }
-                } else {
-                    if !quiet || any_high {
-                        print_pretty(&findings, files_scanned, path.display().to_string());
+
+                    if any_high || (fail_on_any && !findings.is_empty()) {
+                        std::process::exit(1);
                     }
                 }
-
-                if any_high {
-                    std::process::exit(1);
+                Err(e) => {
+                    if json {
+                        let envelope = serde_json::json!({ "error": e.to_string() });
+                        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+                    } else {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                    }
+                    std::process::exit(2);
                 }
-            }
-            Err(e) => {
-                if json {
-                    let envelope = serde_json::json!({ "error": e.to_string() });
-                    println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
-                } else {
-                    eprintln!("{} {}", "error:".red().bold(), e);
-                }
-                std::process::exit(2);
             }
         },
         Commands::ListChecks => {
@@ -76,6 +106,26 @@ fn main() {
             }
         }
     }
+}
+
+fn get_changed_rs_files(scan_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(scan_dir)
+        .output()
+        .map_err(|e| format!("Failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git diff failed: {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter(|line| !line.is_empty() && line.ends_with(".rs"))
+        .map(PathBuf::from)
+        .collect())
 }
 
 fn build_sarif(findings: &[Finding]) -> serde_json::Value {
@@ -157,6 +207,14 @@ fn write_output(path: &Path, payload: &str) -> Result<(), std::io::Error> {
     fs::write(path, payload)
 }
 
+fn json_payload(findings: &[Finding]) -> Result<String, serde_json::Error> {
+    #[derive(serde::Serialize)]
+    struct Out<'a> {
+        findings: &'a [Finding],
+    }
+    serde_json::to_string_pretty(&Out { findings })
+}
+
 fn print_json(findings: &[Finding]) -> Result<(), serde_json::Error> {
     #[derive(serde::Serialize)]
     struct Out<'a> {
@@ -207,12 +265,17 @@ fn print_pretty(findings: &[Finding], files_scanned: usize, root_label: String) 
                 Severity::Medium => "MEDIUM".magenta().bold(), // #46 bold magenta
                 Severity::Low => "LOW".white(),
             };
+            let check = match f.severity {
+                Severity::High => f.check_name.red(),
+                Severity::Medium => f.check_name.magenta(),
+                Severity::Low => f.check_name.white(),
+            };
             println!(
                 "  {}  {}  {}  {}",
                 format!("[{}]", i + 1).dimmed(),
                 sev,
                 format!("{}:{}", f.file_path, f.line).bright_white(),
-                f.check_name.cyan()
+                check
             );
             println!("         {} `{}`", "function:".dimmed(), f.function_name);
             println!("         {}", f.description);

@@ -19,8 +19,6 @@ pub mod ttl;
 pub mod xc_input;
 pub mod zero_address;
 mod util;
-pub mod xc_input;
-pub mod zero_address;
 
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;

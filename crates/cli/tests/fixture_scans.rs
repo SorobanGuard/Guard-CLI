@@ -9,7 +9,7 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn assert_fixture_pair(base: &str, expected_check: &str) {
-    let vulnerable = scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[])
+    let (vulnerable, _) = scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], false, None)
         .unwrap_or_else(|error| panic!("failed to scan {base}-vulnerable: {error}"));
     assert!(
         vulnerable
@@ -18,7 +18,7 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
         "{base}-vulnerable did not produce {expected_check}; findings: {vulnerable:#?}"
     );
 
-    let safe = scan_directory(&fixture_path(&format!("{base}-safe")), &[])
+    let (safe, _) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], false, None)
         .unwrap_or_else(|error| panic!("failed to scan {base}-safe: {error}"));
     assert!(
         safe.iter()
@@ -29,7 +29,7 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
 
 #[test]
 fn missing_require_auth_fixtures() {
-    let vulnerable = scan_directory(&fixture_path("vulnerable"), &[])
+    let (vulnerable, _) = scan_directory(&fixture_path("vulnerable"), &[], false, None)
         .unwrap_or_else(|error| panic!("failed to scan vulnerable: {error}"));
     assert!(
         vulnerable
@@ -38,7 +38,7 @@ fn missing_require_auth_fixtures() {
         "vulnerable did not produce missing-require-auth; findings: {vulnerable:#?}"
     );
 
-    let safe = scan_directory(&fixture_path("safe"), &[])
+    let (safe, _) = scan_directory(&fixture_path("safe"), &[], false, None)
         .unwrap_or_else(|error| panic!("failed to scan safe: {error}"));
     assert!(
         safe.iter()
