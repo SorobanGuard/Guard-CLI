@@ -81,8 +81,11 @@ impl<'ast> Visit<'ast> for SafeArithScan {
 ///
 /// Heuristic: in `#[contractimpl]` methods, binary `+`, `-`, `*` (and `+=`, `-=`, `*=`) where
 /// both operands are not compile-time literals. Functions inside `#[cfg(test)]` or `mod tests`
-/// are excluded. Functions that already contain a `checked_*` or `saturating_*` call are also
-/// excluded to avoid false positives on functions that use safe arithmetic.
+/// are excluded.
+///
+/// `/` and `%` are intentionally excluded from this check: division cannot overflow (except
+/// `i*/i*::MIN / -1` which panics rather than wraps), and truncation/remainder concerns are
+/// covered by the dedicated `integer-division-truncation` check instead.
 pub struct UncheckedArithmeticCheck;
 
 impl Check for UncheckedArithmeticCheck {
