@@ -14,6 +14,8 @@ use walkdir::WalkDir;
 pub enum ScanError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Permission denied reading {path}")]
+    PermissionDenied { path: PathBuf },
     #[error("Failed to parse {path}: {message}")]
     Parse { path: PathBuf, message: String },
     #[error("Check `{check}` panicked on {path}: {message}")]
