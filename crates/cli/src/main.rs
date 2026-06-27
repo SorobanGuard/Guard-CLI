@@ -47,6 +47,8 @@ enum Commands {
     },
     /// List the checks that are enabled by default
     ListChecks,
+    /// Print version and build information
+    Version,
 }
 
 fn main() {
@@ -149,6 +151,10 @@ fn main() {
                 let (severity, description) = describe_check(check.name());
                 println!("{} | {} | {}", check.name(), severity, description);
             }
+        }
+        Commands::Version => {
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            println!("target: {}-{}", std::env::consts::ARCH, std::env::consts::OS);
         }
     }
 }
