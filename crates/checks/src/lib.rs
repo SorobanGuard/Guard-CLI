@@ -26,6 +26,7 @@ pub mod unsafe_randomness;
 pub mod vec_growth;
 pub mod xc_input;
 pub mod zero_address;
+pub mod uninitialized_storage_read;
 mod util;
 
 pub use admin::UnprotectedAdminCheck;
@@ -54,6 +55,7 @@ pub use unsafe_randomness::UnsafeRandomnessCheck;
 pub use vec_growth::UnboundedVecGrowthCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
+pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;

@@ -4,6 +4,7 @@ use soroban_guard_analyzer::scan_directory;
 use soroban_guard_checks::{default_checks, Finding, Severity};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 #[derive(Parser)]
 #[command(name = "soroban-guard")]
