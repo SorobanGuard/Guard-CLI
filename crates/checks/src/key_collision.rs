@@ -40,6 +40,8 @@ impl Check for SymbolKeyCollisionCheck {
                                     "Duplicate symbol key `{}` found at position {}",
                                     key, pos
                                 ),
+                                rule_url: None,
+                                suggestion: None,
                             });
                         }
                     }

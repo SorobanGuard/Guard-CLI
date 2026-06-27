@@ -38,6 +38,8 @@ impl Check for MissingEventEmissionCheck {
                     "Method `{fn_name}` writes to storage but does not emit an event. Consider using \
                      `env.events().publish(…)` to allow off-chain indexers to track contract activity."
                 ),
+                rule_url: None,
+                suggestion: None,
             });
         }
         out

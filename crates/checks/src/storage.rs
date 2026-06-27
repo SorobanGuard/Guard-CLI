@@ -72,6 +72,12 @@ fn is_temporary_storage_mutation(m: &ExprMethodCall) -> bool {
     is_storage_mutation_call(m) && receiver_chain_contains_temporary(&m.receiver)
 }
 
+fn is_temporary_get_unchecked(m: &ExprMethodCall) -> bool {
+    m.method == "get_unchecked"
+        && receiver_chain_contains_storage(&m.receiver)
+        && receiver_chain_contains_temporary(&m.receiver)
+}
+
 fn is_symbol_new_path(expr: &Expr) -> bool {
     let Expr::Path(p) = expr else {
         return false;
@@ -109,6 +115,28 @@ struct StorageVisitor<'a> {
 
 impl Visit<'_> for StorageVisitor<'_> {
     fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
+        if is_temporary_get_unchecked(i) {
+            self.out.push(Finding {
+                check_name: CHECK_NAME.to_string(),
+                severity: Severity::Medium,
+                file_path: String::new(),
+                line: i.span().start().line,
+                function_name: self.fn_name.clone(),
+                description: format!(
+                    "Method `{}` calls `get_unchecked` on temporary storage. \
+                     If the entry has expired the call will panic at runtime.",
+                    self.fn_name
+                ),
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
+                        .to_string(),
+                ),
+                suggestion: Some(
+                    "Use `env.storage().temporary().get(&key)` (returns `Option`) and handle the missing case."
+                        .to_string(),
+                ),
+            });
+        }
         if is_temporary_storage_mutation(i) {
             self.out.push(Finding {
                 check_name: CHECK_NAME.to_string(),
@@ -171,6 +199,30 @@ mod tests {
     use super::*;
     use crate::Check;
     use syn::parse_file;
+
+    #[test]
+    fn flags_temporary_get_unchecked() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+
+pub struct C;
+
+const K: soroban_sdk::Symbol = symbol_short!("k");
+
+#[contractimpl]
+impl C {
+    pub fn load(env: Env) -> u32 {
+        env.storage().temporary().get_unchecked(&K)
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].description.contains("get_unchecked"));
+        Ok(())
+    }
 
     #[test]
     fn flags_temporary_set() -> Result<(), syn::Error> {
