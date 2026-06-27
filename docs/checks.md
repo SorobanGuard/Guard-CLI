@@ -345,3 +345,41 @@ Soroban ledger entries have a fixed size limit. A Vec that grows unboundedly acr
 - Does not detect growth via helper functions called from the flagged method.
 
 **Fixture:** `test-contracts/vec-growth-vulnerable/`, `test-contracts/vec-growth-safe/`
+
+---
+
+## `unsafe-randomness` (High)
+
+**What it detects**
+
+A call chain `env.ledger().timestamp()` or `env.ledger().sequence()` inside a `#[contractimpl]` method, where the binding is used in arithmetic or a conditional that influences storage.
+
+**Why it matters**
+
+Ledger timestamp and sequence are publicly known before transaction finalization. Validators and MEV actors can manipulate or predict these values, making them unsuitable as a source of randomness for games, lotteries, or ID generation.
+
+**Limitations**
+
+- Detects method calls but does not verify downstream usage; `env.ledger().timestamp()` alone is flagged even if unused.
+- Does not track taint to subsequent expressions.
+
+**Fixture:** `test-contracts/unsafe-randomness-vulnerable/`, `test-contracts/unsafe-randomness-safe/`
+
+---
+
+## `unchecked-divisor` (High)
+
+**What it detects**
+
+Integer division (`/` or `/=`) inside `#[contractimpl]` methods where the divisor expression is not a literal and is not preceded by a guard that ensures it is non-zero.
+
+**Why it matters**
+
+Division by zero panics in Soroban, aborting the transaction and potentially leaving the contract in an inconsistent state if partial writes occurred before the panic.
+
+**Limitations**
+
+- Syntactic only; does not track guard conditions across control flow.
+- Any literal divisor (e.g. `a / 2`) is ignored regardless of context.
+
+**Fixture:** `test-contracts/unchecked-divisor-vulnerable/`, `test-contracts/unchecked-divisor-safe/`
