@@ -1,0 +1,11 @@
+[package]
+name = "sg-test-invoke-return-safe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = "22.0.0"

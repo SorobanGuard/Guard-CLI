@@ -48,6 +48,8 @@ impl Check for DelegateCallRiskCheck {
                              poisoned (e.g., via upgrade or temp-storage race), the call \
                              can be redirected to an attacker-controlled contract.",
                         ),
+                        rule_url: None,
+                        suggestion: None,
                     });
                 }
             }
