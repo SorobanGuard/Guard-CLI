@@ -4,6 +4,7 @@ use soroban_guard_analyzer::scan_directory;
 use soroban_guard_checks::{default_checks, Finding, Severity};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 #[derive(Parser)]
 #[command(name = "soroban-guard")]
@@ -40,6 +41,9 @@ enum Commands {
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
+        /// Run only the named check (e.g. `missing-require-auth`)
+        #[arg(long)]
+        only_check: Option<String>,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -56,6 +60,7 @@ fn main() {
             output,
             quiet,
             include,
+            only_check,
         } => {
             // Mutual exclusion
             let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
@@ -67,9 +72,28 @@ fn main() {
                 std::process::exit(2);
             }
 
+            // Validate --only-check name if provided
+            if let Some(ref name) = only_check {
+                let known: HashSet<&str> = default_checks().into_iter().map(|c| c.name()).collect();
+                if !known.contains(name.as_str()) {
+                    eprintln!(
+                        "{} unknown check `{}`. Run `list-checks` to see available checks.",
+                        "error:".red().bold(),
+                        name
+                    );
+                    std::process::exit(2);
+                }
+            }
+
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
-                Ok((findings, files_scanned)) => {
+                Ok((all_findings, files_scanned)) => {
+                    // Apply --only-check filter
+                    let findings: Vec<Finding> = if let Some(ref name) = only_check {
+                        all_findings.into_iter().filter(|f| f.check_name == *name).collect()
+                    } else {
+                        all_findings
+                    };
                     let any_high = findings
                         .iter()
                         .any(|f| matches!(f.severity, Severity::High));
@@ -112,9 +136,9 @@ fn main() {
                         }
                     } else {
                         if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
+                            let (to_show, truncated) = truncate(&findings, 0);
+                            print_pretty(to_show, files_scanned, path.display().to_string(), truncated);
                         }
-                        Some(files)
                     }
 
                     if any_high {
@@ -235,6 +259,7 @@ fn describe_rule(name: &str) -> &'static str {
         "symbol-key-collision" => "Multiple storage keys share the same Symbol value",
         "self-transfer" => "Token transfer destination may equal the sender",
         "missing-zero-address-check" => "Address argument not validated against the zero address",
+        "uninitialized-storage-read" => "Storage read result unwrapped without checking key existence",
         _ => "Custom check",
     }
 }
@@ -256,6 +281,7 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         "symbol-key-collision" => ("medium", "Flags storage keys that share the same Symbol value"),
         "self-transfer" => ("medium", "Flags token transfers where sender may equal receiver"),
         "missing-zero-address-check" => ("medium", "Flags Address parameters not checked for the zero address"),
+        "uninitialized-storage-read" => ("high", "Flags storage reads that unwrap without a has() guard"),
         _ => ("low", "Custom detector"),
     }
 }

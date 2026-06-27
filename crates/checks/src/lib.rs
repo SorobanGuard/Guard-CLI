@@ -22,6 +22,7 @@ pub mod ttl;
 pub mod vec_growth;
 pub mod xc_input;
 pub mod zero_address;
+pub mod uninitialized_storage_read;
 mod util;
 
 pub use admin::UnprotectedAdminCheck;
@@ -46,6 +47,7 @@ pub use ttl::MissingTtlExtensionCheck;
 pub use vec_growth::UnboundedVecGrowthCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
+pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -198,5 +200,6 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UncheckedInvokeReturnCheck),
         Box::new(MissingBalanceCheck),
         Box::new(UnboundedVecGrowthCheck),
+        Box::new(UninitializedStorageReadCheck),
     ]
 }
