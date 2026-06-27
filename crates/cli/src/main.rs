@@ -1,9 +1,12 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use colored::Colorize;
 use soroban_guard_analyzer::scan_directory;
 use soroban_guard_checks::{default_checks, Finding, Severity};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 #[derive(Parser)]
 #[command(name = "soroban-guard")]
@@ -40,9 +43,14 @@ enum Commands {
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
+        /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
+        #[arg(long, default_value = "high")]
+        fail_on: String,
     },
     /// List the checks that are enabled by default
     ListChecks,
+    /// Print version and build information
+    Version,
 }
 
 fn main() {
@@ -56,7 +64,11 @@ fn main() {
             output,
             quiet,
             include,
+            fail_on,
         } => {
+            if no_color {
+                colored::control::set_override(false);
+            }
             // Mutual exclusion
             let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
             if format_count > 1 {
@@ -67,15 +79,21 @@ fn main() {
                 std::process::exit(2);
             }
 
+            let fail_threshold = match fail_on.to_lowercase().as_str() {
+                "medium" => Severity::Medium,
+                "low" => Severity::Low,
+                _ => Severity::High,
+            };
+
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
                 Ok((findings, files_scanned)) => {
-                    let any_high = findings
+                    let should_fail = findings
                         .iter()
-                        .any(|f| matches!(f.severity, Severity::High));
+                        .any(|f| f.severity <= fail_threshold);
 
                     if json {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             match json_payload(&findings, files_scanned) {
                                 Ok(payload) => {
                                     if let Some(ref out_path) = output {
@@ -94,7 +112,7 @@ fn main() {
                             }
                         }
                     } else if sarif {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             let payload =
                                 serde_json::to_string_pretty(&build_sarif(&findings)).unwrap();
                             if let Some(ref out_path) = output {
@@ -107,17 +125,15 @@ fn main() {
                             }
                         }
                     } else if markdown {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             print_markdown(&findings);
                         }
-                    } else {
-                        if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
-                        }
-                        Some(files)
+                    } else if !quiet || should_fail {
+                        let (display, truncated) = truncate(&findings, 0);
+                        print_pretty(display, files_scanned, path.display().to_string(), truncated);
                     }
 
-                    if any_high {
+                    if should_fail {
                         std::process::exit(1);
                     }
                 }
@@ -137,7 +153,44 @@ fn main() {
                 let (severity, description) = describe_check(check.name());
                 println!("{} | {} | {}", check.name(), severity, description);
             }
+            println!();
+            println!("Run `soroban-guard explain <check-name>` for detailed documentation on any check.");
         }
+        Commands::Explain { check_name } => {
+            let known = default_checks();
+            if !known.iter().any(|c| c.name() == check_name) {
+                eprintln!(
+                    "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+                    "error:".red().bold(),
+                    check_name
+                );
+                std::process::exit(2);
+            }
+            let (severity, summary) = describe_check(&check_name);
+            let details = explain_details(&check_name);
+            println!("Name:      {}", check_name);
+            println!("Severity:  {}", severity.to_uppercase());
+            println!("Summary:   {}", summary);
+            println!("Details:");
+            println!("  {}", details);
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, bin_name, &mut io::stdout());
+        }
+        Commands::Version => {
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            println!("target: {}-{}", std::env::consts::ARCH, std::env::consts::OS);
+        }
+    }
+}
+
+fn parse_severity(s: &str) -> Severity {
+    match s.to_lowercase().as_str() {
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        _ => Severity::Low,
     }
 }
 
@@ -235,6 +288,8 @@ fn describe_rule(name: &str) -> &'static str {
         "symbol-key-collision" => "Multiple storage keys share the same Symbol value",
         "self-transfer" => "Token transfer destination may equal the sender",
         "missing-zero-address-check" => "Address argument not validated against the zero address",
+        "reentrancy-risk" => "Storage write followed by cross-contract invocation risks reentrancy",
+        "panic-in-contract" => "Contract uses panic!, unwrap, or expect which abort the WASM execution",
         _ => "Custom check",
     }
 }
@@ -249,13 +304,15 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         "forbidden-std-imports" => ("high", "Flags use of std in no_std Soroban contracts"),
         "hardcoded-address" => ("medium", "Flags hardcoded Stellar address literals"),
         "unsafe-cross-contract-input" => ("high", "Flags unvalidated return values from cross-contract calls"),
-        "missing-contract-annotation" => ("low", "Flags structs missing the #[contract] attribute"),
+        "missing-contract-annotation" => ("medium", "Flags structs missing the #[contract] attribute"),
         "delegate-call-risk" => ("high", "Flags delegate-call patterns that transfer execution control"),
-        "integer-division-truncation" => ("low", "Flags integer division that silently truncates"),
-        "missing-event-emission" => ("low", "Flags state-mutating functions with no event emission"),
+        "integer-division-truncation" => ("medium", "Flags integer division that silently truncates"),
+        "missing-event-emission" => ("medium", "Flags state-mutating functions with no event emission"),
         "symbol-key-collision" => ("medium", "Flags storage keys that share the same Symbol value"),
         "self-transfer" => ("medium", "Flags token transfers where sender may equal receiver"),
         "missing-zero-address-check" => ("medium", "Flags Address parameters not checked for the zero address"),
+        "reentrancy-risk" => ("high", "Flags storage writes followed by cross-contract calls"),
+        "panic-in-contract" => ("medium", "Flags panic!, unwrap, and expect in contract methods"),
         _ => ("low", "Custom detector"),
     }
 }
@@ -355,7 +412,7 @@ fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
 
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
 fn use_hyperlinks() -> bool {
-    std::env::var("NO_COLOR").is_err()
+    std::env::var("NO_COLOR").is_err() && colored::control::SHOULD_COLORIZE.should_colorize()
 }
 
 /// Wrap `text` in an OSC 8 hyperlink for `url` when hyperlinks are enabled.
