@@ -348,76 +348,38 @@ Soroban ledger entries have a fixed size limit. A Vec that grows unboundedly acr
 
 ---
 
-## `missing-input-length-bound` (Medium)
+## `unsafe-randomness` (High)
 
 **What it detects**
 
-Public `#[contractimpl]` methods accepting Bytes or Vec parameters that contain no call to `.len()` or `.is_empty()` on those parameters.
+A call chain `env.ledger().timestamp()` or `env.ledger().sequence()` inside a `#[contractimpl]` method, where the binding is used in arithmetic or a conditional that influences storage.
 
 **Why it matters**
 
-Unbounded byte/vector inputs allow callers to pass enormous payloads, inflating ledger entry size and storage fees, or triggering out-of-memory conditions.
+Ledger timestamp and sequence are publicly known before transaction finalization. Validators and MEV actors can manipulate or predict these values, making them unsuitable as a source of randomness for games, lotteries, or ID generation.
 
 **Limitations**
 
-- Heuristic: any `.len()` or `.is_empty()` call clears the finding without verifying bounds enforcement.
-- Does not track length checks across helper functions.
+- Detects method calls but does not verify downstream usage; `env.ledger().timestamp()` alone is flagged even if unused.
+- Does not track taint to subsequent expressions.
 
-**Fixture:** `test-contracts/input-length-vulnerable/`, `test-contracts/input-length-safe/`
+**Fixture:** `test-contracts/unsafe-randomness-vulnerable/`, `test-contracts/unsafe-randomness-safe/`
 
 ---
 
-## `unprotected-token-mint` (High)
+## `unchecked-divisor` (High)
 
 **What it detects**
 
-Public functions in `#[contractimpl]` whose name matches `mint`, `burn`, `issue`, `redeem`, or `create_tokens`, and whose body contains no `env.require_auth()` or `env.require_auth_for_args()` call.
+Integer division (`/` or `/=`) inside `#[contractimpl]` methods where the divisor expression is not a literal and is not preceded by a guard that ensures it is non-zero.
 
 **Why it matters**
 
-Unprotected mint functions allow any caller to create arbitrary token supply, inflating the token and stealing value from existing holders.
+Division by zero panics in Soroban, aborting the transaction and potentially leaving the contract in an inconsistent state if partial writes occurred before the panic.
 
 **Limitations**
 
-- Name-based heuristic; custom mint function names are not detected.
-- Any `require_auth` anywhere in the body clears the finding.
+- Syntactic only; does not track guard conditions across control flow.
+- Any literal divisor (e.g. `a / 2`) is ignored regardless of context.
 
-**Fixture:** `test-contracts/token-mint-vulnerable/`, `test-contracts/token-mint-safe/`
-
----
-
-## `unprotected-contract-deployment` (High)
-
-**What it detects**
-
-Public `#[contractimpl]` methods that call `env.deployer()` methods (upload_contract_wasm, with_address, with_current_contract) without a preceding `require_auth` call.
-
-**Why it matters**
-
-Unprotected deployment functions allow any caller to upload arbitrary WASM or deploy new contract instances, potentially hijacking factory patterns.
-
-**Limitations**
-
-- Does not track auth checks across helper functions.
-- Detects `deployer()` method calls; custom deployer patterns may not be detected.
-
-**Fixture:** `test-contracts/contract-deployment-vulnerable/`, `test-contracts/contract-deployment-safe/`
-
----
-
-## `missing-event-for-admin-change` (Medium)
-
-**What it detects**
-
-Public `#[contractimpl]` methods whose name suggests admin change (set_owner, set_admin, transfer_ownership, set_operator) that write to storage but do not call `env.events().publish()`.
-
-**Why it matters**
-
-Off-chain governance tools depend on ownership-change events to track privilege transfers. Silent admin changes cannot be detected by indexers or frontends.
-
-**Limitations**
-
-- Name-based heuristic for detecting admin change functions.
-- Any event emission anywhere in the body clears the finding.
-
-**Fixture:** `test-contracts/admin-event-vulnerable/`, `test-contracts/admin-event-safe/`
+**Fixture:** `test-contracts/unchecked-divisor-vulnerable/`, `test-contracts/unchecked-divisor-safe/`
