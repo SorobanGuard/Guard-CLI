@@ -77,6 +77,7 @@ pub fn scan_files(
                 .iter()
                 .any(|pat| pat.matches_path(label) || pat.matches_path(path))
         })
+        .map(|entry| entry.path().to_path_buf())
         .collect();
 
     let files_scanned = filtered.len();

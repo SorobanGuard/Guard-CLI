@@ -61,6 +61,9 @@ fn main() {
             include,
             fail_on,
         } => {
+            if no_color {
+                colored::control::set_override(false);
+            }
             // Mutual exclusion
             let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
             if format_count > 1 {
@@ -243,6 +246,8 @@ fn describe_rule(name: &str) -> &'static str {
         "symbol-key-collision" => "Multiple storage keys share the same Symbol value",
         "self-transfer" => "Token transfer destination may equal the sender",
         "missing-zero-address-check" => "Address argument not validated against the zero address",
+        "reentrancy-risk" => "Storage write followed by cross-contract invocation risks reentrancy",
+        "panic-in-contract" => "Contract uses panic!, unwrap, or expect which abort the WASM execution",
         _ => "Custom check",
     }
 }
@@ -264,6 +269,8 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         "symbol-key-collision" => ("medium", "Flags storage keys that share the same Symbol value"),
         "self-transfer" => ("medium", "Flags token transfers where sender may equal receiver"),
         "missing-zero-address-check" => ("medium", "Flags Address parameters not checked for the zero address"),
+        "reentrancy-risk" => ("high", "Flags storage writes followed by cross-contract calls"),
+        "panic-in-contract" => ("medium", "Flags panic!, unwrap, and expect in contract methods"),
         _ => ("low", "Custom detector"),
     }
 }
@@ -363,7 +370,7 @@ fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
 
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
 fn use_hyperlinks() -> bool {
-    std::env::var("NO_COLOR").is_err()
+    std::env::var("NO_COLOR").is_err() && colored::control::SHOULD_COLORIZE.should_colorize()
 }
 
 /// Wrap `text` in an OSC 8 hyperlink for `url` when hyperlinks are enabled.
