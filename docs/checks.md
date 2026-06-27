@@ -348,76 +348,38 @@ Soroban ledger entries have a fixed size limit. A Vec that grows unboundedly acr
 
 ---
 
-## `unprotected-upgrade` (High)
+## `unsafe-randomness` (High)
 
 **What it detects**
 
-Public functions in `#[contractimpl]` whose name contains `upgrade`, `migrate`, `set_wasm`, or `replace_wasm`, and whose body contains no call to `env.require_auth()` or `env.require_auth_for_args()`.
+A call chain `env.ledger().timestamp()` or `env.ledger().sequence()` inside a `#[contractimpl]` method, where the binding is used in arithmetic or a conditional that influences storage.
 
 **Why it matters**
 
-Contract upgrade functions are among the most privileged operations. Leaving them unprotected lets any caller upgrade the contract to arbitrary bytecode, resulting in complete takeover.
+Ledger timestamp and sequence are publicly known before transaction finalization. Validators and MEV actors can manipulate or predict these values, making them unsuitable as a source of randomness for games, lotteries, or ID generation.
 
 **Limitations**
 
-- Name-based heuristic; custom upgrade function names are not detected.
-- Any `require_auth` call anywhere in the body clears the finding.
+- Detects method calls but does not verify downstream usage; `env.ledger().timestamp()` alone is flagged even if unused.
+- Does not track taint to subsequent expressions.
 
-**Fixture:** `test-contracts/upgrade-vulnerable/`, `test-contracts/upgrade-safe/`
+**Fixture:** `test-contracts/unsafe-randomness-vulnerable/`, `test-contracts/unsafe-randomness-safe/`
 
 ---
 
-## `unchecked-token-amount` (Medium)
+## `unchecked-divisor` (High)
 
 **What it detects**
 
-Method calls to `transfer`, `transfer_from`, `xfer`, or `mint` inside `#[contractimpl]` methods where the amount parameter is not validated to be greater than zero before the call.
+Integer division (`/` or `/=`) inside `#[contractimpl]` methods where the divisor expression is not a literal and is not preceded by a guard that ensures it is non-zero.
 
 **Why it matters**
 
-Transferring zero or negative token amounts can silently succeed but waste ledger resources and may signal a logic bug. Some token implementations also allow fee extraction on zero-amount transfers.
+Division by zero panics in Soroban, aborting the transaction and potentially leaving the contract in an inconsistent state if partial writes occurred before the panic.
 
 **Limitations**
 
-- Heuristic guard detection; complex validation logic may not be recognized.
-- Does not verify the guard precedes the transfer in all code paths.
+- Syntactic only; does not track guard conditions across control flow.
+- Any literal divisor (e.g. `a / 2`) is ignored regardless of context.
 
-**Fixture:** `test-contracts/token-amount-vulnerable/`, `test-contracts/token-amount-safe/`
-
----
-
-## `missing-nonce` (Medium)
-
-**What it detects**
-
-Public `#[contractimpl]` methods that mutate storage (via `set`, `remove`, `append`, `push`) and accept an Address parameter, but include no reference to `nonce`, `sequence`, `seq_num`, or `replay` in the function body.
-
-**Why it matters**
-
-Without replay protection, signed messages or operations can be submitted multiple times, potentially draining balances or duplicating state changes.
-
-**Limitations**
-
-- Heuristic based on identifier names; sophisticated replay protection patterns may not be recognized.
-- Does not verify nonce is actually checked against prior values.
-
-**Fixture:** `test-contracts/nonce-vulnerable/`, `test-contracts/nonce-safe/`
-
----
-
-## `large-loop` (Medium)
-
-**What it detects**
-
-Loop constructs (`loop { … }` and `while …`) inside public `#[contractimpl]` methods.
-
-**Why it matters**
-
-Soroban contracts run under a CPU instruction limit. An unbounded loop can exhaust the compute budget, causing the transaction to fail and potentially bricking contract state mid-update.
-
-**Limitations**
-
-- Does not distinguish between bounded (for-loop over iterator) and unbounded loops.
-- Flags all loops; not all are necessarily harmful if bounds are externally enforced.
-
-**Fixture:** `test-contracts/large-loop-vulnerable/`, `test-contracts/large-loop-safe/`
+**Fixture:** `test-contracts/unchecked-divisor-vulnerable/`, `test-contracts/unchecked-divisor-safe/`

@@ -21,8 +21,8 @@ pub mod std_imports;
 pub mod storage;
 pub mod transfer;
 pub mod ttl;
-pub mod unchecked_token_amount;
-pub mod unprotected_upgrade;
+pub mod unchecked_divisor;
+pub mod unsafe_randomness;
 pub mod vec_growth;
 pub mod xc_input;
 pub mod zero_address;
@@ -49,8 +49,8 @@ pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
 pub use transfer::SelfTransferCheck;
 pub use ttl::MissingTtlExtensionCheck;
-pub use unchecked_token_amount::UncheckedTokenAmountCheck;
-pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use unchecked_divisor::UncheckedDivisorCheck;
+pub use unsafe_randomness::UnsafeRandomnessCheck;
 pub use vec_growth::UnboundedVecGrowthCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
@@ -206,9 +206,7 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UncheckedInvokeReturnCheck),
         Box::new(MissingBalanceCheck),
         Box::new(UnboundedVecGrowthCheck),
-        Box::new(UnprotectedUpgradeCheck),
-        Box::new(UncheckedTokenAmountCheck),
-        Box::new(MissingNonceCheck),
-        Box::new(LargeLoopCheck),
+        Box::new(UnsafeRandomnessCheck),
+        Box::new(UncheckedDivisorCheck),
     ]
 }
