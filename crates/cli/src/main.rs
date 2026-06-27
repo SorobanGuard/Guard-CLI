@@ -1,8 +1,10 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use colored::Colorize;
 use soroban_guard_analyzer::scan_directory;
 use soroban_guard_checks::{default_checks, Finding, Severity};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 
@@ -151,6 +153,31 @@ fn main() {
                 let (severity, description) = describe_check(check.name());
                 println!("{} | {} | {}", check.name(), severity, description);
             }
+            println!();
+            println!("Run `soroban-guard explain <check-name>` for detailed documentation on any check.");
+        }
+        Commands::Explain { check_name } => {
+            let known = default_checks();
+            if !known.iter().any(|c| c.name() == check_name) {
+                eprintln!(
+                    "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+                    "error:".red().bold(),
+                    check_name
+                );
+                std::process::exit(2);
+            }
+            let (severity, summary) = describe_check(&check_name);
+            let details = explain_details(&check_name);
+            println!("Name:      {}", check_name);
+            println!("Severity:  {}", severity.to_uppercase());
+            println!("Summary:   {}", summary);
+            println!("Details:");
+            println!("  {}", details);
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, bin_name, &mut io::stdout());
         }
         Commands::Version => {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
@@ -277,10 +304,10 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         "forbidden-std-imports" => ("high", "Flags use of std in no_std Soroban contracts"),
         "hardcoded-address" => ("medium", "Flags hardcoded Stellar address literals"),
         "unsafe-cross-contract-input" => ("high", "Flags unvalidated return values from cross-contract calls"),
-        "missing-contract-annotation" => ("low", "Flags structs missing the #[contract] attribute"),
+        "missing-contract-annotation" => ("medium", "Flags structs missing the #[contract] attribute"),
         "delegate-call-risk" => ("high", "Flags delegate-call patterns that transfer execution control"),
-        "integer-division-truncation" => ("low", "Flags integer division that silently truncates"),
-        "missing-event-emission" => ("low", "Flags state-mutating functions with no event emission"),
+        "integer-division-truncation" => ("medium", "Flags integer division that silently truncates"),
+        "missing-event-emission" => ("medium", "Flags state-mutating functions with no event emission"),
         "symbol-key-collision" => ("medium", "Flags storage keys that share the same Symbol value"),
         "self-transfer" => ("medium", "Flags token transfers where sender may equal receiver"),
         "missing-zero-address-check" => ("medium", "Flags Address parameters not checked for the zero address"),
