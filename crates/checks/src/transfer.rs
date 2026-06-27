@@ -43,6 +43,8 @@ impl Check for SelfTransferCheck {
                      to guard against `from == to`. In fee-on-transfer or rebasing designs, \
                      self-transfers can artificially inflate volume or extract fees."
                 ),
+                rule_url: None,
+                suggestion: None,
             });
         }
         out
