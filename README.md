@@ -262,7 +262,7 @@ stellar contract deploy \
 | `crates/analyzer` | Walk `.rs` files, parse with `syn`, run checks |
 | `crates/checks` | `Check` trait + individual detectors |
 
-See `docs/checks.md` for implemented rules and `CONTRIBUTING.md` to add a check.
+See `docs/checks.md` for implemented rules, `docs/integrations.md` for pre-commit / CI / editor snippets, and `CONTRIBUTING.md` to add a check.
 
 ---
 
