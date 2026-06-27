@@ -6,6 +6,7 @@ use soroban_guard_checks::{default_checks, Finding, Severity};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 #[derive(Parser)]
 #[command(name = "soroban-guard")]
@@ -42,19 +43,14 @@ enum Commands {
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
+        /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
+        #[arg(long, default_value = "high")]
+        fail_on: String,
     },
     /// List the checks that are enabled by default
     ListChecks,
-    /// Print full documentation for a named check
-    Explain {
-        /// Name of the check (e.g. `missing-require-auth`)
-        check_name: String,
-    },
-    /// Print shell completion scripts for Bash, Zsh, Fish, or PowerShell
-    Completions {
-        /// Shell to generate completions for
-        shell: Shell,
-    },
+    /// Print version and build information
+    Version,
 }
 
 fn main() {
@@ -68,7 +64,11 @@ fn main() {
             output,
             quiet,
             include,
+            fail_on,
         } => {
+            if no_color {
+                colored::control::set_override(false);
+            }
             // Mutual exclusion
             let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
             if format_count > 1 {
@@ -79,15 +79,21 @@ fn main() {
                 std::process::exit(2);
             }
 
+            let fail_threshold = match fail_on.to_lowercase().as_str() {
+                "medium" => Severity::Medium,
+                "low" => Severity::Low,
+                _ => Severity::High,
+            };
+
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
                 Ok((findings, files_scanned)) => {
-                    let any_high = findings
+                    let should_fail = findings
                         .iter()
-                        .any(|f| matches!(f.severity, Severity::High));
+                        .any(|f| f.severity <= fail_threshold);
 
                     if json {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             match json_payload(&findings, files_scanned) {
                                 Ok(payload) => {
                                     if let Some(ref out_path) = output {
@@ -106,7 +112,7 @@ fn main() {
                             }
                         }
                     } else if sarif {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             let payload =
                                 serde_json::to_string_pretty(&build_sarif(&findings)).unwrap();
                             if let Some(ref out_path) = output {
@@ -119,16 +125,15 @@ fn main() {
                             }
                         }
                     } else if markdown {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             print_markdown(&findings);
                         }
-                    } else {
-                        if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string(), 0);
-                        }
+                    } else if !quiet || should_fail {
+                        let (display, truncated) = truncate(&findings, 0);
+                        print_pretty(display, files_scanned, path.display().to_string(), truncated);
                     }
 
-                    if any_high {
+                    if should_fail {
                         std::process::exit(1);
                     }
                 }
@@ -174,6 +179,18 @@ fn main() {
             let bin_name = cmd.get_name().to_string();
             generate(shell, &mut cmd, bin_name, &mut io::stdout());
         }
+        Commands::Version => {
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            println!("target: {}-{}", std::env::consts::ARCH, std::env::consts::OS);
+        }
+    }
+}
+
+fn parse_severity(s: &str) -> Severity {
+    match s.to_lowercase().as_str() {
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        _ => Severity::Low,
     }
 }
 
@@ -271,14 +288,8 @@ fn describe_rule(name: &str) -> &'static str {
         "symbol-key-collision" => "Multiple storage keys share the same Symbol value",
         "self-transfer" => "Token transfer destination may equal the sender",
         "missing-zero-address-check" => "Address argument not validated against the zero address",
-        "reentrancy-risk" => "Cross-contract call followed by state mutation risks reentrancy",
-        "panic-in-contract" => "Explicit panic or unwrap inside contract code",
-        "mutable-global-state" => "Contract uses mutable static or global state",
-        "unchecked-invoke-return" => "Cross-contract invoke return value is discarded unchecked",
-        "missing-balance-check" => "Balance not validated before transfer or arithmetic",
-        "unbounded-vec-growth" => "Vec grows in a loop without a length cap",
-        "re-initialization-risk" => "Contract init function can be called more than once",
-        "auth-after-storage-write" => "env.require_auth() called after a storage write",
+        "reentrancy-risk" => "Storage write followed by cross-contract invocation risks reentrancy",
+        "panic-in-contract" => "Contract uses panic!, unwrap, or expect which abort the WASM execution",
         _ => "Custom check",
     }
 }
@@ -300,153 +311,9 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         "symbol-key-collision" => ("medium", "Flags storage keys that share the same Symbol value"),
         "self-transfer" => ("medium", "Flags token transfers where sender may equal receiver"),
         "missing-zero-address-check" => ("medium", "Flags Address parameters not checked for the zero address"),
-        "reentrancy-risk" => ("high", "Flags cross-contract calls followed by state mutations"),
-        "panic-in-contract" => ("medium", "Flags explicit panics and unwraps inside contract code"),
-        "mutable-global-state" => ("high", "Flags use of mutable static or global state"),
-        "unchecked-invoke-return" => ("high", "Flags discarded cross-contract invoke return values"),
-        "missing-balance-check" => ("high", "Flags transfers or arithmetic without prior balance validation"),
-        "unbounded-vec-growth" => ("medium", "Flags Vecs that grow in a loop without a size cap"),
-        "re-initialization-risk" => ("high", "Flags init functions that can be called more than once"),
-        "auth-after-storage-write" => ("high", "Flags methods where require_auth() follows a storage write"),
-        _ => ("medium", "Custom detector"),
-    }
-}
-
-fn explain_details(name: &str) -> &'static str {
-    match name {
-        "missing-require-auth" => {
-            "In a #[contractimpl] block, any function that calls .set()/.remove() on \
-             env.storage() but never calls env.require_auth() is flagged. \
-             Callers can mutate contract state without proving authorization. \
-             Limitation: auth hidden inside helper functions is not detected."
-        }
-        "auth-after-storage-write" => {
-            "In a #[contractimpl] block, any function that calls env.require_auth() \
-             after a storage write (.set()/.remove()) is flagged. Although Soroban \
-             transactions are atomic, state has already been mutated before the caller \
-             was verified — this breaks the authorize-then-execute invariant and can \
-             cause issues in composed contract calls. \
-             Fix: move env.require_auth() to the very first line of the function. \
-             Limitation: line-number heuristic; control flow is not modeled."
-        }
-        "unchecked-arithmetic" => {
-            "Flags binary +, -, * and compound assignments (+=, -=, *=) inside \
-             #[contractimpl] methods where at least one operand is not a literal. \
-             Severity scales with variable name: amount/balance/fee → High; \
-             index/count/len → Low; everything else → Medium. \
-             Limitation: operator overloads and checked_* calls are not tracked."
-        }
-        "unprotected-admin" => {
-            "Flags #[contractimpl] functions whose name contains admin-like keywords \
-             (set_admin, upgrade, pause, etc.) but never call env.require_auth(). \
-             Limitation: naming heuristic only; semantics are not checked."
-        }
-        "unsafe-storage-patterns" => {
-            "Flags use of env.storage().temporary() or Symbol keys constructed at runtime \
-             inside #[contractimpl] methods. Temporary storage silently expires; dynamic \
-             keys risk collision. Limitation: static analysis only."
-        }
-        "missing-ttl-extension" => {
-            "Flags persistent storage writes (.set()) not followed by a .extend_ttl() or \
-             .bump() call on the same key. Without TTL extension the entry may expire. \
-             Limitation: key aliasing is not tracked."
-        }
-        "forbidden-std-imports" => {
-            "Flags `use std::` imports in files that also contain #[contractimpl]. \
-             Soroban contracts run in no_std WASM environments. \
-             Limitation: macro-generated imports are not visible to the AST."
-        }
-        "hardcoded-address" => {
-            "Flags string literals inside #[contractimpl] methods that look like Stellar \
-             address strings (starting with G and 56 chars long). Hardcoded addresses \
-             make contracts non-portable and hard to audit. Limitation: only string \
-             literals are checked, not computed values."
-        }
-        "unsafe-cross-contract-input" => {
-            "Flags return values from cross-contract calls (invoke_contract) that are \
-             used directly without validation. Untrusted values from external contracts \
-             should always be validated. Limitation: data-flow is not fully modeled."
-        }
-        "missing-contract-annotation" => {
-            "Flags files containing a #[contractimpl] block but no struct annotated with \
-             #[contract]. This is almost always a copy-paste error. \
-             Limitation: only checks within a single file."
-        }
-        "delegate-call-risk" => {
-            "Flags call patterns that forward execution to an arbitrary callee address \
-             (delegate-call style). This can transfer control and storage context \
-             unexpectedly. Limitation: pattern matching only."
-        }
-        "integer-division-truncation" => {
-            "Flags integer division (/) inside #[contractimpl] methods where both operands \
-             are non-literal. Division silently truncates the remainder and can lead to \
-             unexpected rounding in financial calculations. Limitation: type inference \
-             is not performed; all divisions are flagged."
-        }
-        "missing-event-emission" => {
-            "Flags #[contractimpl] functions that mutate storage but never call \
-             env.events().publish(). Events are the primary off-chain observability \
-             mechanism. Limitation: helper-based event emission is not detected."
-        }
-        "symbol-key-collision" => {
-            "Flags cases where two or more storage keys share the same Symbol string \
-             value. Collisions silently overwrite each other. \
-             Limitation: only Symbol::new / symbol_short! literals are compared."
-        }
-        "self-transfer" => {
-            "Flags token transfer calls where the destination parameter name or type \
-             suggests it could equal the source. Self-transfers are usually bugs. \
-             Limitation: aliasing is not modeled."
-        }
-        "missing-zero-address-check" => {
-            "Flags Address parameters in #[contractimpl] methods that are never compared \
-             against a zero or default address. Sending tokens to the zero address burns \
-             them permanently. Limitation: custom zero-check helpers are not recognized."
-        }
-        "reentrancy-risk" => {
-            "Flags #[contractimpl] methods where a cross-contract call is followed by \
-             a storage mutation. Even though Soroban is not directly reentrant, this \
-             pattern violates checks-effects-interactions and can cause state \
-             inconsistencies in composed calls. Limitation: call ordering is inferred \
-             from line numbers."
-        }
-        "panic-in-contract" => {
-            "Flags explicit panic!(), unwrap(), and expect() calls inside #[contractimpl] \
-             methods. Panics abort the transaction and leak no useful error to callers. \
-             Use Result/Option propagation or env.panic_with_error() instead. \
-             Limitation: panic inside closures may not be detected."
-        }
-        "mutable-global-state" => {
-            "Flags static mut declarations or Mutex/RefCell<T> in global position inside \
-             contract files. WASM is single-threaded but global mutable state is \
-             non-deterministic across invocations. Limitation: Arc/Mutex in local \
-             scope is not flagged."
-        }
-        "unchecked-invoke-return" => {
-            "Flags cross-contract invoke_contract return values that are immediately \
-             discarded (assigned to _ or not used). Return values often carry error codes \
-             or transferred amounts. Limitation: shadowing is not tracked."
-        }
-        "missing-balance-check" => {
-            "Flags token transfer calls not preceded by a balance query on the same \
-             account within the same function body. Transferring without checking \
-             balance can result in underflow errors at the ledger level. \
-             Limitation: multi-function flows are not tracked."
-        }
-        "unbounded-vec-growth" => {
-            "Flags Vec::push / vec.append / vec.extend calls inside loops within \
-             #[contractimpl] methods where no length cap or early-exit guard is detected. \
-             Unbounded growth can exhaust ledger entry size limits. \
-             Limitation: external caps passed as parameters are not recognized."
-        }
-        "re-initialization-risk" => {
-            "Flags #[contractimpl] functions whose name contains 'init' or 'initialize' \
-             that do not first check whether the contract has already been initialized \
-             (e.g. reading a flag from storage). Calling init twice can overwrite \
-             existing state. Limitation: naming heuristic; custom guards are not \
-             recognized."
-        }
-        _ => "No additional documentation available for this check.",
+        "reentrancy-risk" => ("high", "Flags storage writes followed by cross-contract calls"),
+        "panic-in-contract" => ("medium", "Flags panic!, unwrap, and expect in contract methods"),
+        _ => ("low", "Custom detector"),
     }
 }
 
@@ -545,7 +412,7 @@ fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
 
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
 fn use_hyperlinks() -> bool {
-    std::env::var("NO_COLOR").is_err()
+    std::env::var("NO_COLOR").is_err() && colored::control::SHOULD_COLORIZE.should_colorize()
 }
 
 /// Wrap `text` in an OSC 8 hyperlink for `url` when hyperlinks are enabled.

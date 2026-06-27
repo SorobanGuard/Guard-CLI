@@ -163,7 +163,7 @@ Invoking contracts from a storage-derived address is effectively a delegate call
 - Only detects when the address comes from storage in the same function; cross-function dataflow is not tracked.
 - Intentional use (e.g. proxy patterns) is still flagged — review and suppress as needed.
 
-**Fixture:** tests in `crates/checks/src/delegate.rs`
+**Fixture:** `test-contracts/delegate-vulnerable/`, `test-contracts/delegate-safe/`
 
 ---
 
@@ -205,7 +205,7 @@ On-chain state changes should be accompanied by events so that off-chain indexer
 - Does not verify that the event payload matches the mutation.
 - Events published in helper functions called by the method are not detected.
 
-**Fixture:** tests in `crates/checks/src/events.rs`
+**Fixture:** `test-contracts/events-vulnerable/`, `test-contracts/events-safe/`
 
 ---
 
@@ -226,7 +226,7 @@ Duplicate storage keys cause silent overwrites. Two contract functions writing d
 - Only compares keys that share the same `#[contractimpl]` block; cross-block duplicates are not detected.
 - Only `symbol_short!` is analyzed; `Symbol::new` with the same string literal is not matched.
 
-**Fixture:** tests in `crates/checks/src/key_collision.rs`
+**Fixture:** `test-contracts/key-collision-vulnerable/`, `test-contracts/key-collision-safe/`
 
 ---
 
@@ -247,7 +247,7 @@ Self-transfers waste ledger space, waste the caller's gas, and may indicate a lo
 - Guard detection is structural (presence of a comparison expression in the body); complex guard logic may not be recognized.
 - Only functions with "transfer" or "send" in the name are inspected.
 
-**Fixture:** tests in `crates/checks/src/transfer.rs`
+**Fixture:** `test-contracts/transfer-vulnerable/`, `test-contracts/transfer-safe/`
 
 ---
 
@@ -348,20 +348,38 @@ Soroban ledger entries have a fixed size limit. A Vec that grows unboundedly acr
 
 ---
 
-## `auth-after-storage-write` (High)
+## `unsafe-randomness` (High)
 
 **What it detects**
 
-Inside `#[contractimpl]` methods, scans the function body for the line number of the first storage write (`.set()` or `.remove()` on `env.storage()`) and the line number of the first `env.require_auth()` call. If the storage write line is earlier than the `require_auth()` line, the method is flagged.
+A call chain `env.ledger().timestamp()` or `env.ledger().sequence()` inside a `#[contractimpl]` method, where the binding is used in arithmetic or a conditional that influences storage.
 
 **Why it matters**
 
-`env.require_auth()` should be called **before** any state mutation. If it appears after a `.set()` or `.remove()`, the contract has already modified state before verifying the caller is authorized. Although Soroban transactions are atomic, this ordering violates the authorize-then-execute invariant and can cause unexpected behavior in composed contract calls.
+Ledger timestamp and sequence are publicly known before transaction finalization. Validators and MEV actors can manipulate or predict these values, making them unsuitable as a source of randomness for games, lotteries, or ID generation.
 
 **Limitations**
 
-- Line-number heuristic: control flow branches are not modeled.
-- Auth hidden inside helper functions is not detected.
-- Only the `Env` parameter's `require_auth` / `require_auth_for_args` are recognized; `Address::require_auth()` is not considered an authorization gate for this check.
+- Detects method calls but does not verify downstream usage; `env.ledger().timestamp()` alone is flagged even if unused.
+- Does not track taint to subsequent expressions.
 
-**Fixture:** `test-contracts/auth-order-vulnerable/`, `test-contracts/auth-order-safe/`
+**Fixture:** `test-contracts/unsafe-randomness-vulnerable/`, `test-contracts/unsafe-randomness-safe/`
+
+---
+
+## `unchecked-divisor` (High)
+
+**What it detects**
+
+Integer division (`/` or `/=`) inside `#[contractimpl]` methods where the divisor expression is not a literal and is not preceded by a guard that ensures it is non-zero.
+
+**Why it matters**
+
+Division by zero panics in Soroban, aborting the transaction and potentially leaving the contract in an inconsistent state if partial writes occurred before the panic.
+
+**Limitations**
+
+- Syntactic only; does not track guard conditions across control flow.
+- Any literal divisor (e.g. `a / 2`) is ignored regardless of context.
+
+**Fixture:** `test-contracts/unchecked-divisor-vulnerable/`, `test-contracts/unchecked-divisor-safe/`
