@@ -345,3 +345,23 @@ Soroban ledger entries have a fixed size limit. A Vec that grows unboundedly acr
 - Does not detect growth via helper functions called from the flagged method.
 
 **Fixture:** `test-contracts/vec-growth-vulnerable/`, `test-contracts/vec-growth-safe/`
+
+---
+
+## `auth-after-storage-write` (High)
+
+**What it detects**
+
+Inside `#[contractimpl]` methods, scans the function body for the line number of the first storage write (`.set()` or `.remove()` on `env.storage()`) and the line number of the first `env.require_auth()` call. If the storage write line is earlier than the `require_auth()` line, the method is flagged.
+
+**Why it matters**
+
+`env.require_auth()` should be called **before** any state mutation. If it appears after a `.set()` or `.remove()`, the contract has already modified state before verifying the caller is authorized. Although Soroban transactions are atomic, this ordering violates the authorize-then-execute invariant and can cause unexpected behavior in composed contract calls.
+
+**Limitations**
+
+- Line-number heuristic: control flow branches are not modeled.
+- Auth hidden inside helper functions is not detected.
+- Only the `Env` parameter's `require_auth` / `require_auth_for_args` are recognized; `Address::require_auth()` is not considered an authorization gate for this check.
+
+**Fixture:** `test-contracts/auth-order-vulnerable/`, `test-contracts/auth-order-safe/`

@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod annotations;
 pub mod auth;
+pub mod auth_order;
 pub mod balance;
 pub mod delegate;
 pub mod division;
@@ -27,6 +28,7 @@ mod util;
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
+pub use auth_order::AuthAfterStorageWriteCheck;
 pub use balance::MissingBalanceCheck;
 pub use delegate::DelegateCallRiskCheck;
 pub use division::IntegerDivisionTruncationCheck;
@@ -198,5 +200,6 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UncheckedInvokeReturnCheck),
         Box::new(MissingBalanceCheck),
         Box::new(UnboundedVecGrowthCheck),
+        Box::new(AuthAfterStorageWriteCheck),
     ]
 }
