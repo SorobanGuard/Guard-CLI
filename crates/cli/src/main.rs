@@ -153,6 +153,14 @@ fn main() {
     }
 }
 
+fn parse_severity(s: &str) -> Severity {
+    match s.to_lowercase().as_str() {
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        _ => Severity::Low,
+    }
+}
+
 /// Returns (slice to display, count of truncated findings).
 fn truncate(findings: &[Finding], max: usize) -> (&[Finding], usize) {
     if max == 0 || findings.len() <= max {
