@@ -40,6 +40,9 @@ enum Commands {
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
+        /// Disable ANSI color output (also honoured by the NO_COLOR env var)
+        #[arg(long)]
+        no_color: bool,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -56,7 +59,11 @@ fn main() {
             output,
             quiet,
             include,
+            no_color,
         } => {
+            if no_color || std::env::var_os("NO_COLOR").is_some() {
+                colored::control::set_override(false);
+            }
             // Mutual exclusion
             let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
             if format_count > 1 {
@@ -355,7 +362,7 @@ fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
 
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
 fn use_hyperlinks() -> bool {
-    std::env::var("NO_COLOR").is_err()
+    colored::control::SHOULD_COLORIZE.should_colorize()
 }
 
 /// Wrap `text` in an OSC 8 hyperlink for `url` when hyperlinks are enabled.
