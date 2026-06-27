@@ -3,6 +3,7 @@
 //! Each [`Check`](soroban_guard_checks::Check) runs independently on the same parsed file;
 //! findings are concatenated with **no shared mutable state** between checks.
 
+use rayon::prelude::*;
 use soroban_guard_checks::{default_checks, Finding};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -12,6 +13,8 @@ use walkdir::WalkDir;
 pub enum ScanError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Permission denied reading {path}")]
+    PermissionDenied { path: PathBuf },
     #[error("Failed to parse {path}: {message}")]
     Parse { path: PathBuf, message: String },
 }
@@ -86,7 +89,14 @@ pub fn scan_directory(
         .par_iter()
         .map(|entry| {
             let path = entry.path();
-            let content = std::fs::read_to_string(path)?;
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("warning: skipping {} — permission denied", path.display());
+                    return Ok(vec![]);
+                }
+                Err(e) => return Err(ScanError::Io(e)),
+            };
             let syn_file = syn::parse_file(&content).map_err(|error| ScanError::Parse {
                 path: path.to_path_buf(),
                 message: error.to_string(),
