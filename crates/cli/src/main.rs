@@ -43,6 +43,8 @@ enum Commands {
     },
     /// List the checks that are enabled by default
     ListChecks,
+    /// Print version and build information
+    Version,
 }
 
 fn main() {
@@ -112,7 +114,7 @@ fn main() {
                         }
                     } else {
                         if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
+                            print_pretty(&findings, files_scanned, path.display().to_string(), 0);
                         }
                     }
 
@@ -136,6 +138,10 @@ fn main() {
                 let (severity, description) = describe_check(check.name());
                 println!("{} | {} | {}", check.name(), severity, description);
             }
+        }
+        Commands::Version => {
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            println!("target: {}-{}", std::env::consts::ARCH, std::env::consts::OS);
         }
     }
 }
