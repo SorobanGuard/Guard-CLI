@@ -69,7 +69,9 @@ fn main() {
 
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
-                Ok((findings, files_scanned)) => {
+                Ok((file_results, files_scanned)) => {
+                    let findings: Vec<Finding> =
+                        file_results.into_iter().flat_map(|r| r.findings).collect();
                     let any_high = findings
                         .iter()
                         .any(|f| matches!(f.severity, Severity::High));
@@ -112,7 +114,7 @@ fn main() {
                         }
                     } else {
                         if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
+                            print_pretty(&findings, files_scanned, path.display().to_string(), 0);
                         }
                     }
 

@@ -3,6 +3,7 @@
 //! Each [`Check`](soroban_guard_checks::Check) runs independently on the same parsed file;
 //! findings are concatenated with **no shared mutable state** between checks.
 
+use rayon::prelude::*;
 use soroban_guard_checks::{default_checks, Finding};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -16,6 +17,13 @@ pub enum ScanError {
     Parse { path: PathBuf, message: String },
 }
 
+/// Findings for a single source file.
+#[derive(Debug)]
+pub struct FileScanResult {
+    pub file_path: String,
+    pub findings: Vec<Finding>,
+}
+
 /// Recursively scan `.rs` files under `root` and aggregate findings from every check.
 ///
 /// `excludes` are glob patterns (e.g. `vendor/**`, `**/generated/*.rs`) matched against each
@@ -27,7 +35,7 @@ pub fn scan_directory(
     root: &Path,
     excludes: &[String],
     includes: &[String],
-) -> Result<(Vec<Finding>, usize), ScanError> {
+) -> Result<(Vec<FileScanResult>, usize), ScanError> {
     let root = root.canonicalize()?;
     let exclude_patterns: Vec<glob::Pattern> = excludes
         .iter()
@@ -82,7 +90,7 @@ pub fn scan_directory(
         .collect();
     let files_scanned = entries.len();
 
-    let mut findings: Vec<Finding> = entries
+    let mut results: Vec<FileScanResult> = entries
         .par_iter()
         .map(|entry| {
             let path = entry.path();
@@ -98,7 +106,7 @@ pub fn scan_directory(
                 .to_string_lossy()
                 .to_string();
 
-            let file_findings = checks
+            let mut file_findings: Vec<Finding> = checks
                 .iter()
                 .flat_map(|check| {
                     let mut from_check = check.run(&syn_file, &content);
@@ -109,20 +117,18 @@ pub fn scan_directory(
                 })
                 .collect();
 
-            Ok(file_findings)
+            file_findings.sort_by_key(|f| f.line);
+
+            Ok(FileScanResult {
+                file_path: file_label,
+                findings: file_findings,
+            })
         })
-        .collect::<Result<Vec<Vec<Finding>>, ScanError>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .collect::<Result<Vec<FileScanResult>, ScanError>>()?;
 
-    findings.sort_by(|a, b| {
-        a.file_path
-            .cmp(&b.file_path)
-            .then_with(|| a.line.cmp(&b.line))
-    });
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
-    Ok((findings, files_scanned))
+    Ok((results, files_scanned))
 }
 
 #[cfg(test)]
