@@ -87,16 +87,13 @@ pub fn scan_directory(
 
             true
         })
+        .map(|entry| entry.path().to_path_buf())
         .collect();
     let files_scanned = entries.len();
 
     let mut findings: Vec<Finding> = entries
         .par_iter()
         .map(|path| {
-            if verbose {
-                let label = path.strip_prefix(&root).unwrap_or(path);
-                eprintln!("scanning {}", label.display());
-            }
             let content = std::fs::read_to_string(path)?;
             let syn_file = syn::parse_file(&content).map_err(|error| ScanError::Parse {
                 path: path.to_path_buf(),

@@ -177,7 +177,7 @@ pub fn group_by_severity<'a>(findings: &'a [Finding]) -> BTreeMap<Severity, Vec<
 /// This catches copy-paste errors when adding a new detector before they can
 /// cause silent finding collisions at runtime.
 pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
-    let checks: Vec<Box<dyn Check + Send + Sync>> = vec![
+    vec![
         Box::new(MissingRequireAuthCheck),
         Box::new(UncheckedArithmeticCheck),
         Box::new(UnprotectedAdminCheck),

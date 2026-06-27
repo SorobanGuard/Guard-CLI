@@ -119,9 +119,8 @@ fn main() {
                         }
                     } else {
                         if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
+                            print_pretty(&findings, files_scanned, path.display().to_string(), 0);
                         }
-                        Some(files)
                     }
 
                     if any_high {
