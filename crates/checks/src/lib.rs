@@ -198,5 +198,7 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UncheckedInvokeReturnCheck),
         Box::new(MissingBalanceCheck),
         Box::new(UnboundedVecGrowthCheck),
+        Box::new(ReentrancyRiskCheck),
+        Box::new(PanicInContractCheck),
     ]
 }
