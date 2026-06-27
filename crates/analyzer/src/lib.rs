@@ -24,7 +24,13 @@ pub enum ScanError {
     },
 }
 
-/// Scan an explicit list of `.rs` file paths and aggregate findings from every check.
+/// Recursively scan `.rs` files under `root` and aggregate findings from every check.
+///
+/// `root` may be a directory **or a single `.rs` file**. When a file path is given it is scanned
+/// directly without any directory walk.
+///
+/// `excludes` are glob patterns (e.g. `vendor/**`, `**/generated/*.rs`) matched against each
+/// file's path relative to `root`; matching files are skipped entirely.
 ///
 /// `root` is used only to compute relative file labels in findings (same convention as
 /// [`scan_directory`]). `excludes` are glob patterns matched against each file's path
@@ -34,6 +40,30 @@ pub fn scan_files(
     root: &Path,
     excludes: &[String],
 ) -> Result<(Vec<Finding>, usize), ScanError> {
+    let root = root.canonicalize()?;
+
+    // Single-file fast path: skip the directory walk entirely.
+    if root.is_file() {
+        let content = std::fs::read_to_string(&root)?;
+        let syn_file = syn::parse_file(&content).map_err(|error| ScanError::Parse {
+            path: root.clone(),
+            message: error.to_string(),
+        })?;
+        let file_label = root.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let checks = default_checks();
+        let mut findings: Vec<Finding> = checks
+            .iter()
+            .flat_map(|check| {
+                let mut hits = check.run(&syn_file, &content);
+                for f in &mut hits {
+                    f.file_path.clone_from(&file_label);
+                }
+                hits
+            })
+            .collect();
+        findings.sort_by(|a, b| a.line.cmp(&b.line));
+        return Ok((findings, 1));
+    }
     let exclude_patterns: Vec<glob::Pattern> = excludes
         .iter()
         .filter_map(|p| glob::Pattern::new(p).ok())
@@ -54,7 +84,8 @@ pub fn scan_files(
 
     let mut findings: Vec<Finding> = filtered
         .par_iter()
-        .map(|path| {
+        .map(|entry| {
+            let path = entry.path();
             let content = std::fs::read_to_string(path)?;
             let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
                 path: path.to_path_buf(),
@@ -182,6 +213,22 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn scan_single_rs_file_directly() {
+        let dir = std::env::temp_dir().join(format!(
+            "soroban-guard-singlefile-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("lib.rs");
+        fs::write(&file_path, "pub fn f() {}").unwrap();
+
+        let (_, files_scanned) = scan_directory(&file_path, &[], &[]).unwrap();
+        assert_eq!(files_scanned, 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn scan_error_check_panic_format() {
