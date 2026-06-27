@@ -4,7 +4,7 @@ use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{BinOp, Expr, ExprBinary, File};
+use syn::{BinOp, Expr, ExprBinary, ExprMethodCall, File};
 
 const CHECK_NAME: &str = "unchecked-arithmetic";
 
@@ -53,11 +53,36 @@ fn infer_severity(e: &ExprBinary) -> Severity {
     Severity::Medium
 }
 
+/// Returns true if `block` contains any `checked_*` or `saturating_*` method call,
+/// indicating the function already uses safe arithmetic and should not be flagged.
+fn uses_safe_arithmetic(block: &syn::Block) -> bool {
+    let mut v = SafeArithScan { found: false };
+    v.visit_block(block);
+    v.found
+}
+
+struct SafeArithScan {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for SafeArithScan {
+    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
+        if !self.found {
+            let name = i.method.to_string();
+            if name.starts_with("checked_") || name.starts_with("saturating_") {
+                self.found = true;
+            }
+        }
+        visit::visit_expr_method_call(self, i);
+    }
+}
+
 /// Flags wrapping integer arithmetic that is not expressed via checked/saturating APIs.
 ///
 /// Heuristic: in `#[contractimpl]` methods, binary `+`, `-`, `*` (and `+=`, `-=`, `*=`) where
 /// both operands are not compile-time literals. Functions inside `#[cfg(test)]` or `mod tests`
-/// are excluded.
+/// are excluded. Functions that already contain a `checked_*` or `saturating_*` call are also
+/// excluded to avoid false positives on functions that use safe arithmetic.
 pub struct UncheckedArithmeticCheck;
 
 impl Check for UncheckedArithmeticCheck {
@@ -68,6 +93,9 @@ impl Check for UncheckedArithmeticCheck {
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
+            if uses_safe_arithmetic(&method.block) {
+                continue;
+            }
             let fn_name = method.sig.ident.to_string();
             let mut v = ArithVisitor {
                 fn_name: fn_name.clone(),

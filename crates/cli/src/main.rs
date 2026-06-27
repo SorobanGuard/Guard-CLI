@@ -70,6 +70,14 @@ fn main() {
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
                 Ok((findings, files_scanned)) => {
+                    if files_scanned == 0 {
+                        eprintln!(
+                            "{} no .rs files found under {:?} — is the path correct?",
+                            "warning:".yellow().bold(),
+                            path
+                        );
+                    }
+
                     let any_high = findings
                         .iter()
                         .any(|f| matches!(f.severity, Severity::High));
@@ -112,9 +120,8 @@ fn main() {
                         }
                     } else {
                         if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
+                            print_pretty(&findings, files_scanned, path.display().to_string(), 0);
                         }
-                        Some(files)
                     }
 
                     if any_high {
