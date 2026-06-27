@@ -40,6 +40,9 @@ enum Commands {
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
+        /// Suppress findings below this severity in output and exit-code calculation (`high`, `medium`, `low`)
+        #[arg(long, value_name = "LEVEL")]
+        min_severity: Option<String>,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -56,6 +59,7 @@ fn main() {
             output,
             quiet,
             include,
+            min_severity,
         } => {
             // Mutual exclusion
             let format_count = [json, sarif, markdown].iter().filter(|&&b| b).count();
@@ -67,9 +71,25 @@ fn main() {
                 std::process::exit(2);
             }
 
+            if let Some(ref ms) = min_severity {
+                if !matches!(ms.to_lowercase().as_str(), "high" | "medium" | "low") {
+                    eprintln!(
+                        "{} invalid --min-severity value '{}'; expected high, medium, or low",
+                        "error:".red().bold(),
+                        ms
+                    );
+                    std::process::exit(2);
+                }
+            }
+
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
-                Ok((findings, files_scanned)) => {
+                Ok((mut findings, files_scanned)) => {
+                    if let Some(ref ms) = min_severity {
+                        let threshold = parse_severity(ms);
+                        findings.retain(|f| f.severity <= threshold);
+                    }
+
                     let any_high = findings
                         .iter()
                         .any(|f| matches!(f.severity, Severity::High));
@@ -112,7 +132,7 @@ fn main() {
                         }
                     } else {
                         if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
+                            print_pretty(&findings, files_scanned, path.display().to_string(), 0);
                         }
                     }
 
@@ -137,6 +157,14 @@ fn main() {
                 println!("{} | {} | {}", check.name(), severity, description);
             }
         }
+    }
+}
+
+fn parse_severity(s: &str) -> Severity {
+    match s.to_lowercase().as_str() {
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        _ => Severity::Low,
     }
 }
 
