@@ -147,6 +147,13 @@ pub fn scan_files(
     Ok((findings, files_scanned))
 }
 
+/// Findings for a single source file.
+#[derive(Debug)]
+pub struct FileScanResult {
+    pub file_path: String,
+    pub findings: Vec<Finding>,
+}
+
 /// Recursively scan `.rs` files under `root` and aggregate findings from every check.
 ///
 /// `excludes` are glob patterns (e.g. `vendor/**`, `**/generated/*.rs`) matched against each
@@ -158,7 +165,7 @@ pub fn scan_directory(
     root: &Path,
     excludes: &[String],
     includes: &[String],
-) -> Result<(Vec<Finding>, usize), ScanError> {
+) -> Result<(Vec<FileScanResult>, usize), ScanError> {
     let root = root.canonicalize()?;
     let exclude_patterns: Vec<glob::Pattern> = excludes
         .iter()
