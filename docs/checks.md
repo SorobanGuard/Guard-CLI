@@ -163,7 +163,7 @@ Invoking contracts from a storage-derived address is effectively a delegate call
 - Only detects when the address comes from storage in the same function; cross-function dataflow is not tracked.
 - Intentional use (e.g. proxy patterns) is still flagged — review and suppress as needed.
 
-**Fixture:** tests in `crates/checks/src/delegate.rs`
+**Fixture:** `test-contracts/delegate-vulnerable/`, `test-contracts/delegate-safe/`
 
 ---
 
@@ -205,7 +205,7 @@ On-chain state changes should be accompanied by events so that off-chain indexer
 - Does not verify that the event payload matches the mutation.
 - Events published in helper functions called by the method are not detected.
 
-**Fixture:** tests in `crates/checks/src/events.rs`
+**Fixture:** `test-contracts/events-vulnerable/`, `test-contracts/events-safe/`
 
 ---
 
@@ -226,7 +226,7 @@ Duplicate storage keys cause silent overwrites. Two contract functions writing d
 - Only compares keys that share the same `#[contractimpl]` block; cross-block duplicates are not detected.
 - Only `symbol_short!` is analyzed; `Symbol::new` with the same string literal is not matched.
 
-**Fixture:** tests in `crates/checks/src/key_collision.rs`
+**Fixture:** `test-contracts/key-collision-vulnerable/`, `test-contracts/key-collision-safe/`
 
 ---
 
@@ -247,7 +247,7 @@ Self-transfers waste ledger space, waste the caller's gas, and may indicate a lo
 - Guard detection is structural (presence of a comparison expression in the body); complex guard logic may not be recognized.
 - Only functions with "transfer" or "send" in the name are inspected.
 
-**Fixture:** tests in `crates/checks/src/transfer.rs`
+**Fixture:** `test-contracts/transfer-vulnerable/`, `test-contracts/transfer-safe/`
 
 ---
 
