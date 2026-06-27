@@ -40,9 +40,9 @@ enum Commands {
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
-        /// Disable ANSI color output (also honoured by the NO_COLOR env var)
-        #[arg(long)]
-        no_color: bool,
+        /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
+        #[arg(long, default_value = "high")]
+        fail_on: String,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -59,9 +59,9 @@ fn main() {
             output,
             quiet,
             include,
-            no_color,
+            fail_on,
         } => {
-            if no_color || std::env::var_os("NO_COLOR").is_some() {
+            if no_color {
                 colored::control::set_override(false);
             }
             // Mutual exclusion
@@ -74,15 +74,21 @@ fn main() {
                 std::process::exit(2);
             }
 
+            let fail_threshold = match fail_on.to_lowercase().as_str() {
+                "medium" => Severity::Medium,
+                "low" => Severity::Low,
+                _ => Severity::High,
+            };
+
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
                 Ok((findings, files_scanned)) => {
-                    let any_high = findings
+                    let should_fail = findings
                         .iter()
-                        .any(|f| matches!(f.severity, Severity::High));
+                        .any(|f| f.severity <= fail_threshold);
 
                     if json {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             match json_payload(&findings, files_scanned) {
                                 Ok(payload) => {
                                     if let Some(ref out_path) = output {
@@ -101,7 +107,7 @@ fn main() {
                             }
                         }
                     } else if sarif {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             let payload =
                                 serde_json::to_string_pretty(&build_sarif(&findings)).unwrap();
                             if let Some(ref out_path) = output {
@@ -114,17 +120,15 @@ fn main() {
                             }
                         }
                     } else if markdown {
-                        if !quiet || any_high {
+                        if !quiet || should_fail {
                             print_markdown(&findings);
                         }
-                    } else {
-                        if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
-                        }
-                        Some(files)
+                    } else if !quiet || should_fail {
+                        let (display, truncated) = truncate(&findings, 0);
+                        print_pretty(display, files_scanned, path.display().to_string(), truncated);
                     }
 
-                    if any_high {
+                    if should_fail {
                         std::process::exit(1);
                     }
                 }
@@ -242,6 +246,8 @@ fn describe_rule(name: &str) -> &'static str {
         "symbol-key-collision" => "Multiple storage keys share the same Symbol value",
         "self-transfer" => "Token transfer destination may equal the sender",
         "missing-zero-address-check" => "Address argument not validated against the zero address",
+        "reentrancy-risk" => "Storage write followed by cross-contract invocation risks reentrancy",
+        "panic-in-contract" => "Contract uses panic!, unwrap, or expect which abort the WASM execution",
         _ => "Custom check",
     }
 }
@@ -263,6 +269,8 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         "symbol-key-collision" => ("medium", "Flags storage keys that share the same Symbol value"),
         "self-transfer" => ("medium", "Flags token transfers where sender may equal receiver"),
         "missing-zero-address-check" => ("medium", "Flags Address parameters not checked for the zero address"),
+        "reentrancy-risk" => ("high", "Flags storage writes followed by cross-contract calls"),
+        "panic-in-contract" => ("medium", "Flags panic!, unwrap, and expect in contract methods"),
         _ => ("low", "Custom detector"),
     }
 }
@@ -362,7 +370,7 @@ fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
 
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
 fn use_hyperlinks() -> bool {
-    colored::control::SHOULD_COLORIZE.should_colorize()
+    std::env::var("NO_COLOR").is_err() && colored::control::SHOULD_COLORIZE.should_colorize()
 }
 
 /// Wrap `text` in an OSC 8 hyperlink for `url` when hyperlinks are enabled.
