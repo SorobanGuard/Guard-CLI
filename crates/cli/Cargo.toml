@@ -17,3 +17,4 @@ clap_complete = "4.5"
 colored.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+toml.workspace = true

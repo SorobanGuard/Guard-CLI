@@ -192,7 +192,7 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
     vec![
         Box::new(MissingRequireAuthCheck),
         Box::new(UncheckedArithmeticCheck),
-        Box::new(UnprotectedAdminCheck),
+        Box::new(UnprotectedAdminCheck::new()),
         Box::new(UnsafeStoragePatternsCheck),
         Box::new(MissingTtlExtensionCheck),
         Box::new(ForbiddenStdImportsCheck),
@@ -213,4 +213,39 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UnsafeRandomnessCheck),
         Box::new(UncheckedDivisorCheck),
     ]
+}
+
+/// Like [`default_checks`] but applies config-file settings:
+/// - `disabled`: check names to omit
+/// - `extra_sensitive_names`: extra names added to `UnprotectedAdminCheck`
+pub fn default_checks_with_config(
+    disabled: &[String],
+    extra_sensitive_names: &[String],
+) -> Vec<Box<dyn Check + Send + Sync>> {
+    let mut checks: Vec<Box<dyn Check + Send + Sync>> = vec![
+        Box::new(MissingRequireAuthCheck),
+        Box::new(UncheckedArithmeticCheck),
+        Box::new(UnprotectedAdminCheck::with_extra_names(extra_sensitive_names.to_vec())),
+        Box::new(UnsafeStoragePatternsCheck),
+        Box::new(MissingTtlExtensionCheck),
+        Box::new(ForbiddenStdImportsCheck),
+        Box::new(HardcodedAddressCheck),
+        Box::new(UnsafeCrossContractInputCheck),
+        Box::new(MissingContractAnnotationCheck),
+        Box::new(DelegateCallRiskCheck),
+        Box::new(IntegerDivisionTruncationCheck),
+        Box::new(MissingEventEmissionCheck),
+        Box::new(SymbolKeyCollisionCheck),
+        Box::new(SelfTransferCheck),
+        Box::new(MissingZeroAddressCheck),
+        Box::new(MutableGlobalStateCheck),
+        Box::new(ReInitializationRiskCheck),
+        Box::new(UncheckedInvokeReturnCheck),
+        Box::new(MissingBalanceCheck),
+        Box::new(UnboundedVecGrowthCheck),
+        Box::new(UnsafeRandomnessCheck),
+        Box::new(UncheckedDivisorCheck),
+    ];
+    checks.retain(|c| !disabled.contains(&c.name().to_string()));
+    checks
 }

@@ -1,8 +1,10 @@
+mod config;
+
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use soroban_guard_analyzer::scan_directory_with_checks;
-use soroban_guard_checks::{default_checks, Finding, Severity};
+use soroban_guard_checks::{default_checks, default_checks_with_config, Finding, Severity};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -87,17 +89,41 @@ fn main() {
                 std::process::exit(2);
             }
 
-            let fail_threshold = match fail_on.to_lowercase().as_str() {
+            // Load soroban-guard.toml from the scan root (if present).
+            let cfg = match config::load(&path) {
+                Ok(c) => c.unwrap_or_default(),
+                Err(e) => {
+                    eprintln!("{} {}", "error:".red().bold(), e);
+                    std::process::exit(2);
+                }
+            };
+
+            // CLI --fail-on takes precedence; fall back to config min_severity.
+            let effective_fail_on = if fail_on != "high" {
+                fail_on.clone()
+            } else {
+                cfg.scan.min_severity.clone().unwrap_or(fail_on.clone())
+            };
+            let fail_threshold = match effective_fail_on.to_lowercase().as_str() {
                 "medium" => Severity::Medium,
                 "low" => Severity::Low,
                 _ => Severity::High,
             };
 
-            // Validate --disable-check values against known check names.
-            let all_checks = default_checks();
-            if !disable_check.is_empty() {
-                let known_names: HashSet<&str> = all_checks.iter().map(|c| c.name()).collect();
-                for name in &disable_check {
+            // Merge config disabled list with --disable-check flags (CLI takes precedence /
+            // union: both sources contribute to the disabled set).
+            let mut all_disabled: Vec<String> = cfg.checks.disabled.clone();
+            for name in &disable_check {
+                if !all_disabled.contains(name) {
+                    all_disabled.push(name.clone());
+                }
+            }
+
+            // Validate disabled names against known checks.
+            let known_checks = default_checks();
+            {
+                let known_names: HashSet<&str> = known_checks.iter().map(|c| c.name()).collect();
+                for name in &all_disabled {
                     if !known_names.contains(name.as_str()) {
                         eprintln!(
                             "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
@@ -107,14 +133,13 @@ fn main() {
                         std::process::exit(2);
                     }
                 }
-                if !quiet {
-                    let list = disable_check.join(", ");
-                    eprintln!("note: disabled check(s): {}", list);
-                }
             }
-            let disabled: HashSet<&str> = disable_check.iter().map(String::as_str).collect();
-            let active_checks: Vec<_> =
-                all_checks.into_iter().filter(|c| !disabled.contains(c.name())).collect();
+            if !all_disabled.is_empty() && !quiet {
+                eprintln!("note: disabled check(s): {}", all_disabled.join(", "));
+            }
+
+            let extra_sensitive = &cfg.checks.sensitive_names.extra;
+            let active_checks = default_checks_with_config(&all_disabled, extra_sensitive);
 
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory_with_checks(&path, &[], &includes, &active_checks) {
