@@ -383,3 +383,23 @@ Division by zero panics in Soroban, aborting the transaction and potentially lea
 - Any literal divisor (e.g. `a / 2`) is ignored regardless of context.
 
 **Fixture:** `test-contracts/unchecked-divisor-vulnerable/`, `test-contracts/unchecked-divisor-safe/`
+
+---
+
+## `panic-in-contract` (Medium)
+
+**What it detects**
+
+Inside `#[contractimpl]` methods: explicit `panic!()` and `unreachable!()` macro invocations, and `.unwrap()` / `.expect(...)` method calls.
+
+**Why it matters**
+
+Panics abort the transaction with an unhelpful, generic error and can leave the contract in a partially-updated state if some storage writes already happened earlier in the call. Prefer `Result`-returning methods with typed errors, or `env.panic_with_error` for explicit, well-defined aborts.
+
+**Limitations**
+
+- Does not track `unwrap`/`expect` through re-exports or type aliases — only the literal method name is matched.
+- Flags every occurrence regardless of whether the `Option`/`Result` being unwrapped is realistically `None`/`Err` (e.g. immediately after a guarded check).
+- This check is implemented and unit-tested but not yet included in `default_checks()` — it does not currently run as part of a default `soroban-guard` scan.
+
+**Fixture:** `test-contracts/panic-vulnerable/`, `test-contracts/panic-safe/`
