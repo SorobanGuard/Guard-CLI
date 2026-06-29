@@ -37,6 +37,9 @@ enum Commands {
         /// Suppress all output when there are zero High findings
         #[arg(long)]
         quiet: bool,
+        /// Print additional scan statistics such as skipped generated files
+        #[arg(long)]
+        verbose: bool,
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
@@ -55,6 +58,7 @@ fn main() {
             markdown,
             output,
             quiet,
+            verbose,
             include,
         } => {
             // Mutual exclusion
@@ -69,7 +73,7 @@ fn main() {
 
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
-                Ok((findings, files_scanned)) => {
+                Ok((findings, files_scanned, files_skipped)) => {
                     let any_high = findings
                         .iter()
                         .any(|f| matches!(f.severity, Severity::High));
@@ -112,8 +116,20 @@ fn main() {
                         }
                     } else {
                         if !quiet || any_high {
-                            print_pretty(&findings, files_scanned, path.display().to_string());
+                            print_pretty(
+                                &findings,
+                                files_scanned,
+                                path.display().to_string(),
+                                0,
+                            );
                         }
+                    }
+
+                    if verbose && files_skipped > 0 {
+                        eprintln!(
+                            "Skipped {} generated file(s) from analysis.",
+                            files_skipped
+                        );
                     }
 
                     if any_high {
