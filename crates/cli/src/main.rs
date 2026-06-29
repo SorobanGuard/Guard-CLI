@@ -40,6 +40,9 @@ enum Commands {
         /// Suppress all output when there are zero High findings
         #[arg(long)]
         quiet: bool,
+        /// Print additional scan statistics such as skipped generated files
+        #[arg(long)]
+        verbose: bool,
         /// Only scan files matching this glob pattern (e.g. `src/token*.rs`)
         #[arg(long)]
         include: Option<String>,
@@ -63,6 +66,7 @@ fn main() {
             markdown,
             output,
             quiet,
+            verbose,
             include,
             fail_on,
         } => {
@@ -87,6 +91,8 @@ fn main() {
 
             let includes: Vec<String> = include.into_iter().collect();
             match scan_directory(&path, &[], &includes) {
+                Ok((findings, files_scanned, files_skipped)) => {
+                    let any_high = findings
                 Ok((findings, files_scanned)) => {
                     let should_fail = findings
                         .iter()
@@ -128,6 +134,25 @@ fn main() {
                         if !quiet || should_fail {
                             print_markdown(&findings);
                         }
+                    } else {
+                        if !quiet || any_high {
+                            print_pretty(
+                                &findings,
+                                files_scanned,
+                                path.display().to_string(),
+                                0,
+                            );
+                        }
+                    }
+
+                    if verbose && files_skipped > 0 {
+                        eprintln!(
+                            "Skipped {} generated file(s) from analysis.",
+                            files_skipped
+                        );
+                    }
+
+                    if any_high {
                     } else if !quiet || should_fail {
                         let (display, truncated) = truncate(&findings, 0);
                         print_pretty(display, files_scanned, path.display().to_string(), truncated);
