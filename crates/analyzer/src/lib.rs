@@ -258,7 +258,17 @@ pub fn scan_directory(
         .collect();
 
     // Excludes already applied above; pass empty slice to avoid double-filtering.
-    scan_files(&paths, &root, &[])
+    let (mut results, count) = scan_files(&paths, &root, &[])?;
+    for r in &mut results {
+        dedup_findings(&mut r.findings);
+    }
+    Ok((results, count))
+}
+
+/// Remove duplicate findings with the same `(file_path, line, check_name)`, keeping the first.
+fn dedup_findings(findings: &mut Vec<Finding>) {
+    let mut seen = std::collections::HashSet::new();
+    findings.retain(|f| seen.insert((f.file_path.clone(), f.line, f.check_name.clone())));
 }
 
 /// Like [`scan_directory`] but runs `checks` instead of [`default_checks`].
@@ -362,6 +372,7 @@ pub fn scan_directory_with_checks(
                 })
                 .collect();
             findings.sort_by_key(|f| f.line);
+            dedup_findings(&mut findings);
             Ok(FileScanResult { file_path: file_label, findings })
         })
         .collect::<Result<Vec<_>, ScanError>>()?;
@@ -500,6 +511,53 @@ mod tests {
         let (_, files_scanned) =
             scan_files(&[excluded], &root, &["src/other.rs".to_string()]).unwrap();
         assert_eq!(files_scanned, 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+    use soroban_guard_checks::{Finding, Severity};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A check that always returns two identical findings for every file it sees.
+    struct DuplicatingCheck;
+    impl soroban_guard_checks::Check for DuplicatingCheck {
+        fn name(&self) -> &str { "dup-check" }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            let f = Finding {
+                check_name: "dup-check".into(),
+                severity: Severity::Low,
+                file_path: String::new(),
+                line: 1,
+                function_name: "f".into(),
+                description: "duplicate".into(),
+                rule_url: None,
+                suggestion: None,
+            };
+            vec![f.clone(), f]
+        }
+    }
+
+    #[test]
+    fn deduplicates_findings_with_same_file_line_check() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-dedup-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(DuplicatingCheck)];
+        let (results, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+
+        let total: usize = results.iter().map(|r| r.findings.len()).sum();
+        assert_eq!(total, 1, "expected 1 finding after dedup, got {}", total);
 
         fs::remove_dir_all(root).unwrap();
     }
