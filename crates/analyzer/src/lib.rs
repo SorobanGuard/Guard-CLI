@@ -262,6 +262,7 @@ pub fn scan_directory(
     for r in &mut results {
         dedup_findings(&mut r.findings);
     }
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     Ok((results, count))
 }
 
@@ -377,6 +378,7 @@ pub fn scan_directory_with_checks(
         })
         .collect::<Result<Vec<_>, ScanError>>()?;
 
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     Ok((results, files_scanned))
 }
 
@@ -558,6 +560,74 @@ mod dedup_tests {
 
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
         assert_eq!(total, 1, "expected 1 finding after dedup, got {}", total);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A check that returns two findings at different lines, intentionally reversed.
+    struct ReversedCheck;
+    impl soroban_guard_checks::Check for ReversedCheck {
+        fn name(&self) -> &str { "reversed-check" }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            vec![
+                Finding {
+                    check_name: "reversed-check".into(),
+                    severity: Severity::Low,
+                    file_path: String::new(),
+                    line: 20,
+                    function_name: "b".into(),
+                    description: "second".into(),
+                    rule_url: None,
+                    suggestion: None,
+                },
+                Finding {
+                    check_name: "reversed-check".into(),
+                    severity: Severity::Low,
+                    file_path: String::new(),
+                    line: 5,
+                    function_name: "a".into(),
+                    description: "first".into(),
+                    rule_url: None,
+                    suggestion: None,
+                },
+            ]
+        }
+    }
+
+    #[test]
+    fn findings_sorted_by_file_path_then_line() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-sort-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        // Two files — rayon may process them in any order.
+        fs::write(root.join("src/b_module.rs"), "pub fn b() {}").unwrap();
+        fs::write(root.join("src/a_module.rs"), "pub fn a() {}").unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(ReversedCheck)];
+        let (results, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+
+        // Files must be in lexicographic order.
+        let file_paths: Vec<&str> = results.iter().map(|r| r.file_path.as_str()).collect();
+        assert!(
+            file_paths.windows(2).all(|w| w[0] <= w[1]),
+            "files not in sorted order: {:?}",
+            file_paths
+        );
+
+        // Within each file, findings must be sorted by line.
+        for r in &results {
+            let lines: Vec<usize> = r.findings.iter().map(|f| f.line).collect();
+            assert!(
+                lines.windows(2).all(|w| w[0] <= w[1]),
+                "findings in {} not sorted by line: {:?}",
+                r.file_path,
+                lines
+            );
+        }
 
         fs::remove_dir_all(root).unwrap();
     }
