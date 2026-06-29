@@ -4,7 +4,7 @@
 //! findings are concatenated with **no shared mutable state** between checks.
 
 use rayon::prelude::*;
-use soroban_guard_checks::{default_checks, Finding};
+use soroban_guard_checks::{default_checks, Check, Finding};
 use std::io::BufRead;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -258,7 +258,128 @@ pub fn scan_directory(
         .collect();
 
     // Excludes already applied above; pass empty slice to avoid double-filtering.
-    scan_files(&paths, &root, &[])
+    let (mut results, count) = scan_files(&paths, &root, &[])?;
+    for r in &mut results {
+        dedup_findings(&mut r.findings);
+    }
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    Ok((results, count))
+}
+
+/// Remove duplicate findings with the same `(file_path, line, check_name)`, keeping the first.
+fn dedup_findings(findings: &mut Vec<Finding>) {
+    let mut seen = std::collections::HashSet::new();
+    findings.retain(|f| seen.insert((f.file_path.clone(), f.line, f.check_name.clone())));
+}
+
+/// Like [`scan_directory`] but runs `checks` instead of [`default_checks`].
+pub fn scan_directory_with_checks(
+    root: &Path,
+    excludes: &[String],
+    includes: &[String],
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<FileScanResult>, usize), ScanError> {
+    let root = root.canonicalize()?;
+    let exclude_patterns: Vec<glob::Pattern> = excludes
+        .iter()
+        .filter_map(|p| glob::Pattern::new(p).ok())
+        .collect();
+    let include_patterns: Vec<glob::Pattern> = includes
+        .iter()
+        .filter_map(|p| glob::Pattern::new(p).ok())
+        .collect();
+
+    let paths: Vec<PathBuf> = WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            if !entry.file_type().is_file() {
+                return false;
+            }
+            let path = entry.path();
+            if path
+                .components()
+                .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
+            {
+                return false;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                return false;
+            }
+            let label = path.strip_prefix(&root).unwrap_or(path);
+            if exclude_patterns
+                .iter()
+                .any(|p| p.matches_path(label) || p.matches_path(path))
+            {
+                return false;
+            }
+            if !include_patterns.is_empty()
+                && !include_patterns
+                    .iter()
+                    .any(|p| p.matches_path(label) || p.matches_path(path))
+            {
+                return false;
+            }
+            true
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    let files_scanned = paths.len();
+    let results: Vec<FileScanResult> = paths
+        .par_iter()
+        .map(|path| {
+            let content = std::fs::read_to_string(path)?;
+            let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
+                path: path.clone(),
+                message: e.to_string(),
+            })?;
+            let file_label = path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            let mut findings: Vec<Finding> = checks
+                .iter()
+                .flat_map(|check| {
+                    let check_name = check.name().to_string();
+                    match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content))) {
+                        Ok(mut hits) => {
+                            for f in &mut hits {
+                                f.file_path.clone_from(&file_label);
+                            }
+                            hits
+                        }
+                        Err(payload) => {
+                            let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                                msg.to_string()
+                            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                                msg.clone()
+                            } else {
+                                "panic payload was not a string".to_string()
+                            };
+                            eprintln!(
+                                "warning: {}",
+                                ScanError::CheckPanic {
+                                    check: check_name,
+                                    path: path.clone(),
+                                    message,
+                                }
+                            );
+                            Vec::new()
+                        }
+                    }
+                })
+                .collect();
+            findings.sort_by_key(|f| f.line);
+            dedup_findings(&mut findings);
+            Ok(FileScanResult { file_path: file_label, findings })
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?;
+
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    Ok((results, files_scanned))
 }
 
 #[cfg(test)]
@@ -392,6 +513,121 @@ mod tests {
         let (_, files_scanned) =
             scan_files(&[excluded], &root, &["src/other.rs".to_string()]).unwrap();
         assert_eq!(files_scanned, 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+    use soroban_guard_checks::{Finding, Severity};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A check that always returns two identical findings for every file it sees.
+    struct DuplicatingCheck;
+    impl soroban_guard_checks::Check for DuplicatingCheck {
+        fn name(&self) -> &str { "dup-check" }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            let f = Finding {
+                check_name: "dup-check".into(),
+                severity: Severity::Low,
+                file_path: String::new(),
+                line: 1,
+                function_name: "f".into(),
+                description: "duplicate".into(),
+                rule_url: None,
+                suggestion: None,
+            };
+            vec![f.clone(), f]
+        }
+    }
+
+    #[test]
+    fn deduplicates_findings_with_same_file_line_check() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-dedup-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(DuplicatingCheck)];
+        let (results, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+
+        let total: usize = results.iter().map(|r| r.findings.len()).sum();
+        assert_eq!(total, 1, "expected 1 finding after dedup, got {}", total);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A check that returns two findings at different lines, intentionally reversed.
+    struct ReversedCheck;
+    impl soroban_guard_checks::Check for ReversedCheck {
+        fn name(&self) -> &str { "reversed-check" }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            vec![
+                Finding {
+                    check_name: "reversed-check".into(),
+                    severity: Severity::Low,
+                    file_path: String::new(),
+                    line: 20,
+                    function_name: "b".into(),
+                    description: "second".into(),
+                    rule_url: None,
+                    suggestion: None,
+                },
+                Finding {
+                    check_name: "reversed-check".into(),
+                    severity: Severity::Low,
+                    file_path: String::new(),
+                    line: 5,
+                    function_name: "a".into(),
+                    description: "first".into(),
+                    rule_url: None,
+                    suggestion: None,
+                },
+            ]
+        }
+    }
+
+    #[test]
+    fn findings_sorted_by_file_path_then_line() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-sort-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        // Two files — rayon may process them in any order.
+        fs::write(root.join("src/b_module.rs"), "pub fn b() {}").unwrap();
+        fs::write(root.join("src/a_module.rs"), "pub fn a() {}").unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(ReversedCheck)];
+        let (results, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+
+        // Files must be in lexicographic order.
+        let file_paths: Vec<&str> = results.iter().map(|r| r.file_path.as_str()).collect();
+        assert!(
+            file_paths.windows(2).all(|w| w[0] <= w[1]),
+            "files not in sorted order: {:?}",
+            file_paths
+        );
+
+        // Within each file, findings must be sorted by line.
+        for r in &results {
+            let lines: Vec<usize> = r.findings.iter().map(|f| f.line).collect();
+            assert!(
+                lines.windows(2).all(|w| w[0] <= w[1]),
+                "findings in {} not sorted by line: {:?}",
+                r.file_path,
+                lines
+            );
+        }
 
         fs::remove_dir_all(root).unwrap();
     }

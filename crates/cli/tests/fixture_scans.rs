@@ -86,3 +86,77 @@ fn storage_fixtures() {
 fn zero_address_fixtures() {
     assert_fixture_pair("zero-address", "missing-zero-address-check");
 }
+
+/// Verify that `soroban-guard.toml` is read and its `[checks.sensitive_names].extra` list
+/// extends the built-in admin check so that custom function names are flagged.
+#[test]
+fn config_extra_sensitive_names_affect_admin_check() {
+    use soroban_guard_analyzer::scan_directory_with_checks;
+    use soroban_guard_checks::default_checks_with_config;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let root = std::env::temp_dir().join(format!(
+        "soroban-guard-cfg-test-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(root.join("src")).unwrap();
+
+    // A contract that calls a function named `drain` with no require_auth.
+    // `drain` is NOT in the built-in SENSITIVE_NAMES list.
+    fs::write(
+        root.join("src/lib.rs"),
+        r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn drain(env: Env) {
+        let _ = env;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    // Config file that adds `drain` to the sensitive names.
+    fs::write(
+        root.join("soroban-guard.toml"),
+        r#"
+[checks.sensitive_names]
+extra = ["drain"]
+"#,
+    )
+    .unwrap();
+
+    // Without config: `drain` should NOT be flagged.
+    let checks_no_cfg = default_checks_with_config(&[], &[]);
+    let (results_no_cfg, _) =
+        scan_directory_with_checks(&root, &[], &[], &checks_no_cfg).unwrap();
+    let findings_no_cfg: Vec<_> = results_no_cfg
+        .iter()
+        .flat_map(|r| r.findings.iter())
+        .filter(|f| f.check_name == "unprotected-admin" && f.function_name == "drain")
+        .collect();
+    assert!(
+        findings_no_cfg.is_empty(),
+        "`drain` should not be flagged without config, got: {findings_no_cfg:#?}"
+    );
+
+    // With config extra name: `drain` SHOULD be flagged.
+    let checks_with_cfg = default_checks_with_config(&[], &["drain".to_string()]);
+    let (results_with_cfg, _) =
+        scan_directory_with_checks(&root, &[], &[], &checks_with_cfg).unwrap();
+    let findings_with_cfg: Vec<_> = results_with_cfg
+        .iter()
+        .flat_map(|r| r.findings.iter())
+        .filter(|f| f.check_name == "unprotected-admin" && f.function_name == "drain")
+        .collect();
+    assert!(
+        !findings_with_cfg.is_empty(),
+        "`drain` should be flagged when listed in config extra sensitive_names"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

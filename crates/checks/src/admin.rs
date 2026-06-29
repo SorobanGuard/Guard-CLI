@@ -35,7 +35,20 @@ const SENSITIVE_PREFIXES: &[&str] = &["set_admin", "pause_", "emergency_"];
 
 /// `pub` methods whose name matches a sensitive admin pattern and whose body never calls
 /// `require_auth` or `require_auth_for_args` (any receiver).
-pub struct UnprotectedAdminCheck;
+pub struct UnprotectedAdminCheck {
+    extra_names: Vec<String>,
+}
+
+impl UnprotectedAdminCheck {
+    pub fn new() -> Self {
+        Self { extra_names: Vec::new() }
+    }
+
+    /// Extend the built-in `SENSITIVE_NAMES` list with project-specific names.
+    pub fn with_extra_names(extra: Vec<String>) -> Self {
+        Self { extra_names: extra }
+    }
+}
 
 impl Check for UnprotectedAdminCheck {
     fn name(&self) -> &str {
@@ -49,7 +62,7 @@ impl Check for UnprotectedAdminCheck {
                 continue;
             }
             let name = method.sig.ident.to_string();
-            if !is_sensitive_name(&name) {
+            if !is_sensitive_name(&name, &self.extra_names) {
                 continue;
             }
             if body_has_auth_gate(&method.block) {
@@ -81,11 +94,12 @@ impl Check for UnprotectedAdminCheck {
     }
 }
 
-fn is_sensitive_name(name: &str) -> bool {
+fn is_sensitive_name(name: &str, extra: &[String]) -> bool {
     SENSITIVE_NAMES.contains(&name)
         || SENSITIVE_PREFIXES
             .iter()
             .any(|prefix| name.starts_with(prefix))
+        || extra.iter().any(|e| e == name)
 }
 
 fn receiver_chain_contains_storage(expr: &Expr) -> bool {
@@ -161,7 +175,7 @@ impl C {
 }
 "#,
         )?;
-        let hits = UnprotectedAdminCheck.run(&file, "");
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].severity, Severity::High);
         assert_eq!(hits[0].function_name, "set_owner");
@@ -185,7 +199,7 @@ impl C {
 }
 "#,
         )?;
-        let hits = UnprotectedAdminCheck.run(&file, "");
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert!(hits.is_empty());
         Ok(())
     }
@@ -206,7 +220,7 @@ impl C {
 }
 "#,
         )?;
-        let hits = UnprotectedAdminCheck.run(&file, "");
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert!(hits.is_empty());
         Ok(())
     }
@@ -227,7 +241,7 @@ impl C {
 }
 "#,
         )?;
-        let hits = UnprotectedAdminCheck.run(&file, "");
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert!(hits.is_empty());
         Ok(())
     }
@@ -248,7 +262,7 @@ impl C {
 }
 "#,
         )?;
-        let hits = UnprotectedAdminCheck.run(&file, "");
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].function_name, "set_admin_fee");
         Ok(())
@@ -270,7 +284,7 @@ impl C {
 }
 "#,
         )?;
-        let hits = UnprotectedAdminCheck.run(&file, "");
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].function_name, "pause_withdrawals");
         Ok(())
@@ -292,7 +306,7 @@ impl C {
 }
 "#,
         )?;
-        let hits = UnprotectedAdminCheck.run(&file, "");
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert!(hits.is_empty());
         Ok(())
     }
