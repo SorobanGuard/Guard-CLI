@@ -4,7 +4,7 @@
 //! findings are concatenated with **no shared mutable state** between checks.
 
 use rayon::prelude::*;
-use soroban_guard_checks::{default_checks, Finding};
+use soroban_guard_checks::{default_checks, Check, Finding};
 use std::io::BufRead;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -259,6 +259,114 @@ pub fn scan_directory(
 
     // Excludes already applied above; pass empty slice to avoid double-filtering.
     scan_files(&paths, &root, &[])
+}
+
+/// Like [`scan_directory`] but runs `checks` instead of [`default_checks`].
+pub fn scan_directory_with_checks(
+    root: &Path,
+    excludes: &[String],
+    includes: &[String],
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<FileScanResult>, usize), ScanError> {
+    let root = root.canonicalize()?;
+    let exclude_patterns: Vec<glob::Pattern> = excludes
+        .iter()
+        .filter_map(|p| glob::Pattern::new(p).ok())
+        .collect();
+    let include_patterns: Vec<glob::Pattern> = includes
+        .iter()
+        .filter_map(|p| glob::Pattern::new(p).ok())
+        .collect();
+
+    let paths: Vec<PathBuf> = WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            if !entry.file_type().is_file() {
+                return false;
+            }
+            let path = entry.path();
+            if path
+                .components()
+                .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
+            {
+                return false;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                return false;
+            }
+            let label = path.strip_prefix(&root).unwrap_or(path);
+            if exclude_patterns
+                .iter()
+                .any(|p| p.matches_path(label) || p.matches_path(path))
+            {
+                return false;
+            }
+            if !include_patterns.is_empty()
+                && !include_patterns
+                    .iter()
+                    .any(|p| p.matches_path(label) || p.matches_path(path))
+            {
+                return false;
+            }
+            true
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    let files_scanned = paths.len();
+    let results: Vec<FileScanResult> = paths
+        .par_iter()
+        .map(|path| {
+            let content = std::fs::read_to_string(path)?;
+            let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
+                path: path.clone(),
+                message: e.to_string(),
+            })?;
+            let file_label = path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            let mut findings: Vec<Finding> = checks
+                .iter()
+                .flat_map(|check| {
+                    let check_name = check.name().to_string();
+                    match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content))) {
+                        Ok(mut hits) => {
+                            for f in &mut hits {
+                                f.file_path.clone_from(&file_label);
+                            }
+                            hits
+                        }
+                        Err(payload) => {
+                            let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                                msg.to_string()
+                            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                                msg.clone()
+                            } else {
+                                "panic payload was not a string".to_string()
+                            };
+                            eprintln!(
+                                "warning: {}",
+                                ScanError::CheckPanic {
+                                    check: check_name,
+                                    path: path.clone(),
+                                    message,
+                                }
+                            );
+                            Vec::new()
+                        }
+                    }
+                })
+                .collect();
+            findings.sort_by_key(|f| f.line);
+            Ok(FileScanResult { file_path: file_label, findings })
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?;
+
+    Ok((results, files_scanned))
 }
 
 #[cfg(test)]

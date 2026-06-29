@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
-use soroban_guard_analyzer::scan_directory;
+use soroban_guard_analyzer::scan_directory_with_checks;
 use soroban_guard_checks::{default_checks, Finding, Severity};
 use std::fs;
 use std::io;
@@ -49,6 +49,9 @@ enum Commands {
         /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
         #[arg(long, default_value = "high")]
         fail_on: String,
+        /// Disable a named check (may be repeated)
+        #[arg(long, value_name = "CHECK")]
+        disable_check: Vec<String>,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -69,6 +72,7 @@ fn main() {
             verbose,
             include,
             fail_on,
+            disable_check,
         } => {
             if no_color {
                 colored::control::set_override(false);
@@ -89,8 +93,31 @@ fn main() {
                 _ => Severity::High,
             };
 
+            // Validate --disable-check values against known check names.
+            let all_checks = default_checks();
+            if !disable_check.is_empty() {
+                let known_names: HashSet<&str> = all_checks.iter().map(|c| c.name()).collect();
+                for name in &disable_check {
+                    if !known_names.contains(name.as_str()) {
+                        eprintln!(
+                            "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+                            "error:".red().bold(),
+                            name
+                        );
+                        std::process::exit(2);
+                    }
+                }
+                if !quiet {
+                    let list = disable_check.join(", ");
+                    eprintln!("note: disabled check(s): {}", list);
+                }
+            }
+            let disabled: HashSet<&str> = disable_check.iter().map(String::as_str).collect();
+            let active_checks: Vec<_> =
+                all_checks.into_iter().filter(|c| !disabled.contains(c.name())).collect();
+
             let includes: Vec<String> = include.into_iter().collect();
-            match scan_directory(&path, &[], &includes) {
+            match scan_directory_with_checks(&path, &[], &includes, &active_checks) {
                 Ok((findings, files_scanned, files_skipped)) => {
                     let any_high = findings
                 Ok((findings, files_scanned)) => {
