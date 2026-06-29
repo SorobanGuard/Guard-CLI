@@ -14,6 +14,23 @@ Soroban Guard catches common vulnerability classes at the source level, before `
 
 ---
 
+## How does this compare to `clippy` and `cargo-audit`?
+
+These tools solve different problems and are complementary — running all three gives broader coverage than any one alone.
+
+| | `soroban-guard` | `clippy` | `cargo-audit` |
+|---|---|---|---|
+| **What it analyzes** | Soroban contract source (`#[contractimpl]` methods, storage calls, cross-contract invocations) | Any Rust source, general-purpose | `Cargo.lock` dependency versions |
+| **What it looks for** | Soroban/Stellar-specific contract security bugs (missing `require_auth`, reentrancy, unprotected admin, hardcoded addresses, unsafe storage, etc.) | General Rust correctness, style, and performance lints | Known-vulnerable crate versions published in the [RustSec advisory database](https://rustsec.org/) |
+| **Domain awareness** | Yes — understands Soroban SDK patterns (`env.storage()`, `invoke_contract`, `#[contract]`/`#[contractimpl]`) | No — has no concept of Soroban, contracts, or on-chain state | No — operates purely on dependency metadata, not source code |
+| **Catches supply-chain CVEs** | No | No | Yes |
+| **Catches contract-logic vulnerabilities** | Yes | No | No |
+| **Catches general Rust bugs/style issues** | No | Yes | No |
+
+In short: `cargo-audit` checks *what you depend on*, `clippy` checks *how you write Rust in general*, and `soroban-guard` checks *whether your contract logic is safe to deploy on Stellar*. None of them substitute for the others — a contract can pass `clippy` and `cargo-audit` cleanly while still having an exploitable reentrancy or missing-auth bug, which is the gap `soroban-guard` is built to close.
+
+---
+
 ## Stellar / Soroban Context
 
 Soroban contracts are Rust crates compiled to WASM and deployed to the Stellar network. Key security concerns this tool addresses:
