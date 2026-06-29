@@ -70,7 +70,7 @@ impl<'ast> Visit<'ast> for PanicVisitor<'_> {
     fn visit_macro(&mut self, i: &'ast syn::Macro) {
         let name = macro_name(i);
         if matches!(name.as_str(), "panic" | "unreachable") {
-            self.push(mac.span().start().line, &format!("{name}!"));
+            self.push(i.span().start().line, &format!("{name}!"));
         }
         visit::visit_macro(self, i);
     }

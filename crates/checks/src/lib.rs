@@ -3,41 +3,61 @@
 pub mod admin;
 pub mod annotations;
 pub mod auth;
+pub mod auth_order;
+pub mod balance;
 pub mod delegate;
 pub mod division;
 pub mod events;
 pub mod global_state;
 pub mod hardcoded_address;
+pub mod invoke_return;
 pub mod key_collision;
+pub mod large_loop;
+pub mod missing_nonce;
 pub mod overflow;
 pub mod panics;
 pub mod reentrancy;
+pub mod reinit;
 pub mod std_imports;
 pub mod storage;
 pub mod transfer;
 pub mod ttl;
+pub mod unchecked_divisor;
+pub mod unsafe_randomness;
+pub mod vec_growth;
 pub mod xc_input;
 pub mod zero_address;
+pub mod uninitialized_storage_read;
 mod util;
 
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
+pub use auth_order::AuthAfterStorageWriteCheck;
+pub use balance::MissingBalanceCheck;
 pub use delegate::DelegateCallRiskCheck;
 pub use division::IntegerDivisionTruncationCheck;
 pub use events::MissingEventEmissionCheck;
 pub use global_state::MutableGlobalStateCheck;
 pub use hardcoded_address::HardcodedAddressCheck;
+pub use invoke_return::UncheckedInvokeReturnCheck;
 pub use key_collision::SymbolKeyCollisionCheck;
+pub use large_loop::LargeLoopCheck;
+pub use missing_nonce::MissingNonceCheck;
 pub use overflow::UncheckedArithmeticCheck;
 pub use panics::PanicInContractCheck;
 pub use reentrancy::ReentrancyRiskCheck;
+pub use reinit::ReInitializationRiskCheck;
 pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
 pub use transfer::SelfTransferCheck;
 pub use ttl::MissingTtlExtensionCheck;
+pub use unchecked_divisor::UncheckedDivisorCheck;
+pub use unsafe_randomness::UnsafeRandomnessCheck;
+pub use vec_growth::UnboundedVecGrowthCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
+pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -169,7 +189,7 @@ pub fn group_by_severity<'a>(findings: &'a [Finding]) -> BTreeMap<Severity, Vec<
 /// This catches copy-paste errors when adding a new detector before they can
 /// cause silent finding collisions at runtime.
 pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
-    let checks: Vec<Box<dyn Check + Send + Sync>> = vec![
+    vec![
         Box::new(MissingRequireAuthCheck),
         Box::new(UncheckedArithmeticCheck),
         Box::new(UnprotectedAdminCheck),
@@ -186,5 +206,11 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(SelfTransferCheck),
         Box::new(MissingZeroAddressCheck),
         Box::new(MutableGlobalStateCheck),
+        Box::new(ReInitializationRiskCheck),
+        Box::new(UncheckedInvokeReturnCheck),
+        Box::new(MissingBalanceCheck),
+        Box::new(UnboundedVecGrowthCheck),
+        Box::new(UnsafeRandomnessCheck),
+        Box::new(UncheckedDivisorCheck),
     ]
 }

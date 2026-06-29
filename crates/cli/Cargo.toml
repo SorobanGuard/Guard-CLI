@@ -13,6 +13,7 @@ path = "src/main.rs"
 soroban-guard-analyzer = { path = "../analyzer" }
 soroban-guard-checks = { path = "../checks" }
 clap.workspace = true
+clap_complete = "4.5"
 colored.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
