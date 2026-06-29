@@ -104,6 +104,27 @@ Names like `set_owner` strongly suggest privilege; without any auth call the sca
 
 ---
 
+## `hardcoded-address` (Medium)
+
+**Status:** Phase 3
+
+**What it detects**
+
+A string literal anywhere in the file that matches the shape of a Stellar `StrKey` public key — a 56-character base32 run starting with `G`, bounded by non-alphanumeric characters on both sides. Works on the raw source text rather than the parsed AST, so it catches keys regardless of which expression they appear in.
+
+**Why it matters**
+
+Baking a fixed account or contract address into source code breaks the contract if that account is ever redeployed or rotated, and makes the contract harder to reuse across networks (e.g. testnet vs. mainnet) without a rebuild. Addresses should be passed in as parameters, read from storage, or supplied via configuration.
+
+**Limitations**
+
+- Purely textual pattern matching — it does not verify the candidate is a valid `StrKey` checksum, so it can flag any 56-char `G...` run, including ones in comments or non-address strings that happen to match the shape.
+- Does not track whether the literal is actually used to construct an `Address` (e.g. via `Address::from_str`) vs. just printed or compared.
+
+**Fixture:** `test-contracts/hardcoded-address-vulnerable/`, `test-contracts/hardcoded-address-safe/`
+
+---
+
 ## `unsafe-cross-contract-input` (High)
 
 **Status:** Phase 3
@@ -164,6 +185,26 @@ Invoking contracts from a storage-derived address is effectively a delegate call
 - Intentional use (e.g. proxy patterns) is still flagged — review and suppress as needed.
 
 **Fixture:** `test-contracts/delegate-vulnerable/`, `test-contracts/delegate-safe/`
+
+---
+
+## `reentrancy-risk` (High)
+
+**What it detects**
+
+Inside a single `#[contractimpl]` method: a storage write (`set`, `remove`, `extend_ttl`, `bump`, or `append` called on a `.storage()`-derived receiver) followed by a call to `invoke_contract` or `invoke_contract_check`, with no intervening storage read (`get`, `get_unchecked`, or `has`) between the write and the call.
+
+**Why it matters**
+
+`invoke_contract` hands control to an external, potentially untrusted contract. If that callee can call back into this contract before the caller's state has been finalized or re-validated, it may observe or act on stale/inconsistent state — the same class of bug as reentrancy in EVM contracts. Following checks-effects-interactions (perform external calls before writes, or re-read state after the call) avoids this.
+
+**Limitations**
+
+- Tracks a single, linear path through one method body; writes and calls reached through different branches of an `if`/`match`, or made from a helper function, are not correlated.
+- A storage read anywhere after the write clears the finding, even if it doesn't actually re-validate the state used by the subsequent `invoke_contract` call.
+- This check is implemented and unit-tested but not yet included in `default_checks()` — it does not currently run as part of a default `soroban-guard` scan.
+
+**Fixture:** tests in `crates/checks/src/reentrancy.rs`
 
 ---
 
@@ -269,6 +310,27 @@ Setting an admin or owner to `Address::default()` (the zero address) can permane
 - External validation in helper functions is not tracked.
 
 **Fixture:** tests in `crates/checks/src/zero_address.rs`
+
+---
+
+## `mutable-global-state` (High)
+
+**Status:** Phase 3
+
+**What it detects**
+
+A `static mut` item anywhere at module scope (`syn::Item::Static` with `mutability: Mut`).
+
+**Why it matters**
+
+Soroban contract instances are stateless between invocations — each call may run in a fresh execution environment, so a `static mut` value is not guaranteed to persist on-chain and is unsafe to mutate outside of `unsafe` blocks. Using it for state that needs to survive between calls (counters, caches, flags) silently loses data or behaves inconsistently; on-chain state must go through `env.storage()`.
+
+**Limitations**
+
+- Flags the declaration itself, not individual reads/writes — a single `static mut` only produces one finding regardless of how many places mutate it.
+- Does not distinguish genuinely persistent-looking usage (e.g. write-once init flags) from clearly incorrect uses; all `static mut` declarations are flagged the same way.
+
+**Fixture:** `test-contracts/global-state-vulnerable/`, `test-contracts/global-state-safe/`
 
 ---
 
