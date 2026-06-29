@@ -1,5 +1,11 @@
 # Guard CLI
 
+[![CI](https://img.shields.io/github/actions/workflow/status/SorobanGuard/Guard-CLI/ci.yml?branch=main&label=CI)](https://github.com/SorobanGuard/Guard-CLI/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/SorobanGuard/Guard-CLI)
+[![Rust Edition 2021](https://img.shields.io/badge/edition-2021-orange.svg)](Cargo.toml)
+<!-- crates.io badge: add once `soroban-guard-cli` is published —
+[![crates.io](https://img.shields.io/crates/v/soroban-guard-cli.svg)](https://crates.io/crates/soroban-guard-cli) -->
+
 > Static analysis engine for [Soroban](https://soroban.stellar.org/) smart contracts — securing the Stellar blockchain, one contract at a time.
 
 Guard CLI is a CLI-based static analyzer for Rust smart contracts deployed on the **Stellar network** via the Soroban smart contract platform. It detects vulnerabilities before your code ever touches the chain.
