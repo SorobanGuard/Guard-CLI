@@ -13,7 +13,7 @@ keywords = ["soroban", "stellar", "security", "static-analysis", "wasm"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
-syn = { version = "2.0", features = ["full", "visit"] }
+syn = { version = "3.0", features = ["full", "visit"] }
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
