@@ -1,4 +1,5 @@
 mod config;
+mod version;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -65,6 +66,21 @@ enum Commands {
         /// Watch for .rs file changes and re-run the scan automatically
         #[arg(long, short = 'w')]
         watch: bool,
+    },
+    /// Verify that a frontend API version is compatible with a contract API version
+    CheckVersion {
+        /// Frontend API version (uses [frontend].version when omitted)
+        #[arg(long)]
+        frontend_version: Option<String>,
+        /// Deployed contract API version (uses [contract].version when omitted)
+        #[arg(long)]
+        contract_version: Option<String>,
+        /// Config directory containing soroban-guard.toml
+        #[arg(long, default_value = ".")]
+        config_path: PathBuf,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List the checks that are enabled by default
     ListChecks,
@@ -445,6 +461,67 @@ fn main() {
             }
             println!();
             println!("Run `soroban-guard explain <check-name>` for detailed documentation on any check.");
+        }
+        Commands::CheckVersion {
+            frontend_version,
+            contract_version,
+            config_path,
+            json,
+        } => {
+            let cfg = match config::load(&config_path) {
+                Ok(Some(cfg)) => cfg,
+                Ok(None) => config::GuardConfig::default(),
+                Err(error) => {
+                    eprintln!("{} {}", "error:".red().bold(), error);
+                    std::process::exit(2);
+                }
+            };
+            let frontend_version = frontend_version.or(cfg.frontend.version);
+            let contract_version = contract_version.or(cfg.contract.version);
+            let (Some(frontend_version), Some(contract_version)) =
+                (frontend_version, contract_version)
+            else {
+                eprintln!(
+                    "{} both frontend and contract versions are required; provide flags or configure [frontend].version and [contract].version",
+                    "error:".red().bold()
+                );
+                std::process::exit(2);
+            };
+
+            let compatibility = version::check(&frontend_version, &contract_version);
+            let compatible = compatibility == version::Compatibility::Compatible;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "frontend_version": frontend_version,
+                        "contract_version": contract_version,
+                        "compatible": compatible,
+                        "warning": if compatible {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::String(
+                                "Frontend and contract API versions are incompatible."
+                                    .to_string(),
+                            )
+                        },
+                        "compatibility": version::COMPATIBILITY_MATRIX,
+                    })
+                );
+            } else if compatible {
+                println!(
+                    "frontend v{} is compatible with contract v{}",
+                    frontend_version, contract_version
+                );
+            } else {
+                eprintln!(
+                    "{} frontend v{} is incompatible with contract v{}. Follow the version migration guide before deploying.",
+                    "warning:".yellow().bold(), frontend_version, contract_version
+                );
+            }
+            if !compatible {
+                std::process::exit(1);
+            }
         }
         Commands::Explain { check_name } => {
             let known = default_checks();

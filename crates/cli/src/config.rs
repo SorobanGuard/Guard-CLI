@@ -9,6 +9,8 @@ use std::path::Path;
 pub struct GuardConfig {
     pub scan: ScanConfig,
     pub checks: ChecksConfig,
+    pub contract: ContractConfig,
+    pub frontend: FrontendConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -18,6 +20,20 @@ pub struct ScanConfig {
     pub path: Option<String>,
     /// Filter out findings below this severity ("high" | "medium" | "low").
     pub min_severity: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ContractConfig {
+    /// API version exposed by the deployed contract.
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct FrontendConfig {
+    /// API version used by the frontend.
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

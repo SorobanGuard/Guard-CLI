@@ -153,7 +153,7 @@ cargo run -p soroban-guard-cli -- completions zsh > _soroban-guard
 
 ### Configuration file
 
-Drop a `soroban-guard.toml` in the scan root to set defaults without CLI flags — min severity, disabled checks, and extra sensitive-name patterns. See [docs/configuration.md](docs/configuration.md) for the full schema and an example file.
+Drop a `soroban-guard.toml` in the scan root to set defaults without CLI flags — min severity, disabled checks, extra sensitive-name patterns, and API versions. See [docs/configuration.md](docs/configuration.md) for the full schema and [docs/version-compatibility.md](docs/version-compatibility.md) for the compatibility matrix and migration guide.
 
 ---
 

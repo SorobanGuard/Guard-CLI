@@ -7,7 +7,8 @@ cli → analyzer → checks
 ```
 
 - **`crates/cli`** parses commands, invokes scans, formats findings, and selects the process exit
-  code. It also imports shared result types from `checks` for reporting.
+  code. It also imports shared result types from `checks` for reporting and owns the explicit
+  frontend/contract version compatibility check.
 - **`crates/analyzer`** discovers Rust source files, parses them, and coordinates the enabled
   checks.
 - **`crates/checks`** defines the check interface and result types, and implements the built-in
