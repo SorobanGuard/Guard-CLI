@@ -41,7 +41,7 @@ enum Commands {
         /// Write output to a file instead of stdout (applies to --json, --sarif, and --markdown)
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Suppress all output when there are zero High findings
+        /// Suppress all output when there are zero findings at or above the configured threshold
         #[arg(long)]
         quiet: bool,
         /// Disable colored output
@@ -685,7 +685,7 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         "unchecked-token-amount" => ("medium", "Flags token amounts used without validation"),
         "large-loop" => ("medium", "Flags loops over unbounded collections"),
         "missing-nonce" => ("medium", "Flags functions susceptible to replay attacks"),
-        "uninitialized-storage-read" => ("medium", "Flags storage reads without initialization checks"),
+        "uninitialized-storage-read" => ("high", "Flags storage reads without initialization checks"),
         "missing-event-for-admin-change" => ("medium", "Flags admin changes with no event emission"),
         "missing-input-length-bound" => ("medium", "Flags input collections without length bound checks"),
         "auth-after-storage-write" => ("high", "Flags authorization checks after storage writes"),
