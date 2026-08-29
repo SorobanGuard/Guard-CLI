@@ -45,8 +45,6 @@ impl Check for MissingEventEmissionCheck {
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-event-emission-medium"
                         .to_string(),
                 ),
-                suggestion: None,
-                rule_url: None,
                 suggestion: Some(format!(
                     "Add `env.events().publish((symbol_short!(\"{fn_name}\"), …), &payload)` \
                      after the storage write so off-chain indexers can track this state change."

@@ -2,15 +2,22 @@
 
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
+use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
-use syn::{File, FnArg, Pat, PatType, Type, TypePath};
+use syn::{
+    BinOp, Expr, ExprBinary, ExprMethodCall, File, FnArg, Pat, PatType, Token, Type, TypePath,
+};
 
 const CHECK_NAME: &str = "missing-zero-address-check";
 
 /// Flags public `#[contractimpl]` methods whose name suggests admin/ownership
-/// semantics, that accept an `Address` parameter, and whose body never asserts
-/// the address is non-default (no call to `require_auth`, `assert!`, or a helper
-/// containing "zero", "default", or "check_address").
+/// semantics, that accept an `Address` parameter, and whose body never actually
+/// compares that parameter against a zero/default `Address` (e.g.
+/// `assert!(admin != Address::default())` or `admin.is_zero()`).
+///
+/// An authorization check such as `require_auth()` proves the *caller* is
+/// authorised; it says nothing about the *value* of the address argument being
+/// passed in, so it is not treated as a guard on its own.
 pub struct MissingZeroAddressCheck;
 
 const SENSITIVE_NAMES: &[&str] = &[
@@ -23,6 +30,11 @@ const SENSITIVE_NAMES: &[&str] = &[
     "set_manager",
     "set_operator",
 ];
+
+/// Method names that, called directly on the address parameter, are themselves a
+/// zero/default check (e.g. `admin.is_zero()`). Matched exactly — never by
+/// substring — so unrelated calls such as `.unwrap_or_default()` can never match.
+const ADDRESS_PREDICATE_METHODS: &[&str] = &["is_zero", "is_default"];
 
 fn is_address_type(ty: &Type) -> bool {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -60,20 +72,98 @@ fn address_param_names(method: &syn::ImplItemFn) -> Vec<String> {
         .collect()
 }
 
-#[derive(Default)]
-struct BodyScan {
+/// Strips `&`, `(...)`, and `.clone()` wrappers to see if `e` refers to one of
+/// `addr_params`.
+fn is_addr_param_ref(e: &Expr, addr_params: &[String]) -> bool {
+    match e {
+        Expr::Path(p) => p
+            .path
+            .get_ident()
+            .is_some_and(|i| addr_params.iter().any(|a| a == &i.to_string())),
+        Expr::Reference(r) => is_addr_param_ref(&r.expr, addr_params),
+        Expr::Paren(p) => is_addr_param_ref(&p.expr, addr_params),
+        Expr::MethodCall(m) if m.method == "clone" => is_addr_param_ref(&m.receiver, addr_params),
+        _ => false,
+    }
+}
+
+/// True for an expression that produces the default/zero value being compared
+/// against, e.g. `Address::default()` or `Default::default()`.
+fn is_default_producing(e: &Expr) -> bool {
+    match e {
+        Expr::Call(c) => {
+            if let Expr::Path(p) = &*c.func {
+                p.path.segments.last().is_some_and(|s| s.ident == "default")
+            } else {
+                false
+            }
+        }
+        Expr::Reference(r) => is_default_producing(&r.expr),
+        Expr::Paren(p) => is_default_producing(&p.expr),
+        _ => false,
+    }
+}
+
+/// True if `bin` is an `==`/`!=` comparison between one of `addr_params` and a
+/// default/zero-producing expression, in either operand order.
+fn is_zero_address_comparison(bin: &ExprBinary, addr_params: &[String]) -> bool {
+    if !matches!(bin.op, BinOp::Eq(_) | BinOp::Ne(_)) {
+        return false;
+    }
+    (is_addr_param_ref(&bin.left, addr_params) && is_default_producing(&bin.right))
+        || (is_addr_param_ref(&bin.right, addr_params) && is_default_producing(&bin.left))
+}
+
+/// Manual recursive walk (not `syn::visit::Visit`) used to inspect macro bodies,
+/// which are re-parsed as standalone `Expr` trees outside the source file's AST
+/// lifetime.
+fn expr_contains_zero_check(expr: &Expr, addr_params: &[String]) -> bool {
+    match expr {
+        Expr::Binary(bin) => {
+            is_zero_address_comparison(bin, addr_params)
+                || expr_contains_zero_check(&bin.left, addr_params)
+                || expr_contains_zero_check(&bin.right, addr_params)
+        }
+        Expr::Unary(u) => expr_contains_zero_check(&u.expr, addr_params),
+        Expr::Paren(p) => expr_contains_zero_check(&p.expr, addr_params),
+        Expr::MethodCall(m) => {
+            (ADDRESS_PREDICATE_METHODS.contains(&m.method.to_string().as_str())
+                && is_addr_param_ref(&m.receiver, addr_params))
+                || expr_contains_zero_check(&m.receiver, addr_params)
+        }
+        _ => false,
+    }
+}
+
+/// True if any comma-separated expression in `assert!(...)`/`require!(...)`'s
+/// argument list is (or contains) a real zero-address comparison.
+fn macro_contains_zero_check(mac: &syn::Macro, addr_params: &[String]) -> bool {
+    mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+        .map(|exprs| {
+            exprs
+                .iter()
+                .any(|e| expr_contains_zero_check(e, addr_params))
+        })
+        .unwrap_or(false)
+}
+
+struct BodyScan<'a> {
+    addr_params: &'a [String],
     has_guard: bool,
 }
 
-impl<'ast> Visit<'ast> for BodyScan {
-    fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
+impl<'ast, 'a> Visit<'ast> for BodyScan<'a> {
+    fn visit_expr_binary(&mut self, i: &'ast ExprBinary) {
+        if is_zero_address_comparison(i, self.addr_params) {
+            self.has_guard = true;
+        }
+        visit::visit_expr_binary(self, i);
+    }
+
+    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
         let name = i.method.to_string();
-        if name.contains("require_auth")
-            || name.contains("zero")
-            || name.contains("default")
-            || name.contains("check_address")
-            || name.contains("assert")
-            || name.contains("validate")
+        if ADDRESS_PREDICATE_METHODS.contains(&name.as_str())
+            && is_addr_param_ref(&i.receiver, self.addr_params)
         {
             self.has_guard = true;
         }
@@ -87,7 +177,9 @@ impl<'ast> Visit<'ast> for BodyScan {
             .last()
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
-        if matches!(name.as_str(), "assert" | "require") {
+        if matches!(name.as_str(), "assert" | "require")
+            && macro_contains_zero_check(mac, self.addr_params)
+        {
             self.has_guard = true;
         }
         visit::visit_macro(self, mac);
@@ -110,12 +202,15 @@ impl Check for MissingZeroAddressCheck {
             if !has_address_param(method) {
                 continue;
             }
-            let mut scan = BodyScan::default();
+            let addr_params = address_param_names(method);
+            let mut scan = BodyScan {
+                addr_params: &addr_params,
+                has_guard: false,
+            };
             scan.visit_block(&method.block);
             if scan.has_guard {
                 continue;
             }
-            let addr_params = address_param_names(method);
             out.push(Finding {
                 check_name: CHECK_NAME.to_string(),
                 severity: Severity::Medium,
@@ -171,7 +266,28 @@ impl C {
     }
 
     #[test]
-    fn passes_when_require_auth_present() {
+    fn flags_when_only_unwrap_or_default_present() {
+        // Regression test for #464: `.unwrap_or_default()` anywhere in the body
+        // must not be mistaken for a zero-address guard on `admin`.
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn set_admin(env: Env, admin: Address) {
+        let prev: Address = env.storage().instance().get(&"admin").unwrap_or_default();
+        let _ = prev;
+        env.storage().instance().set(&"admin", &admin);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn flags_when_only_require_auth_present() {
+        // Regression test for #465: `require_auth()` proves the caller is
+        // authorised, not that `new_owner` isn't the zero address.
         let hits = run(r#"
 use soroban_sdk::{contractimpl, Env, Address};
 pub struct C;
@@ -183,7 +299,7 @@ impl C {
     }
 }
 "#);
-        assert!(hits.is_empty());
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
@@ -195,6 +311,39 @@ pub struct C;
 impl C {
     pub fn initialize(env: Env, admin: Address) {
         assert!(admin != Address::default());
+        env.storage().instance().set(&"admin", &admin);
+    }
+}
+"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn passes_when_require_auth_and_real_comparison_present() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn set_owner(env: Env, new_owner: Address) {
+        env.require_auth();
+        assert!(new_owner != Address::default(), "zero address");
+        env.storage().instance().set(&"owner", &new_owner);
+    }
+}
+"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn passes_when_is_zero_predicate_present() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn set_admin(env: Env, admin: Address) {
+        assert!(!admin.is_zero());
         env.storage().instance().set(&"admin", &admin);
     }
 }

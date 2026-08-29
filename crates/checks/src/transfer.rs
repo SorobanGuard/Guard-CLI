@@ -48,8 +48,6 @@ impl Check for SelfTransferCheck {
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#self-transfer-medium"
                         .to_string(),
                 ),
-                suggestion: None,
-                rule_url: None,
                 suggestion: Some(format!(
                     "Add a guard at the top of `{fn_name}`: \
                      `if from == to {{ return; }}` (or panic) to prevent self-transfers."

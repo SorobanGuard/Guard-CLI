@@ -114,7 +114,11 @@ fn extract_invoke_contract(expr: &Expr) -> Option<&ExprMethodCall> {
             }
         }
         Expr::Paren(p) => extract_invoke_contract(&p.expr),
-        Expr::Try(t) => extract_invoke_contract(&t.expr),
+        // A `?` on the invoke call already propagates a callee failure to the
+        // caller — it is the opposite of silently ignoring it. Any discarded
+        // binding here (e.g. `let _ = env.invoke_contract(...)?;`) only throws
+        // away the `Ok` payload, which this check does not flag.
+        Expr::Try(_) => None,
         _ => None,
     }
 }
@@ -285,6 +289,22 @@ impl C {
     pub fn f(env: Env, callee: Address) {
         let res: i128 = env.invoke_contract(&callee, &Symbol::short("do"), ());
         assert!(res > 0);
+    }
+}
+"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn passes_when_invoke_result_propagated_with_try_operator() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Symbol, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env, callee: Address) -> Result<(), soroban_sdk::Error> {
+        let _ = env.invoke_contract::<()>(&callee, &Symbol::short("do"), ())?;
+        Ok(())
     }
 }
 "#);

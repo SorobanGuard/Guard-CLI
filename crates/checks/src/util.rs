@@ -149,6 +149,17 @@ pub(crate) fn receiver_chain_contains_persistent(expr: &Expr) -> bool {
     receiver_chain_contains(expr, "persistent")
 }
 
+/// Is `name` one of the Soroban SDK cross-contract call entry points —
+/// `invoke_contract`, `invoke_contract_check`, or the fallible `try_invoke_contract`?
+/// Shared by the checks that need to recognise a cross-contract call regardless of
+/// which entry point was used.
+pub(crate) fn is_invoke_contract_method_name(name: &str) -> bool {
+    matches!(
+        name,
+        "invoke_contract" | "invoke_contract_check" | "try_invoke_contract"
+    )
+}
+
 fn collect_contractimpl_fns<'a>(
     items: &'a [Item],
     in_test_mod: bool,

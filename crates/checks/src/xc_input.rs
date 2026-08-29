@@ -4,7 +4,10 @@
 //! `env.storage().*.set(…, &binding)` without any intervening `if`, `match`, or
 //! `unwrap_or*` / `ok_or*` / `checked_*` call.
 
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{
+    contractimpl_functions_excluding_test, is_invoke_contract_method_name,
+    receiver_chain_contains_storage,
+};
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
 use syn::spanned::Spanned;
@@ -38,11 +41,12 @@ impl Check for UnsafeCrossContractInputCheck {
     }
 }
 
-/// Returns `true` if this method call is (or transitively wraps) `invoke_contract`.
+/// Returns `true` if this method call is (or transitively wraps) a cross-contract
+/// invocation: `invoke_contract`, `invoke_contract_check`, or `try_invoke_contract`.
 fn is_invoke_contract(e: &Expr) -> bool {
     match e {
         Expr::MethodCall(m) => {
-            if m.method == "invoke_contract" {
+            if is_invoke_contract_method_name(&m.method.to_string()) {
                 return true;
             }
             is_invoke_contract(&m.receiver)
@@ -50,12 +54,17 @@ fn is_invoke_contract(e: &Expr) -> bool {
         Expr::Call(c) => {
             // env.invoke_contract(…) expressed as a plain function call — unlikely but safe to check
             if let Expr::Path(p) = &*c.func {
-                if p.path.segments.iter().any(|s| s.ident == "invoke_contract") {
+                if p.path
+                    .segments
+                    .iter()
+                    .any(|s| is_invoke_contract_method_name(&s.ident.to_string()))
+                {
                     return true;
                 }
             }
             false
         }
+        Expr::Try(t) => is_invoke_contract(&t.expr),
         _ => false,
     }
 }
@@ -182,6 +191,43 @@ impl C {
 "#);
         // `safe` is not an xc_binding; no finding expected
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn flags_invoke_contract_check_direct_to_storage() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn relay(env: Env, callee: Address) {
+        let v = env.invoke_contract_check::<i128>(&callee, &Symbol::short("get"), ());
+        env.storage().persistent().set(&Symbol::short("k"), &v);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+        assert_eq!(hits[0].check_name, CHECK_NAME);
+    }
+
+    #[test]
+    fn flags_try_invoke_contract_direct_to_storage() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn relay(env: Env, callee: Address) -> Result<(), soroban_sdk::Error> {
+        let v = env.try_invoke_contract::<i128, soroban_sdk::Error>(&callee, &Symbol::short("get"), ())?;
+        env.storage().persistent().set(&Symbol::short("k"), &v);
+        Ok(())
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+        assert_eq!(hits[0].check_name, CHECK_NAME);
     }
 
     #[test]

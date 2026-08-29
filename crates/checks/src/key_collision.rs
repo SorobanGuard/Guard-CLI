@@ -47,8 +47,6 @@ impl Check for SymbolKeyCollisionCheck {
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#symbol-key-collision-medium"
                                 .to_string(),
                         ),
-                        suggestion: None,
-                        rule_url: None,
                         suggestion: Some(format!(
                             "Rename one of the duplicate `symbol_short!(\"{key}\")` / \
                              `Symbol::new(…, \"{key}\")` usages to a unique key to avoid \
