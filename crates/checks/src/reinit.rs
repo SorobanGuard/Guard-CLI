@@ -66,7 +66,9 @@ struct BodyScan {
 impl<'ast> Visit<'ast> for BodyScan {
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
         let method = i.method.to_string();
-        if method == "set" && receiver_chain_contains_storage(&i.receiver) {
+        if matches!(method.as_str(), "set" | "remove" | "append" | "update")
+            && receiver_chain_contains_storage(&i.receiver)
+        {
             self.has_storage_write = true;
         }
         if matches!(method.as_str(), "has" | "is_some" | "is_none")
@@ -139,6 +141,22 @@ impl C {
 }
 "#);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn flags_init_with_update_based_write() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address, Vec};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn setup(env: Env, admins: Vec<Address>) {
+        env.storage().instance().update(&0, |_| admins);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].check_name, CHECK_NAME);
     }
 
     #[test]
