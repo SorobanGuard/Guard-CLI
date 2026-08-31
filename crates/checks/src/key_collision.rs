@@ -171,16 +171,52 @@ impl Contract {
 
     #[test]
     fn detects_module_level_const_collisions() {
+        // Compilable, idiomatic module-level `Symbol` constants using `symbol_short!` —
+        // `Symbol::new(&env, "...")` cannot appear in a `const` initializer since `env` does
+        // not exist at module scope, so this fixture no longer references an undefined `env`.
         let src = r#"
-use soroban_sdk::{symbol_short, Symbol, Env};
+use soroban_sdk::{symbol_short, Symbol};
 
 const BALANCE_KEY: Symbol = symbol_short!("bal");
-const OLD_ADMIN_KEY: Symbol = Symbol::new(&env, "bal");
+const OLD_ADMIN_KEY: Symbol = symbol_short!("bal");
 "#;
         let file = parse_file(src).unwrap();
         let findings = SymbolKeyCollisionCheck.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Medium);
         assert_eq!(findings[0].function_name, "const OLD_ADMIN_KEY");
+    }
+
+    /// Regression coverage for the non-literal-second-argument gap: `Symbol::new(&env, CONST)`
+    /// inside a method, where `CONST` is a `&str` constant rather than an inline string
+    /// literal. `visit_expr_call` only recognizes `Symbol::new`'s second argument when it is a
+    /// `Lit::Str` directly, so a collision expressed through a shared `&str` constant is
+    /// currently **not** detected. This test documents that gap; it should start failing (i.e.
+    /// findings.len() should become 1) once the check is taught to resolve constant references.
+    #[test]
+    fn does_not_detect_in_method_symbol_new_collision_via_shared_const() {
+        let src = r#"
+use soroban_sdk::{contractimpl, Symbol, Env};
+
+const OLD_ADMIN_KEY: &str = "bal";
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn foo(env: Env) {
+        let k1 = Symbol::new(&env, OLD_ADMIN_KEY);
+        let k2 = Symbol::new(&env, OLD_ADMIN_KEY);
+        let _ = (k1, k2);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = SymbolKeyCollisionCheck.run(&file, src);
+        assert!(
+            findings.is_empty(),
+            "known gap: Symbol::new(&env, CONST) with a non-literal second argument is not \
+             yet resolved to its constant value, so no collision is detected here"
+        );
     }
 }
