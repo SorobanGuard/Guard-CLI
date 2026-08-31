@@ -79,7 +79,9 @@ fn is_persistent_mutation(m: &ExprMethodCall) -> bool {
 }
 
 fn is_persistent_extend_ttl(m: &ExprMethodCall) -> bool {
-    m.method == "extend_ttl" && is_persistent_chain(m)
+    // `bump` is the legacy (pre-`extend_ttl`) spelling of the same TTL operation; older or
+    // unmigrated Soroban code still uses it, so accept both.
+    matches!(m.method.to_string().as_str(), "extend_ttl" | "bump") && is_persistent_chain(m)
 }
 
 /// Return a stable textual representation of a key expression, used to correlate mutations
@@ -200,6 +202,31 @@ impl C {
         )?;
         let hits = MissingTtlExtensionCheck.run(&file, "");
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_legacy_bump_present() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+
+pub struct C;
+
+const K: soroban_sdk::Symbol = symbol_short!("k");
+
+#[contractimpl]
+impl C {
+    pub fn put(env: Env, v: u32) {
+        env.require_auth();
+        env.storage().persistent().set(&K, &v);
+        env.storage().persistent().bump(&K, 1000);
+    }
+}
+"#,
+        )?;
+        let hits = MissingTtlExtensionCheck.run(&file, "");
+        assert!(hits.is_empty(), "{hits:?}");
         Ok(())
     }
 
