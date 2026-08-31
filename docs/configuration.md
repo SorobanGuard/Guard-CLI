@@ -15,8 +15,9 @@ contributors and CI don't have to repeat CLI flags.
 
 ```toml
 [scan]
-# Filter out findings below this severity. One of "high", "medium", "low".
+# Severity threshold for the `--fail-on` exit gate. One of "high", "medium", "low".
 # Equivalent to the `--fail-on` flag; the flag wins if both are set.
+# Does not filter findings out of the printed output.
 min_severity = "medium"
 
 [checks]

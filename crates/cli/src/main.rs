@@ -614,175 +614,309 @@ fn severity_to_sarif_level(severity: Severity) -> &'static str {
     }
 }
 
+/// Static metadata for a single built-in check.
+struct CheckMeta {
+    /// `list-checks` name.
+    name: &'static str,
+    /// Severity string as surfaced by `list-checks` / `explain` (`"high" | "medium" | "low"`).
+    severity: &'static str,
+    /// One-line summary for `list-checks` / `explain` (`describe_check`).
+    short: &'static str,
+    /// One-line rule description for SARIF output (`describe_rule`).
+    rule: &'static str,
+    /// Long-form explanation for `explain` (`explain_details`); `None` falls back to a
+    /// generic string.
+    long: Option<&'static str>,
+}
+
+/// Single source of truth for check metadata read by `describe_check`, `describe_rule`,
+/// and `explain_details`. Keep in sync with `default_checks()` (enforced by the
+/// `check_metadata_covers_all_default_checks` test).
+const CHECK_METADATA: &[CheckMeta] = &[
+    CheckMeta {
+        name: "missing-require-auth",
+        severity: "high",
+        short: "Missing env.require_auth() before storage writes",
+        rule: "Method writes to storage without env.require_auth()",
+        long: Some("Reports contract methods that mutate storage without calling require_auth or require_auth_for_args."),
+    },
+    CheckMeta {
+        name: "unchecked-arithmetic",
+        severity: "medium",
+        short: "Flags unchecked arithmetic on contract state",
+        rule: "Wrapping arithmetic operations may overflow",
+        long: Some("Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs."),
+    },
+    CheckMeta {
+        name: "unprotected-admin",
+        severity: "high",
+        short: "Flags privileged entrypoints without auth",
+        rule: "Sensitive admin entrypoints lack an authorization gate",
+        long: Some("Reports public admin-like entrypoints such as set_owner, pause, migrate, or upgrade when they lack an auth gate."),
+    },
+    CheckMeta {
+        name: "unsafe-storage-patterns",
+        severity: "medium",
+        short: "Flags temporary storage and dynamic Symbol keys",
+        rule: "Temporary storage or dynamic Symbol keys are risky",
+        long: Some("Reports temporary storage mutations and dynamic Symbol keys that may expire unexpectedly or collide."),
+    },
+    CheckMeta {
+        name: "missing-ttl-extension",
+        severity: "low",
+        short: "Flags persistent storage entries without TTL extension",
+        rule: "Persistent entries may expire without TTL bump",
+        long: Some("Reports persistent storage writes that do not extend TTL in the same function."),
+    },
+    CheckMeta {
+        name: "forbidden-std-imports",
+        severity: "high",
+        short: "Flags use of std in no_std Soroban contracts",
+        rule: "Crate imports std which is forbidden in no_std contracts",
+        long: Some("Reports std imports in Soroban contract files because deployable contracts must compile for no_std WASM."),
+    },
+    CheckMeta {
+        name: "hardcoded-address",
+        severity: "medium",
+        short: "Flags hardcoded Stellar address literals",
+        rule: "Contract contains a hardcoded Stellar address string",
+        long: Some("Reports Stellar public-key-shaped string literals embedded directly in source."),
+    },
+    CheckMeta {
+        name: "unsafe-cross-contract-input",
+        severity: "high",
+        short: "Flags unvalidated return values from cross-contract calls",
+        rule: "Cross-contract call return value used without validation",
+        long: Some("Reports invoke_contract return values stored directly without local validation."),
+    },
+    CheckMeta {
+        name: "missing-contract-annotation",
+        severity: "low",
+        short: "Flags structs missing the #[contract] attribute",
+        rule: "Struct missing #[contract] annotation",
+        long: Some("Reports contractimpl blocks without a sibling struct annotated with #[contract]."),
+    },
+    CheckMeta {
+        name: "delegate-call-risk",
+        severity: "high",
+        short: "Flags delegate-call patterns that transfer execution control",
+        rule: "Delegate-style call pattern can transfer control unexpectedly",
+        long: Some("Reports storage-derived cross-contract callees that can redirect execution if storage is poisoned."),
+    },
+    CheckMeta {
+        name: "integer-division-truncation",
+        severity: "medium",
+        short: "Flags integer division that silently truncates",
+        rule: "Integer division silently truncates the remainder",
+        long: Some("Reports integer division where truncation may silently change financial or accounting results."),
+    },
+    CheckMeta {
+        name: "missing-event-emission",
+        severity: "medium",
+        short: "Flags state-mutating functions with no event emission",
+        rule: "State-mutating function emits no events",
+        long: Some("Reports state-mutating functions that do not publish events for off-chain indexers."),
+    },
+    CheckMeta {
+        name: "symbol-key-collision",
+        severity: "medium",
+        short: "Flags storage keys that share the same Symbol value",
+        rule: "Multiple storage keys share the same Symbol value",
+        long: Some("Reports duplicate symbol_short! keys in the same impl block."),
+    },
+    CheckMeta {
+        name: "self-transfer",
+        severity: "medium",
+        short: "Flags token transfers where sender may equal receiver",
+        rule: "Token transfer destination may equal the sender",
+        long: Some("Reports transfer-like functions that do not guard against sender and recipient being equal."),
+    },
+    CheckMeta {
+        name: "missing-zero-address-check",
+        severity: "medium",
+        short: "Flags Address parameters not checked for the zero address",
+        rule: "Address argument not validated against the zero address",
+        long: Some("Reports Address parameters stored or used without checking for default or zero-address values."),
+    },
+    CheckMeta {
+        name: "mutable-global-state",
+        severity: "high",
+        short: "Flags mutable global state in contract code",
+        rule: "Mutable global state is unsafe and not persisted on-chain",
+        long: Some("Reports static mut items, which are unsafe and not valid persistent contract state."),
+    },
+    CheckMeta {
+        name: "re-initialization-risk",
+        severity: "high",
+        short: "Flags initializer-like functions without re-init guards",
+        rule: "Initializer-like function can overwrite critical state",
+        long: Some("Reports initializer-like methods that write state without checking whether initialization already happened."),
+    },
+    CheckMeta {
+        name: "unchecked-invoke-return",
+        severity: "medium",
+        short: "Flags discarded cross-contract call return values",
+        rule: "Cross-contract invocation result is discarded",
+        long: Some("Reports bare invoke_contract statements whose return values are discarded."),
+    },
+    CheckMeta {
+        name: "missing-balance-check",
+        severity: "high",
+        short: "Flags token transfers without balance or authorization checks",
+        rule: "Token transfer occurs without a balance or authorization check",
+        long: Some("Reports token transfer calls that lack a preceding balance or authorization check."),
+    },
+    CheckMeta {
+        name: "unbounded-vec-growth",
+        severity: "medium",
+        short: "Flags storage-backed Vec growth without a length cap",
+        rule: "Storage-backed Vec can grow without a bound",
+        long: Some("Reports storage-backed Vec values pushed and written back without an apparent length cap."),
+    },
+    CheckMeta {
+        name: "unsafe-randomness",
+        severity: "high",
+        short: "Flags ledger timestamp or sequence as randomness",
+        rule: "Ledger data is used as a randomness source",
+        long: Some("Reports ledger timestamp or sequence usage as a randomness source."),
+    },
+    CheckMeta {
+        name: "unchecked-divisor",
+        severity: "high",
+        short: "Flags division by runtime values without zero guards",
+        rule: "Division uses a runtime divisor without a zero guard",
+        long: Some("Reports division by runtime values without an apparent non-zero guard."),
+    },
+    CheckMeta {
+        name: "reentrancy-risk",
+        severity: "high",
+        short: "Flags storage writes followed by cross-contract calls",
+        rule: "Storage write followed by cross-contract invocation risks reentrancy",
+        long: Some("Reports contract methods that write to storage and then perform a cross-contract invocation, leaving state observable to a reentrant callee."),
+    },
+    CheckMeta {
+        name: "panic-in-contract",
+        severity: "medium",
+        short: "Flags panic!, unwrap, and expect in contract methods",
+        rule: "Contract uses panic!, unwrap, or expect which abort the WASM execution",
+        long: Some("Reports panic!, unwrap(), expect(), and unreachable!() in contract methods, all of which trap and abort WASM execution."),
+    },
+    CheckMeta {
+        name: "unprotected-upgrade",
+        severity: "high",
+        short: "Flags upgrade entrypoints without authorization",
+        rule: "Contract upgrade entrypoint lacks an authorization gate",
+        long: Some("Reports contract upgrade entrypoints that swap the contract WASM without an authorization gate."),
+    },
+    CheckMeta {
+        name: "unprotected-token-mint",
+        severity: "high",
+        short: "Flags token mint entrypoints without authorization",
+        rule: "Token mint entrypoint lacks an authorization gate",
+        long: Some("Reports token mint entrypoints that create new supply without an authorization gate."),
+    },
+    CheckMeta {
+        name: "unprotected-contract-deployment",
+        severity: "high",
+        short: "Flags contract deployment calls without authorization",
+        rule: "Contract deployment call lacks an authorization gate",
+        long: Some("Reports contract deployment calls that are reachable without an authorization gate."),
+    },
+    CheckMeta {
+        name: "unchecked-token-amount",
+        severity: "medium",
+        short: "Flags token amounts used without validation",
+        rule: "Token amount used without validation",
+        long: Some("Reports token amount parameters passed to transfers or mints without a positivity or bounds check."),
+    },
+    CheckMeta {
+        name: "large-loop",
+        severity: "medium",
+        short: "Flags loops over unbounded collections",
+        rule: "Loop may iterate over an unbounded collection",
+        long: Some("Reports loops that iterate over collections whose length is not bounded by a constant or validated input."),
+    },
+    CheckMeta {
+        name: "missing-nonce",
+        severity: "medium",
+        short: "Flags functions susceptible to replay attacks",
+        rule: "Function susceptible to replay attacks lacks a nonce check",
+        long: Some("Reports replay-sensitive entrypoints that do not consume or verify a nonce."),
+    },
+    CheckMeta {
+        name: "uninitialized-storage-read",
+        severity: "high",
+        short: "Flags storage reads without initialization checks",
+        rule: "Storage value read without checking if it has been initialized",
+        long: Some("Reports storage reads that are not guarded by a has() check or a default value."),
+    },
+    CheckMeta {
+        name: "missing-event-for-admin-change",
+        severity: "medium",
+        short: "Flags admin changes with no event emission",
+        rule: "Admin-state change emits no event for off-chain indexers",
+        long: Some("Reports functions that change admin or ownership state without publishing an event for off-chain indexers."),
+    },
+    CheckMeta {
+        name: "missing-input-length-bound",
+        severity: "medium",
+        short: "Flags input collections without length bound checks",
+        rule: "Input collection used without a length bound check",
+        long: Some("Reports input collection parameters used without checking their length against an upper bound."),
+    },
+    CheckMeta {
+        name: "auth-after-storage-write",
+        severity: "high",
+        short: "Flags authorization checks after storage writes",
+        rule: "Authorization check occurs after a storage write",
+        long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
+    },
+];
+
+fn check_meta(name: &str) -> Option<&'static CheckMeta> {
+    CHECK_METADATA.iter().find(|m| m.name == name)
+}
+
 fn explain_details(name: &str) -> &'static str {
-    match name {
-        "missing-require-auth" => {
-            "Reports contract methods that mutate storage without calling require_auth or require_auth_for_args."
-        }
-        "unchecked-arithmetic" => {
-            "Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs."
-        }
-        "unprotected-admin" => {
-            "Reports public admin-like entrypoints such as set_owner, pause, migrate, or upgrade when they lack an auth gate."
-        }
-        "unsafe-storage-patterns" => {
-            "Reports temporary storage mutations and dynamic Symbol keys that may expire unexpectedly or collide."
-        }
-        "missing-ttl-extension" => {
-            "Reports persistent storage writes that do not extend TTL in the same function."
-        }
-        "forbidden-std-imports" => {
-            "Reports std imports in Soroban contract files because deployable contracts must compile for no_std WASM."
-        }
-        "hardcoded-address" => {
-            "Reports Stellar public-key-shaped string literals embedded directly in source."
-        }
-        "unsafe-cross-contract-input" => {
-            "Reports invoke_contract return values stored directly without local validation."
-        }
-        "missing-contract-annotation" => {
-            "Reports contractimpl blocks without a sibling struct annotated with #[contract]."
-        }
-        "delegate-call-risk" => {
-            "Reports storage-derived cross-contract callees that can redirect execution if storage is poisoned."
-        }
-        "integer-division-truncation" => {
-            "Reports integer division where truncation may silently change financial or accounting results."
-        }
-        "missing-event-emission" => {
-            "Reports state-mutating functions that do not publish events for off-chain indexers."
-        }
-        "symbol-key-collision" => {
-            "Reports duplicate symbol_short! keys in the same impl block."
-        }
-        "self-transfer" => {
-            "Reports transfer-like functions that do not guard against sender and recipient being equal."
-        }
-        "missing-zero-address-check" => {
-            "Reports Address parameters stored or used without checking for default or zero-address values."
-        }
-        "mutable-global-state" => {
-            "Reports static mut items, which are unsafe and not valid persistent contract state."
-        }
-        "re-initialization-risk" => {
-            "Reports initializer-like methods that write state without checking whether initialization already happened."
-        }
-        "unchecked-invoke-return" => {
-            "Reports bare invoke_contract statements whose return values are discarded."
-        }
-        "missing-balance-check" => {
-            "Reports token transfer calls that lack a preceding balance or authorization check."
-        }
-        "unbounded-vec-growth" => {
-            "Reports storage-backed Vec values pushed and written back without an apparent length cap."
-        }
-        "unsafe-randomness" => {
-            "Reports ledger timestamp or sequence usage as a randomness source."
-        }
-        "unchecked-divisor" => {
-            "Reports division by runtime values without an apparent non-zero guard."
-        }
-        _ => "No detailed explanation is available for this custom check.",
-    }
+    check_meta(name)
+        .and_then(|m| m.long)
+        .unwrap_or("No detailed explanation is available for this custom check.")
 }
 
 fn describe_rule(name: &str) -> &'static str {
-    match name {
-        "missing-require-auth" => "Method writes to storage without env.require_auth()",
-        "unchecked-arithmetic" => "Wrapping arithmetic operations may overflow",
-        "unprotected-admin" => "Sensitive admin entrypoints lack an authorization gate",
-        "unsafe-storage-patterns" => "Temporary storage or dynamic Symbol keys are risky",
-        "missing-ttl-extension" => "Persistent entries may expire without TTL bump",
-        "forbidden-std-imports" => "Crate imports std which is forbidden in no_std contracts",
-        "hardcoded-address" => "Contract contains a hardcoded Stellar address string",
-        "unsafe-cross-contract-input" => "Cross-contract call return value used without validation",
-        "missing-contract-annotation" => "Struct missing #[contract] annotation",
-        "delegate-call-risk" => "Delegate-style call pattern can transfer control unexpectedly",
-        "integer-division-truncation" => "Integer division silently truncates the remainder",
-        "missing-event-emission" => "State-mutating function emits no events",
-        "symbol-key-collision" => "Multiple storage keys share the same Symbol value",
-        "self-transfer" => "Token transfer destination may equal the sender",
-        "missing-zero-address-check" => "Address argument not validated against the zero address",
-        "mutable-global-state" => "Mutable global state is unsafe and not persisted on-chain",
-        "re-initialization-risk" => "Initializer-like function can overwrite critical state",
-        "unchecked-invoke-return" => "Cross-contract invocation result is discarded",
-        "missing-balance-check" => "Token transfer occurs without a balance or authorization check",
-        "unbounded-vec-growth" => "Storage-backed Vec can grow without a bound",
-        "unsafe-randomness" => "Ledger data is used as a randomness source",
-        "unchecked-divisor" => "Division uses a runtime divisor without a zero guard",
-        "reentrancy-risk" => "Storage write followed by cross-contract invocation risks reentrancy",
-        "panic-in-contract" => "Contract uses panic!, unwrap, or expect which abort the WASM execution",
-        "unprotected-upgrade" => "Contract upgrade entrypoint lacks an authorization gate",
-        "unprotected-token-mint" => "Token mint entrypoint lacks an authorization gate",
-        "unprotected-contract-deployment" => "Contract deployment call lacks an authorization gate",
-        "unchecked-token-amount" => "Token amount used without validation",
-        "large-loop" => "Loop may iterate over an unbounded collection",
-        "missing-nonce" => "Function susceptible to replay attacks lacks a nonce check",
-        "uninitialized-storage-read" => "Storage value read without checking if it has been initialized",
-        "missing-event-for-admin-change" => "Admin-state change emits no event for off-chain indexers",
-        "missing-input-length-bound" => "Input collection used without a length bound check",
-        "auth-after-storage-write" => "Authorization check occurs after a storage write",
-        _ => "Custom check",
-    }
+    check_meta(name).map(|m| m.rule).unwrap_or("Custom check")
 }
 
 fn describe_check(name: &str) -> (&'static str, &'static str) {
-    match name {
-        "missing-require-auth" => ("high", "Missing env.require_auth() before storage writes"),
-        "unchecked-arithmetic" => ("medium", "Flags unchecked arithmetic on contract state"),
-        "unprotected-admin" => ("high", "Flags privileged entrypoints without auth"),
-        "unsafe-storage-patterns" => ("medium", "Flags temporary storage and dynamic Symbol keys"),
-        "missing-ttl-extension" => ("low", "Flags persistent storage entries without TTL extension"),
-        "forbidden-std-imports" => ("high", "Flags use of std in no_std Soroban contracts"),
-        "hardcoded-address" => ("medium", "Flags hardcoded Stellar address literals"),
-        "unsafe-cross-contract-input" => ("high", "Flags unvalidated return values from cross-contract calls"),
-        "missing-contract-annotation" => ("low", "Flags structs missing the #[contract] attribute"),
-        "delegate-call-risk" => ("high", "Flags delegate-call patterns that transfer execution control"),
-        "integer-division-truncation" => ("medium", "Flags integer division that silently truncates"),
-        "missing-event-emission" => ("medium", "Flags state-mutating functions with no event emission"),
-        "symbol-key-collision" => ("medium", "Flags storage keys that share the same Symbol value"),
-        "self-transfer" => ("medium", "Flags token transfers where sender may equal receiver"),
-        "missing-zero-address-check" => ("medium", "Flags Address parameters not checked for the zero address"),
-        "mutable-global-state" => ("high", "Flags mutable global state in contract code"),
-        "re-initialization-risk" => ("high", "Flags initializer-like functions without re-init guards"),
-        "unchecked-invoke-return" => ("medium", "Flags discarded cross-contract call return values"),
-        "missing-balance-check" => ("high", "Flags token transfers without balance or authorization checks"),
-        "unbounded-vec-growth" => ("medium", "Flags storage-backed Vec growth without a length cap"),
-        "unsafe-randomness" => ("high", "Flags ledger timestamp or sequence as randomness"),
-        "unchecked-divisor" => ("high", "Flags division by runtime values without zero guards"),
-        "reentrancy-risk" => ("high", "Flags storage writes followed by cross-contract calls"),
-        "panic-in-contract" => ("medium", "Flags panic!, unwrap, and expect in contract methods"),
-        "unprotected-upgrade" => ("high", "Flags upgrade entrypoints without authorization"),
-        "unprotected-token-mint" => ("high", "Flags token mint entrypoints without authorization"),
-        "unprotected-contract-deployment" => ("high", "Flags contract deployment calls without authorization"),
-        "unchecked-token-amount" => ("medium", "Flags token amounts used without validation"),
-        "large-loop" => ("medium", "Flags loops over unbounded collections"),
-        "missing-nonce" => ("medium", "Flags functions susceptible to replay attacks"),
-        "uninitialized-storage-read" => ("high", "Flags storage reads without initialization checks"),
-        "missing-event-for-admin-change" => ("medium", "Flags admin changes with no event emission"),
-        "missing-input-length-bound" => ("medium", "Flags input collections without length bound checks"),
-        "auth-after-storage-write" => ("high", "Flags authorization checks after storage writes"),
-        _ => ("low", "Custom detector"),
-    }
+    check_meta(name)
+        .map(|m| (m.severity, m.short))
+        .unwrap_or(("low", "Custom detector"))
 }
 
 fn write_output(path: &Path, payload: &str) -> Result<(), std::io::Error> {
     fs::write(path, payload)
 }
 
+/// Count findings bucketed by severity, returned as `(high, medium, low)`.
+///
+/// Single source of truth for the High / Medium / Low histogram shared by
+/// `json_payload`, `render_markdown`, and `summary_text`.
+fn severity_counts(findings: &[Finding]) -> (usize, usize, usize) {
+    let mut high = 0;
+    let mut medium = 0;
+    let mut low = 0;
+    for f in findings {
+        match f.severity {
+            Severity::High => high += 1,
+            Severity::Medium => medium += 1,
+            Severity::Low => low += 1,
+        }
+    }
+    (high, medium, low)
+}
+
 fn json_payload(findings: &[Finding], files_scanned: usize, files_skipped: usize) -> Result<String, serde_json::Error> {
-    let high = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::High))
-        .count();
-    let medium = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::Medium))
-        .count();
-    let low = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::Low))
-        .count();
+    let (high, medium, low) = severity_counts(findings);
 
     let envelope = serde_json::json!({
         "summary": {
@@ -838,18 +972,7 @@ fn render_markdown(findings: &[Finding]) -> String {
             suggestion_cell,
         ));
     }
-    let high = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::High))
-        .count();
-    let medium = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::Medium))
-        .count();
-    let low = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::Low))
-        .count();
+    let (high, medium, low) = severity_counts(findings);
     out.push_str(&format!(
         "\n**{} finding(s): {} High, {} Medium, {} Low**\n",
         findings.len(),
@@ -866,18 +989,7 @@ fn escape_md_cell(s: &str) -> String {
 }
 
 fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
-    let high = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::High))
-        .count();
-    let medium = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::Medium))
-        .count();
-    let low = findings
-        .iter()
-        .filter(|f| matches!(f.severity, Severity::Low))
-        .count();
+    let (high, medium, low) = severity_counts(findings);
     format!("{high} High, {medium} Medium, {low} Low — across {files_scanned} file(s)")
 }
 
@@ -1327,6 +1439,29 @@ mod tests {
         for check in default_checks() {
             let desc = describe_rule(check.name());
             assert_ne!(desc, "Custom check", "check {} has fallback rule description", check.name());
+        }
+    }
+
+    /// Every `default_checks()` entry must have a real `CHECK_METADATA` row: a valid
+    /// severity, a non-fallback `short`, a non-fallback `rule`, and a non-fallback `long`.
+    /// This is the single-source-of-truth guarantee for `describe_check`, `describe_rule`,
+    /// and `explain_details` (issue #526).
+    #[test]
+    fn check_metadata_covers_all_default_checks() {
+        for check in default_checks() {
+            let name = check.name();
+            let (sev, short) = describe_check(name);
+            assert!(
+                matches!(sev, "high" | "medium" | "low"),
+                "check {name} has invalid severity metadata"
+            );
+            assert_ne!(short, "Custom detector", "check {name} has fallback short description");
+            assert_ne!(describe_rule(name), "Custom check", "check {name} has fallback rule description");
+            assert_ne!(
+                explain_details(name),
+                "No detailed explanation is available for this custom check.",
+                "check {name} has fallback long description"
+            );
         }
     }
 

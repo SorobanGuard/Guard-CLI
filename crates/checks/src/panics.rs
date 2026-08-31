@@ -4,7 +4,7 @@ use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprCall, ExprMethodCall, File};
+use syn::{Expr, ExprMethodCall, File};
 
 /// Returns true when `expr` is **exactly** `.get(…)`/`.get_unchecked(…)` chained directly onto a
 /// `.storage()` receiver chain — the same pattern that
@@ -104,16 +104,6 @@ impl<'ast> Visit<'ast> for PanicVisitor<'_> {
             self.push(i.span().start().line, &format!(".{name}()"));
         }
         visit::visit_expr_method_call(self, i);
-    }
-
-    // also catch `panic!(...)` used as a statement via ExprCall in case syn parses it differently
-    fn visit_expr_call(&mut self, i: &'ast ExprCall) {
-        if let Expr::Path(p) = &*i.func {
-            if p.path.is_ident("panic") {
-                self.push(i.span().start().line, "panic!");
-            }
-        }
-        visit::visit_expr_call(self, i);
     }
 }
 
