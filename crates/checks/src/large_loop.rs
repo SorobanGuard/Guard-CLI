@@ -145,4 +145,28 @@ impl C {
         assert_eq!(findings.len(), 1);
         Ok(())
     }
+
+    /// Documents the gap tracked by #449: the check has no bounds analysis and flags
+    /// *every* loop in a `pub` contractimpl method, so a genuinely bounded
+    /// `for i in 0..n { .. }` is a false positive. Ignored until #449 adds bounds
+    /// analysis, at which point this should pass unchanged.
+    #[test]
+    #[ignore = "false positive until #449 adds loop-bounds analysis"]
+    fn does_not_flag_bounded_for() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn process(env: Env, n: u32) {
+        for i in 0..n {
+            let x = i;
+        }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = LargeLoopCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 0);
+        Ok(())
+    }
 }

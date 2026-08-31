@@ -599,6 +599,10 @@ mod tests {
         );
     }
 
+    // Regression guard for #531: `collect_rust_paths` must actually push discovered
+    // `.rs` files onto `paths`, so `scan_directory` / `scan_files` report a non-zero
+    // `files_scanned` for a directory that contains source. The assertions below are
+    // deliberately left unchanged.
     #[test]
     fn reports_scanned_rust_file_count_after_filters() {
         let root = std::env::temp_dir().join(format!(
