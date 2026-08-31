@@ -12,7 +12,7 @@ This document describes what each Soroban Guard Core check looks for and why it 
 
 In an `impl` block marked with `#[contractimpl]` or `#[soroban_sdk::contractimpl]`, any function whose body:
 
-1. Performs a storage mutation through `env.storage()` (heuristic: method s `set`, `remove`, `extend_ttl`, `bump`, or `append` on a receiver chain that includes `.storage()`), and  
+1. Performs a storage mutation through `env.storage()` (heuristic: method `set`, `remove`, or `append` on a receiver chain that includes `.storage()`), and  
 2. Never calls `env.require_auth()` (parameter name **`env`**: `env.require_auth()`).
 
 **Why it matters**
@@ -23,6 +23,7 @@ Contract state updates should be gated. This rule recognizes both `env.require_a
 
 - Only the `Env` binding named `env` counts.
 - Static analysis cannot see auth hidden in helpers.
+- `extend_ttl`/`bump` are not treated as storage mutations: extending a ledger entry's TTL does not change the stored value, cannot move funds, and cannot escalate privilege, so it is not a write this check cares about.
 
 **Fixture:** `test-contracts/vulnerable/`, `test-contracts/safe/`
 
@@ -34,11 +35,15 @@ Contract state updates should be gated. This rule recognizes both `env.require_a
 
 **What it detects**
 
-In a `#[contractimpl]` method, a storage mutation through `env.storage()` (`set`, `remove`, `extend_ttl`, `bump`, or `append`) occurs before any call to `env.require_auth()` or `env.require_auth_for_args()` on the same `Env` binding.
+In a `#[contractimpl]` method, a storage mutation through `env.storage()` (`set`, `remove`, or `append`) occurs before any call to `env.require_auth()` or `env.require_auth_for_args()` on the same `Env` binding.
 
 **Why it matters**
 
 Authorization should happen before state mutation. If a contract writes to storage before requiring auth, an attacker may influence state changes without being authorized.
+
+**Limitations**
+
+- `extend_ttl`/`bump` are not treated as storage mutations for this check: extending a ledger entry's TTL is a deliberately permissionless operation in Soroban (anyone paying the rent may keep an entry alive) and does not change the stored value, so ordering it before `require_auth()` is not a finding.
 
 **Example**
 

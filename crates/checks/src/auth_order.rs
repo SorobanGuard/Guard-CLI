@@ -2,7 +2,7 @@
 //! parameter - made *after* a storage write in `#[contractimpl]` methods.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_storage, receiver_is_auth_gate,
+    contractimpl_functions_excluding_test, is_storage_mutation_call, receiver_is_auth_gate,
 };
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
@@ -103,14 +103,6 @@ fn address_param_names(sig: &syn::Signature) -> Vec<String> {
         }
     }
     names
-}
-
-fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    if !matches!(name.as_str(), "set" | "remove" | "extend_ttl" | "bump" | "append") {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
 }
 
 fn is_require_auth_call(
@@ -325,6 +317,24 @@ impl C {
     pub fn set_value(env: Env, admin: Address, value: i128) {
         admin.clone().require_auth();
         env.storage().persistent().set(&0, &value);
+    }
+}
+"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn passes_when_only_storage_call_is_extend_ttl() {
+        // #401: a function whose only storage call is `extend_ttl` mutates nothing and must
+        // not be flagged, regardless of when `require_auth` is (or isn't) called.
+        let hits = run(r#"
+use soroban_sdk::Env;
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn bump_balance(env: Env, key: u32) {
+        env.storage().persistent().extend_ttl(&key, 100, 1000);
+        env.current_contract_address().require_auth();
     }
 }
 "#);
