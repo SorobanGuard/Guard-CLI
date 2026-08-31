@@ -92,7 +92,7 @@ impl PanicVisitor<'_> {
 impl<'ast> Visit<'ast> for PanicVisitor<'_> {
     fn visit_macro(&mut self, i: &'ast syn::Macro) {
         let name = macro_name(i);
-        if matches!(name.as_str(), "panic" | "unreachable") {
+        if matches!(name.as_str(), "panic" | "unreachable" | "todo" | "unimplemented") {
             self.push(i.span().start().line, &format!("{name}!"));
         }
         visit::visit_macro(self, i);
@@ -180,6 +180,33 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(_env: Env) { unreachable!(); }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn flags_todo_macro() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env) { todo!("not implemented yet"); }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].check_name, "panic-in-contract");
+    }
+
+    #[test]
+    fn flags_unimplemented_macro() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env) { unimplemented!(); }
 }
 "#);
         assert_eq!(hits.len(), 1);
