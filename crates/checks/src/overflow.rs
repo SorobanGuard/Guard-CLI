@@ -35,16 +35,27 @@ fn severity_for_operand_name(name: &str) -> Option<Severity> {
     None
 }
 
-fn expr_ident(e: &Expr) -> Option<String> {
+/// Extract a name fragment from an operand for the severity heuristic. Handles bare
+/// idents plus the common shapes of contract arithmetic: `self.balance` (field access),
+/// `balances[i]` (index base), and `pool.reserve()` (method call).
+fn operand_name(e: &Expr) -> Option<String> {
     match e {
         Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+        Expr::Field(f) => match &f.member {
+            syn::Member::Named(id) => Some(id.to_string()),
+            syn::Member::Unnamed(_) => None,
+        },
+        Expr::Index(i) => operand_name(&i.expr),
+        Expr::MethodCall(m) => Some(m.method.to_string()),
+        Expr::Reference(r) => operand_name(&r.expr),
+        Expr::Paren(p) => operand_name(&p.expr),
         _ => None,
     }
 }
 
 fn infer_severity(e: &ExprBinary) -> Severity {
     for operand in [&*e.left, &*e.right] {
-        if let Some(name) = expr_ident(operand) {
+        if let Some(name) = operand_name(operand) {
             if let Some(sev) = severity_for_operand_name(&name) {
                 return sev;
             }
@@ -353,6 +364,27 @@ impl C {
     pub fn transfer(env: Env, amount: i128, fee: i128) -> i128 {
         let _ = env;
         amount - fee
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedArithmeticCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+        Ok(())
+    }
+
+    #[test]
+    fn field_operand_gets_high_severity() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn credit(env: Env, amount: i128) -> i128 {
+        let _ = env;
+        self.balance + amount
     }
 }
 "#,
