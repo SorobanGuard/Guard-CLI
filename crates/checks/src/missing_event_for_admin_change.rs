@@ -1,9 +1,9 @@
+use crate::util::contractimpl_functions_excluding_test;
 use crate::util::receiver_chain_contains_events;
 use crate::util::receiver_chain_contains_storage;
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
 use syn::spanned::Spanned;
-use syn::{ImplItem, ItemImpl};
 
 
 const CHECK_NAME: &str = "missing-event-for-admin-change";
@@ -17,67 +17,35 @@ impl Check for MissingEventForAdminChangeCheck {
     }
 
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
-        let mut visitor = AdminEventVisitor::default();
-        visit::visit_file(&mut visitor, file);
-        visitor.findings
-    }
-}
+        let mut findings = Vec::new();
+        for method in contractimpl_functions_excluding_test(file) {
+            let name = method.sig.ident.to_string();
+            if is_admin_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
+                let has_storage_write = has_storage_write(&method.block);
+                let has_event = has_event_emit(&method.block);
 
-#[derive(Default)]
-struct AdminEventVisitor {
-    findings: Vec<Finding>,
-}
-
-impl<'ast> Visit<'ast> for AdminEventVisitor {
-    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        if has_contractimpl_attr(&node.attrs) {
-            for item in &node.items {
-                if let ImplItem::Fn(method) = item {
-                    let name = method.sig.ident.to_string();
-                    if is_admin_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
-                        let has_storage_write = has_storage_write(&method.block);
-                        let has_event = has_event_emit(&method.block);
-
-                        if has_storage_write && !has_event {
-                            self.findings.push(Finding {
-                                check_name: CHECK_NAME.to_string(),
-                                severity: Severity::Medium,
-                                file_path: String::new(),
-                                line: method.sig.fn_token.span().start().line,
-                                function_name: name.clone(),
-                                description: format!(
-                                    "Admin change function `{}` lacks event emission",
-                                    name
-                                ),
-                                rule_url: Some(
-                                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-event-for-admin-change-medium"
-                                        .to_string(),
-                                ),
-                                suggestion: Some(
-                                    "Emit an event with env.events().publish() to track admin changes"
-                                        .to_string(),
-                                ),
-                            });
-                        }
-                    }
+                if has_storage_write && !has_event {
+                    findings.push(Finding {
+                        check_name: CHECK_NAME.to_string(),
+                        severity: Severity::Medium,
+                        file_path: String::new(),
+                        line: method.sig.fn_token.span().start().line,
+                        function_name: name.clone(),
+                        description: format!("Admin change function `{}` lacks event emission", name),
+                        rule_url: Some(
+                            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-event-for-admin-change-medium"
+                                .to_string(),
+                        ),
+                        suggestion: Some(
+                            "Emit an event with env.events().publish() to track admin changes"
+                                .to_string(),
+                        ),
+                    });
                 }
             }
         }
-        visit::visit_item_impl(self, node);
+        findings
     }
-}
-
-fn has_contractimpl_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        if let syn::Meta::Path(path) = &attr.meta {
-            path.segments
-                .last()
-                .map(|seg| seg.ident == "contractimpl")
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    })
 }
 
 fn is_admin_name(name: &str) -> bool {
@@ -166,6 +134,35 @@ impl C {
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 6);
+        assert_eq!(findings.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_missing_event_inside_cfg_test() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn set_owner(env: Env, new_owner: Address) {
+        env.events().publish((symbol_short!("owner"),), new_owner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use soroban_sdk::{contractimpl, Env, Address};
+
+    #[contractimpl]
+    impl C {
+        pub fn set_owner(env: Env, new_owner: Address) {
+            env.storage().instance().set(&symbol_short!("owner"), &new_owner);
+        }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = MissingEventForAdminChangeCheck;
+        let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
         Ok(())
     }
