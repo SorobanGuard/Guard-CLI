@@ -480,7 +480,8 @@ pub fn scan_directory_with_checks(
     let mut results: Vec<FileScanResult> = paths
         .par_iter()
         .map(|path| {
-            let findings = run_checks_for_file(path, &root, checks)?;
+            let mut findings = run_checks_for_file(path, &root, checks)?;
+            dedup_findings(&mut findings);
             let file_label = if root.is_file() {
                 path.file_name()
                     .unwrap_or_default()
@@ -1237,6 +1238,53 @@ mod dedup_tests {
 
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
         assert_eq!(total, 2, "distinct same-line findings must both survive dedup, got {total}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Regression test for a real `soroban-guard scan` run: `default_checks_with_config`
+    /// must not register `auth-after-storage-write` twice, and `scan_directory_with_checks`
+    /// (the function the CLI actually calls) must dedupe even if it somehow did.
+    #[test]
+    fn auth_after_storage_write_reports_exactly_once_via_scan_directory_with_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-auth-dedup-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+            #![no_std]
+            use soroban_sdk::{contract, contractimpl, Env, Address};
+
+            #[contract]
+            pub struct C;
+
+            #[contractimpl]
+            impl C {
+                pub fn f(env: Env, admin: Address, amount: i128) {
+                    env.storage().persistent().set(&0u32, &amount);
+                    admin.require_auth();
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let checks = soroban_guard_checks::default_checks_with_config(&[], &[]);
+        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+
+        let auth_after_write_count: usize = results
+            .iter()
+            .flat_map(|r| r.findings.iter())
+            .filter(|f| f.check_name == "auth-after-storage-write")
+            .count();
+        assert_eq!(
+            auth_after_write_count, 1,
+            "expected exactly one auth-after-storage-write finding, got {auth_after_write_count}"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
