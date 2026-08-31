@@ -1073,6 +1073,57 @@ impl C {
             "function-scoped suppression should silence finding with empty function_name"
         );
     }
+
+    /// End-to-end regression test for #533: a `// soroban-guard: allow(unchecked-divisor)`
+    /// placed above a method must silence that method's `unchecked-divisor` findings when
+    /// run through the full `scan_directory_with_checks` pipeline, not just the unit-level
+    /// `is_suppressed` helper. `unchecked-divisor` is one of the checks that emits findings
+    /// with an empty `function_name`, which is exactly the path that silently fails in
+    /// `is_suppressed` if function-scoped suppression is not matched by span instead.
+    #[test]
+    fn end_to_end_suppression_silences_unchecked_divisor_with_empty_function_name() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-suppress-e2e-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "\
+#[contract]
+pub struct C;
+#[contractimpl]
+impl C {
+    // soroban-guard: allow(unchecked-divisor)
+    pub fn divide(env: Env, a: u128, b: u128) -> u128 {
+        let _ = env;
+        a / b
+    }
+}
+",
+        )
+        .unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(soroban_guard_checks::UncheckedDivisorCheck)];
+        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+
+        let divisor_findings: usize = results
+            .iter()
+            .flat_map(|r| r.findings.iter())
+            .filter(|f| f.check_name == "unchecked-divisor")
+            .count();
+        assert_eq!(
+            divisor_findings, 0,
+            "expected the suppression comment to silence all unchecked-divisor findings"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
