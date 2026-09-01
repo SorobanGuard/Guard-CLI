@@ -293,6 +293,8 @@ pub(crate) fn is_invoke_contract_method_name(name: &str) -> bool {
         name,
         "invoke_contract" | "invoke_contract_check" | "try_invoke_contract"
     )
+}
+
 /// Returns the name of the first parameter whose type is `Env` (or `soroban_sdk::Env`).
 pub fn env_param_name(sig: &Signature) -> Option<String> {
     for arg in &sig.inputs {

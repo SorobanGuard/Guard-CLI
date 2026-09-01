@@ -4,7 +4,7 @@ use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprCall, ExprMethodCall, File};
+use syn::{Expr, ExprMethodCall, File};
 
 /// Returns true when `expr` is **exactly** `.get(…)`/`.get_unchecked(…)` chained directly onto a
 /// `.storage()` receiver chain — the same pattern that
@@ -92,7 +92,7 @@ impl PanicVisitor<'_> {
 impl<'ast> Visit<'ast> for PanicVisitor<'_> {
     fn visit_macro(&mut self, i: &'ast syn::Macro) {
         let name = macro_name(i);
-        if matches!(name.as_str(), "panic" | "unreachable") {
+        if matches!(name.as_str(), "panic" | "unreachable" | "todo" | "unimplemented") {
             self.push(i.span().start().line, &format!("{name}!"));
         }
         visit::visit_macro(self, i);
@@ -104,16 +104,6 @@ impl<'ast> Visit<'ast> for PanicVisitor<'_> {
             self.push(i.span().start().line, &format!(".{name}()"));
         }
         visit::visit_expr_method_call(self, i);
-    }
-
-    // also catch `panic!(...)` used as a statement via ExprCall in case syn parses it differently
-    fn visit_expr_call(&mut self, i: &'ast ExprCall) {
-        if let Expr::Path(p) = &*i.func {
-            if p.path.is_ident("panic") {
-                self.push(i.span().start().line, "panic!");
-            }
-        }
-        visit::visit_expr_call(self, i);
     }
 }
 
@@ -180,6 +170,33 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(_env: Env) { unreachable!(); }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn flags_todo_macro() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env) { todo!("not implemented yet"); }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].check_name, "panic-in-contract");
+    }
+
+    #[test]
+    fn flags_unimplemented_macro() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(_env: Env) { unimplemented!(); }
 }
 "#);
         assert_eq!(hits.len(), 1);

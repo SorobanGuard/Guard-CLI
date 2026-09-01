@@ -4,6 +4,7 @@
 //! findings are concatenated with no shared mutable state between checks.
 
 use rayon::prelude::*;
+use serde::Serialize;
 use soroban_guard_checks::util::contractimpl_functions_with_type_excluding_test;
 use soroban_guard_checks::{default_checks, Check, Finding};
 use std::collections::HashSet;
@@ -63,6 +64,77 @@ pub enum ScanError {
     /// The scan is incomplete and must not be treated as clean.
     #[error("Directory traversal error at {path}: {reason}")]
     Traversal { path: PathBuf, reason: String },
+}
+
+/// The panic payload recovered from a [`Check`] that aborted mid-scan, in
+/// serializable form so it can be surfaced to CI consumers via `--json`/`--sarif`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckPanic {
+    /// Name of the check that panicked.
+    pub check: String,
+    /// Path of the file being analyzed when the check panicked.
+    pub path: PathBuf,
+    /// The recovered panic message (or a placeholder when it was not a string).
+    pub message: String,
+}
+
+impl From<&ScanError> for CheckPanic {
+    fn from(err: &ScanError) -> Self {
+        match err {
+            ScanError::CheckPanic { check, path, message } => CheckPanic {
+                check: check.clone(),
+                path: path.clone(),
+                message: message.clone(),
+            },
+            // Only CheckPanic errors are ever converted; fall back to a best-effort
+            // representation for any other variant so callers never panic.
+            other => CheckPanic {
+                check: "unknown".to_string(),
+                path: PathBuf::new(),
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
+/// Information about check panics encountered during a scan, alongside the findings.
+///
+/// A degraded scan (one or more checks panicked) is distinguishable from a clean one
+/// by [`CheckPanicReport::is_degraded`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckPanicReport {
+    /// Every check that panicked during the scan.
+    pub panics: Vec<CheckPanic>,
+}
+
+impl CheckPanicReport {
+    /// Whether any check panicked while the scan ran.
+    pub fn is_degraded(&self) -> bool {
+        !self.panics.is_empty()
+    }
+
+    /// Number of checks that panicked during the scan.
+    pub fn len(&self) -> usize {
+        self.panics.len()
+    }
+
+    /// Whether the report carries no panics.
+    pub fn is_empty(&self) -> bool {
+        self.panics.is_empty()
+    }
+}
+
+impl From<&ScanError> for CheckPanicReport {
+    fn from(err: &ScanError) -> Self {
+        match err {
+            ScanError::CheckPanic { .. } => CheckPanicReport {
+                panics: vec![CheckPanic::from(err)],
+            },
+            _ => CheckPanicReport::default(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -342,6 +414,7 @@ fn collect_rust_paths(
                 continue;
             }
         }
+        paths.push(path.to_path_buf());
     }
 
     Ok((paths, files_skipped))
@@ -351,7 +424,7 @@ fn run_checks_for_file(
     path: &Path,
     root: &Path,
     checks: &[Box<dyn Check + Send + Sync>],
-) -> Result<Vec<Finding>, ScanError> {
+) -> Result<(Vec<Finding>, Vec<ScanError>), ScanError> {
     let content = std::fs::read_to_string(path).map_err(|e| ScanError::IoRead {
         path: path.to_path_buf(),
         source: e,
@@ -374,48 +447,45 @@ fn run_checks_for_file(
     let fn_spans = build_fn_spans(&syn_file);
     let suppressions = parse_suppressions(&content, &fn_spans);
 
-    let mut findings: Vec<Finding> = checks
-        .iter()
-        .flat_map(|check| {
-            let check_name = check.name().to_string();
-            match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content))) {
-                Ok(mut hits) => {
-                    for finding in &mut hits {
-                        finding.file_path.clone_from(&file_label);
-                    }
-                    hits
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut check_panics: Vec<ScanError> = Vec::new();
+    for check in checks {
+        let check_name = check.name().to_string();
+        match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content))) {
+            Ok(mut hits) => {
+                for finding in &mut hits {
+                    finding.file_path.clone_from(&file_label);
                 }
-                Err(payload) => {
-                    let message = if let Some(msg) = payload.downcast_ref::<&str>() {
-                        msg.to_string()
-                    } else if let Some(msg) = payload.downcast_ref::<String>() {
-                        msg.clone()
-                    } else {
-                        "panic payload was not a string".to_string()
-                    };
-                    eprintln!(
-                        "warning: {}",
-                        ScanError::CheckPanic {
-                            check: check_name,
-                            path: path.to_path_buf(),
-                            message,
-                        }
-                    );
-                    Vec::new()
-                }
+                findings.extend(
+                    hits.into_iter()
+                        .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans)),
+                );
             }
-        })
-        .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans))
-        .collect();
+            Err(payload) => {
+                let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    msg.to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "panic payload was not a string".to_string()
+                };
+                check_panics.push(ScanError::CheckPanic {
+                    check: check_name,
+                    path: path.to_path_buf(),
+                    message,
+                });
+            }
+        }
+    }
 
     findings.sort_by_key(|f| f.line);
     suppress_redundant_division_finding(&mut findings);
     dedup_findings(&mut findings);
-    Ok(findings)
+    Ok((findings, check_panics))
 }
 
 /// Findings for a single source file.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileScanResult {
     pub file_path: String,
     pub findings: Vec<Finding>,
@@ -433,25 +503,28 @@ pub struct FileScanResult {
 /// scanned. When `includes` is empty all `.rs` files (minus excludes and generated-file
 /// headers) are scanned.
 ///
-/// Returns `(findings, files_scanned, files_skipped)` where `files_skipped` counts files
-/// omitted because they carry a generated-file header.
+/// Returns `(findings, files_scanned, files_skipped, check_panics)` where `files_skipped`
+/// counts files omitted because they carry a generated-file header, and `check_panics`
+/// lists every check that panicked during the scan (see [`CheckPanicReport`]).
 pub fn scan_directory(
     root: &Path,
     excludes: &[String],
     includes: &[String],
-) -> Result<(Vec<Finding>, usize, usize), ScanError> {
+) -> Result<(Vec<Finding>, usize, usize, Vec<ScanError>), ScanError> {
     let root = root.canonicalize()?;
     let checks = default_checks();
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
 
-    let mut findings: Vec<Finding> = paths
+    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = paths
         .par_iter()
         .map(|path| run_checks_for_file(path, &root, &checks))
-        .collect::<Result<Vec<Vec<Finding>>, ScanError>>()?
+        .collect::<Result<Vec<_>, ScanError>>()?
         .into_iter()
-        .flatten()
-        .collect();
+        .unzip();
+
+    let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
+    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -459,29 +532,29 @@ pub fn scan_directory(
             .then_with(|| a.line.cmp(&b.line))
     });
     dedup_findings(&mut findings);
-    Ok((findings, files_scanned, files_skipped))
+    Ok((findings, files_scanned, files_skipped, check_panics))
 }
 
 /// Like [`scan_directory`] but runs `checks` instead of [`default_checks`].
 ///
-/// Returns `(results, files_scanned, files_skipped)` where each element of `results` groups
-/// findings by source file, and `files_skipped` counts files omitted due to generated-file
-/// headers (see [`scan_directory`]).
+/// Returns `(results, files_scanned, files_skipped, check_panics)` where each element of
+/// `results` groups findings by source file, `files_skipped` counts files omitted due to
+/// generated-file headers, and `check_panics` lists every check that panicked during the
+/// scan (see [`CheckPanicReport`]).
 pub fn scan_directory_with_checks(
     root: &Path,
     excludes: &[String],
     includes: &[String],
     checks: &[Box<dyn Check + Send + Sync>],
-) -> Result<(Vec<FileScanResult>, usize, usize), ScanError> {
+) -> Result<(Vec<FileScanResult>, usize, usize, Vec<ScanError>), ScanError> {
     let root = root.canonicalize()?;
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
 
-    let mut results: Vec<FileScanResult> = paths
+    let per_file = paths
         .par_iter()
         .map(|path| {
-            let mut findings = run_checks_for_file(path, &root, checks)?;
-            dedup_findings(&mut findings);
+            let (findings, check_panics) = run_checks_for_file(path, &root, checks)?;
             let file_label = if root.is_file() {
                 path.file_name()
                     .unwrap_or_default()
@@ -493,12 +566,20 @@ pub fn scan_directory_with_checks(
                     .to_string_lossy()
                     .to_string()
             };
-            Ok(FileScanResult { file_path: file_label, findings })
+            Ok((FileScanResult { file_path: file_label, findings }, check_panics))
         })
         .collect::<Result<Vec<_>, ScanError>>()?;
 
+    let mut results: Vec<FileScanResult> =
+        per_file.iter().map(|(r, _)| r.clone()).collect();
     results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
-    Ok((results, files_scanned, files_skipped))
+
+    let check_panics: Vec<ScanError> = per_file
+        .into_iter()
+        .flat_map(|(_, panics)| panics)
+        .collect();
+
+    Ok((results, files_scanned, files_skipped, check_panics))
 }
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
@@ -512,29 +593,24 @@ pub fn scan_directory_with_checks(
 /// findings. The one difference from [`scan_directory`] is that this does not walk a
 /// directory: only the paths passed in are considered.
 ///
-/// Returns `(findings, files_scanned, files_skipped)`.
+/// Returns `(findings, files_scanned, files_skipped, check_panics)` where `check_panics`
+/// lists every check that panicked during the scan (see [`CheckPanicReport`]).
 pub fn scan_files(
     paths: &[PathBuf],
     root: &Path,
     excludes: &[String],
     includes: &[String],
-) -> Result<(Vec<Finding>, usize, usize), ScanError> {
+) -> Result<(Vec<Finding>, usize, usize, Vec<ScanError>), ScanError> {
     let root = root.canonicalize()?;
     let exclude_patterns = compile_globs(excludes)?;
     let include_patterns = compile_globs(includes)?;
 
-    let mut filtered: Vec<&PathBuf> = Vec::new();
-    let mut files_skipped = 0usize;
-    let mut selected: Vec<PathBuf> = Vec::new();
-    let mut files_skipped = 0usize;
+    let mut selected = Vec::new();
+    let mut files_skipped = 0;
     for path in paths {
         let path_canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let label = path_canon.strip_prefix(&root).unwrap_or(&path_canon);
         match classify_rust_path(&path_canon, label, &exclude_patterns, &include_patterns)? {
-            PathVerdict::Scan => {
-                filtered.push(path);
-                selected.push(path_canon);
-            }
             PathVerdict::Scan => selected.push(path_canon),
             PathVerdict::GeneratedSkip => files_skipped += 1,
             PathVerdict::Reject => {}
@@ -544,13 +620,15 @@ pub fn scan_files(
     let files_scanned = selected.len();
     let checks = default_checks();
 
-    let mut findings: Vec<Finding> = selected
+    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = selected
         .par_iter()
         .map(|path| run_checks_for_file(path, &root, &checks))
-        .collect::<Result<Vec<Vec<Finding>>, ScanError>>()?
+        .collect::<Result<Vec<_>, ScanError>>()?
         .into_iter()
-        .flatten()
-        .collect();
+        .unzip();
+
+    let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
+    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -559,7 +637,7 @@ pub fn scan_files(
     });
     dedup_findings(&mut findings);
 
-    Ok((findings, files_scanned, files_skipped))
+    Ok((findings, files_scanned, files_skipped, check_panics))
 }
 
 #[cfg(test)]
@@ -580,9 +658,11 @@ mod tests {
         let file_path = dir.join("lib.rs");
         fs::write(&file_path, "pub fn f() {}").unwrap();
 
-        let (_, files_scanned, files_skipped) = scan_directory(&file_path, &[], &[]).unwrap();
+        let (_, files_scanned, files_skipped, check_panics) =
+            scan_directory(&file_path, &[], &[]).unwrap();
         assert_eq!(files_scanned, 1);
         assert_eq!(files_skipped, 0);
+        assert!(check_panics.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -617,7 +697,7 @@ mod tests {
         fs::write(root.join("target/generated.rs"), "pub fn generated() {}").unwrap();
         fs::write(root.join("README.md"), "not Rust").unwrap();
 
-        let (_, files_scanned, files_skipped) =
+        let (_, files_scanned, files_skipped, _) =
             scan_directory(&root, &["src/excluded.rs".to_string()], &[]).unwrap();
 
         assert_eq!(files_scanned, 1);
@@ -639,7 +719,7 @@ mod tests {
         fs::write(root.join("src/lib.rs"), "pub fn a() {}").unwrap();
         fs::write(root.join("src/other.rs"), "pub fn b() {}").unwrap();
 
-        let (_, files_scanned, files_skipped) =
+        let (_, files_scanned, files_skipped, _) =
             scan_directory(&root, &[], &["src/lib.rs".to_string()]).unwrap();
 
         assert_eq!(files_scanned, 1);
@@ -664,7 +744,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, files_scanned, files_skipped) = scan_directory(&root, &[], &[]).unwrap();
+        let (_, files_scanned, files_skipped, _) = scan_directory(&root, &[], &[]).unwrap();
 
         assert_eq!(files_scanned, 0);
         assert_eq!(files_skipped, 1);
@@ -687,18 +767,18 @@ mod tests {
         fs::write(&included, "pub fn a() {}").unwrap();
         fs::write(&excluded, "pub fn b() {}").unwrap();
 
-        let (_, files_scanned, files_skipped) =
+        let (_, files_scanned, files_skipped, _) =
             scan_files(&[included.clone(), excluded.clone()], &root, &[], &[]).unwrap();
         assert_eq!(files_scanned, 2);
         assert_eq!(files_skipped, 0);
 
         // Exclude one file via glob
-        let (_, files_scanned, _) =
+        let (_, files_scanned, _, _) =
             scan_files(&[excluded], &root, &["src/other.rs".to_string()], &[]).unwrap();
         assert_eq!(files_scanned, 0);
 
         // includes now compose the same way as scan_directory
-        let (_, files_scanned, _) =
+        let (_, files_scanned, _, _) =
             scan_files(&[included], &root, &[], &["src/other*.rs".to_string()]).unwrap();
         assert_eq!(files_scanned, 0);
 
@@ -742,7 +822,7 @@ mod tests {
             return;
         }
 
-        let (findings, files_scanned, _) = scan_directory(&root, &[], &[]).unwrap();
+        let (findings, files_scanned, _, check_panics) = scan_directory(&root, &[], &[]).unwrap();
         assert_eq!(
             files_scanned, 1,
             "the readable file should still be scanned"
@@ -782,8 +862,8 @@ mod tests {
         )
         .unwrap();
 
-        let (dir_findings, _, dir_skipped) = scan_directory(&root, &[], &[]).unwrap();
-        let (file_findings, files_scanned, file_skipped) =
+        let (dir_findings, _, dir_skipped, _) = scan_directory(&root, &[], &[]).unwrap();
+        let (file_findings, files_scanned, file_skipped, _) =
             scan_files(&[vulnerable, generated], &root, &[], &[]).unwrap();
 
         assert_eq!(files_scanned, 1, "the generated file must not be scanned");
@@ -914,6 +994,80 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Invalid glob pattern") || err_msg.contains("src/[invalid.rs"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A check that panics unconditionally when it runs.
+    struct PanickingCheck;
+    impl soroban_guard_checks::Check for PanickingCheck {
+        fn name(&self) -> &str {
+            "panic-check"
+        }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            panic!("boom from panic-check");
+        }
+    }
+
+    /// A check that never panics and always returns one finding.
+    struct OkCheck;
+    impl soroban_guard_checks::Check for OkCheck {
+        fn name(&self) -> &str {
+            "ok-check"
+        }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            vec![Finding {
+                check_name: "ok-check".into(),
+                severity: soroban_guard_checks::Severity::Low,
+                file_path: String::new(),
+                line: 1,
+                function_name: "f".into(),
+                description: "ok".into(),
+                rule_url: None,
+                suggestion: None,
+            }]
+        }
+    }
+
+    /// A panicking check must not abort the scan, but must be reported to the caller
+    /// alongside the findings instead of being swallowed (issue #410).
+    #[test]
+    fn panicking_check_is_reported_not_swallowed() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-panic-propagation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> = vec![
+            Box::new(PanickingCheck),
+            Box::new(OkCheck),
+        ];
+        let (results, _, _, check_panics) =
+            scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+
+        let total: usize = results.iter().map(|r| r.findings.len()).sum();
+        assert_eq!(total, 1, "the non-panicking check's finding must survive");
+
+        assert_eq!(check_panics.len(), 1, "the panic must be returned to the caller");
+        match &check_panics[0] {
+            ScanError::CheckPanic { check, path, message } => {
+                assert_eq!(check, "panic-check");
+                assert!(path.to_string_lossy().ends_with("src/lib.rs"));
+                assert!(message.contains("boom from panic-check"), "got {message}");
+            }
+            other => panic!("expected CheckPanic, got {other:?}"),
+        }
+
+        let report: CheckPanicReport = CheckPanicReport {
+            panics: check_panics.iter().map(CheckPanic::from).collect(),
+        };
+        assert!(report.is_degraded());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1114,7 +1268,7 @@ mod dedup_tests {
 
         let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
             vec![Box::new(DuplicatingCheck)];
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
         assert_eq!(total, 1, "expected 1 finding after dedup, got {}", total);
@@ -1166,7 +1320,7 @@ mod dedup_tests {
 
         let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
             vec![Box::new(ReversedCheck)];
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         // Files must be in lexicographic order.
         let file_paths: Vec<&str> = results.iter().map(|r| r.file_path.as_str()).collect();
@@ -1234,7 +1388,7 @@ mod dedup_tests {
 
         let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
             vec![Box::new(DistinctSameLineCheck)];
-        let (results, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
 
         let total: usize = results.iter().map(|r| r.findings.len()).sum();
         assert_eq!(total, 2, "distinct same-line findings must both survive dedup, got {total}");

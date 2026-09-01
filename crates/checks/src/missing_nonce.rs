@@ -1,7 +1,7 @@
-use crate::util::receiver_chain_contains_storage;
+use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
-use syn::{FnArg, ImplItem, ItemImpl};
+use syn::FnArg;
 
 const CHECK_NAME: &str = "missing-nonce";
 const NONCE_KEYWORDS: &[&str] = &["nonce", "sequence", "seq_num", "replay"];
@@ -14,67 +14,38 @@ impl Check for MissingNonceCheck {
     }
 
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
-        let mut visitor = NonceVisitor::default();
-        visit::visit_file(&mut visitor, file);
-        visitor.findings
-    }
-}
+        let mut findings = Vec::new();
+        for method in contractimpl_functions_excluding_test(file) {
+            if matches!(method.vis, syn::Visibility::Public(_)) {
+                let has_storage_write = contains_storage_write(&method.block);
+                let has_address_param = contains_address_param(&method.sig.inputs);
+                let has_nonce = contains_nonce_reference(&method.block);
 
-#[derive(Default)]
-struct NonceVisitor {
-    findings: Vec<Finding>,
-}
-
-impl<'ast> Visit<'ast> for NonceVisitor {
-    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        if has_contractimpl_attr(&node.attrs) {
-            for item in &node.items {
-                if let ImplItem::Fn(method) = item {
-                    if matches!(method.vis, syn::Visibility::Public(_)) {
-                        let has_storage_write = contains_storage_write(&method.block);
-                        let has_address_param = contains_address_param(&method.sig.inputs);
-                        let has_nonce = contains_nonce_reference(&method.block);
-
-                        if has_storage_write && has_address_param && !has_nonce {
-                            let name = method.sig.ident.to_string();
-                            self.findings.push(Finding {
-                                check_name: CHECK_NAME.to_string(),
-                                severity: Severity::Medium,
-                                file_path: String::new(),
-                                line: method.sig.ident.span().start().line,
-                                function_name: name.clone(),
-                                description:
-                                    "State-mutating method with Address parameter lacks nonce/replay protection"
-                                        .to_string(),
-                                rule_url: Some(
-                                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-nonce-medium"
-                                        .to_string(),
-                                ),
-                                suggestion: Some(
-                                    "Add nonce or sequence number validation to prevent replay attacks"
-                                        .to_string(),
-                                ),
-                            });
-                        }
-                    }
+                if has_storage_write && has_address_param && !has_nonce {
+                    let name = method.sig.ident.to_string();
+                    findings.push(Finding {
+                        check_name: CHECK_NAME.to_string(),
+                        severity: Severity::Medium,
+                        file_path: String::new(),
+                        line: method.sig.ident.span().start().line,
+                        function_name: name.clone(),
+                        description:
+                            "State-mutating method with Address parameter lacks nonce/replay protection"
+                                .to_string(),
+                        rule_url: Some(
+                            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-nonce-medium"
+                                .to_string(),
+                        ),
+                        suggestion: Some(
+                            "Add nonce or sequence number validation to prevent replay attacks"
+                                .to_string(),
+                        ),
+                    });
                 }
             }
         }
-        visit::visit_item_impl(self, node);
+        findings
     }
-}
-
-fn has_contractimpl_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        if let syn::Meta::Path(path) = &attr.meta {
-            path.segments
-                .last()
-                .map(|seg| seg.ident == "contractimpl")
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    })
 }
 
 fn contains_storage_write(block: &syn::Block) -> bool {
@@ -270,6 +241,35 @@ impl C {
 impl C {
     pub fn update(env: Env, user: soroban_sdk::Address, new_val: u32) {
         env.storage().instance().set(&symbol_short!("val"), &new_val);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = MissingNonceCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_missing_nonce_inside_cfg_test() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn update(env: Env, user: Address, new_val: u32) {
+        env.storage().instance().set(&symbol_short!("val"), &new_val);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use soroban_sdk::{contractimpl, Env, Address};
+
+    #[contractimpl]
+    impl C {
+        pub fn update(env: Env, user: Address, new_val: u32) {
+            env.storage().instance().set(&symbol_short!("val"), &new_val);
+        }
     }
 }
         "#;

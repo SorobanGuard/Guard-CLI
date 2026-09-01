@@ -82,17 +82,18 @@ struct XcInputVisitor<'a> {
 
 impl<'ast> Visit<'ast> for XcInputVisitor<'ast> {
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
-        // Collect `let <ident> = …invoke_contract(…)` bindings.
+        // Collect `let <pat> = …invoke_contract(…)` bindings. Tuple / struct patterns
+        // taint every bound name; any other `let` under those names clears prior taint.
         if let Stmt::Local(local) = stmt {
             if let Some(init) = &local.init {
-                if let Pat::Ident(pi) = &local.pat {
-                    if is_invoke_contract(&init.expr) {
-                        // New tainted binding.
-                        self.xc_bindings.insert(pi.ident.to_string());
+                let tainted = is_invoke_contract(&init.expr);
+                let mut names = Vec::new();
+                collect_pat_idents(&local.pat, &mut names);
+                for name in names {
+                    if tainted {
+                        self.xc_bindings.insert(name);
                     } else {
-                        // Re-binding under the same name to a non-invoke value clears any
-                        // prior taint: the variable has been validated/transformed.
-                        self.xc_bindings.remove(&pi.ident.to_string());
+                        self.xc_bindings.remove(&name);
                     }
                 }
             }
@@ -102,38 +103,93 @@ impl<'ast> Visit<'ast> for XcInputVisitor<'ast> {
 
     fn visit_expr_method_call(&mut self, m: &'ast ExprMethodCall) {
         if is_storage_set(m) {
-            // Check if any argument is (or references) an xc binding.
+            // Check if any argument is (or references) an xc binding, or is an inline
+            // `set(&k, &env.invoke_contract(…))` with no intervening binding at all.
             for arg in &m.args {
-                if let Some(name) = ref_ident(arg) {
-                    if self.xc_bindings.contains(&name) {
-                        self.out.push(Finding {
-                            check_name: CHECK_NAME.to_string(),
-                            severity: Severity::High,
-                            file_path: String::new(),
-                            line: m.span().start().line,
-                            function_name: self.fn_name.clone(),
-                            description: format!(
-                                "`{}` stores the return value of `invoke_contract` directly \
-                                 into contract storage without validation. Validate or sanitize \
-                                 cross-contract return values before persisting them.",
-                                self.fn_name
-                            ),
-                            rule_url: Some(
-                                "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-cross-contract-input-high"
-                                    .to_string(),
-                            ),
-                            suggestion: Some(
-                                "Validate or sanitize the `invoke_contract` return value before \
-                                 storing it — e.g. bounds-check numeric results or match on an \
-                                 expected type/variant before calling `env.storage().*.set(…)`."
-                                    .to_string(),
-                            ),
-                        });
-                    }
+                let via_binding = ref_ident(arg)
+                    .map(|name| self.xc_bindings.contains(&name))
+                    .unwrap_or(false);
+                if via_binding || expr_is_invoke_ref(arg) {
+                    self.out.push(Finding {
+                        check_name: CHECK_NAME.to_string(),
+                        severity: Severity::High,
+                        file_path: String::new(),
+                        line: m.span().start().line,
+                        function_name: self.fn_name.clone(),
+                        description: format!(
+                            "`{}` stores the return value of `invoke_contract` directly \
+                             into contract storage without validation. Validate or sanitize \
+                             cross-contract return values before persisting them.",
+                            self.fn_name
+                        ),
+                        rule_url: Some(
+                            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-cross-contract-input-high"
+                                .to_string(),
+                        ),
+                        suggestion: Some(
+                            "Validate or sanitize the `invoke_contract` return value before \
+                             storing it — e.g. bounds-check numeric results or match on an \
+                             expected type/variant before calling `env.storage().*.set(…)`."
+                                .to_string(),
+                        ),
+                    });
+                    break;
                 }
             }
         }
         visit::visit_expr_method_call(self, m);
+    }
+}
+
+/// Collect every identifier bound by a `let` pattern — `x`, `(a, b)`, `Reply { amount, .. }`,
+/// `Some(v)`, `&x`, etc. — so tuple/struct destructuring of a cross-contract return is tainted.
+fn collect_pat_idents(pat: &Pat, out: &mut Vec<String>) {
+    match pat {
+        Pat::Ident(pi) => {
+            out.push(pi.ident.to_string());
+            if let Some((_, sub)) = &pi.subpat {
+                collect_pat_idents(sub, out);
+            }
+        }
+        Pat::Tuple(t) => {
+            for p in &t.elems {
+                collect_pat_idents(p, out);
+            }
+        }
+        Pat::TupleStruct(t) => {
+            for p in &t.elems {
+                collect_pat_idents(p, out);
+            }
+        }
+        Pat::Struct(s) => {
+            for f in &s.fields {
+                collect_pat_idents(&f.pat, out);
+            }
+        }
+        Pat::Slice(s) => {
+            for p in &s.elems {
+                collect_pat_idents(p, out);
+            }
+        }
+        Pat::Reference(r) => collect_pat_idents(&r.pat, out),
+        Pat::Type(t) => collect_pat_idents(&t.pat, out),
+        Pat::Paren(p) => collect_pat_idents(&p.pat, out),
+        Pat::Or(o) => {
+            for p in &o.cases {
+                collect_pat_idents(p, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// True if `e` is (possibly behind `&` / parens) a cross-contract invocation, for the
+/// inline `set(&k, &env.invoke_contract(…))` form with no binding.
+fn expr_is_invoke_ref(e: &Expr) -> bool {
+    match e {
+        Expr::Reference(r) => expr_is_invoke_ref(&r.expr),
+        Expr::Paren(p) => expr_is_invoke_ref(&p.expr),
+        other => is_invoke_contract(other),
     }
 }
 
@@ -228,6 +284,56 @@ impl C {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].severity, Severity::High);
         assert_eq!(hits[0].check_name, CHECK_NAME);
+    }
+
+    #[test]
+    fn flags_tuple_let_pattern_of_invoke_contract() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn relay(env: Env, callee: Address) {
+        let (a, b) = env.invoke_contract::<(i128, i128)>(&callee, &Symbol::short("get"), ());
+        env.storage().persistent().set(&Symbol::short("k"), &a);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn flags_struct_let_pattern_of_invoke_contract() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn relay(env: Env, callee: Address) {
+        let Reply { amount, .. } = env.invoke_contract(&callee, &Symbol::short("get"), ());
+        env.storage().persistent().set(&Symbol::short("k"), &amount);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn flags_inline_invoke_contract_into_set() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn relay(env: Env, callee: Address) {
+        env.storage().persistent().set(&Symbol::short("k"), &env.invoke_contract::<i128>(&callee, &Symbol::short("get"), ()));
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
     }
 
     #[test]

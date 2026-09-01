@@ -116,10 +116,15 @@ Public (`pub fn`) methods in `#[contractimpl]` whose name **exactly matches** a 
 
 Names like `set_owner` strongly suggest privilege; without any auth call the scanner treats the entrypoint as world-callable.
 
+**Relationship to `unprotected-upgrade`**
+
+`SENSITIVE_NAMES` in `crates/checks/src/admin.rs` includes `migrate` and `upgrade`, which the dedicated [`unprotected-upgrade`](#unprotected-upgrade-high) check also covers. The overlap is **intentional**: `unprotected-admin` is the broad "privileged entrypoint" net keyed on an exact name match, while `unprotected-upgrade` is narrower and adds upgrade-specific reasoning — it matches on substring (e.g. `set_wasm_hash`, `replace_wasm_v2`) and verifies that the auth call precedes the WASM swap. An unprotected `pub fn upgrade(...)` or `pub fn migrate(...)` is therefore reported by both checks: same root cause, two angles. Adding a `require_auth` / `require_auth_for_args` call clears both findings at once.
+
 **Limitations**
 
 - Name allowlist only; extend the list as your org sees fit.
 - Any `require_auth` / `require_auth_for_args` anywhere in the body clears the finding (no dataflow).
+- `migrate` / `upgrade` findings are also reported by [`unprotected-upgrade`](#unprotected-upgrade-high) (see above).
 
 **Fixture:** `test-contracts/admin-vulnerable/`, `test-contracts/admin-safe/`
 
@@ -649,6 +654,28 @@ Public methods in `#[contractimpl]` that:
 
 Off-chain-signed meta-transactions (e.g. permit-style flows, delegated actions) must include a nonce or sequence number to prevent replay attacks. Without one, an observer can re-submit a valid signed payload to repeat the state-mutating operation indefinitely on behalf of the signer.
 
+**Example**
+
+```rust
+#[contractimpl]
+impl Contract {
+	pub fn set_balance(env: Env, user: Address, amount: i128) {
+		// Finding: Address parameter + storage write, no nonce reference.
+		user.require_auth();
+		env.storage().persistent().set(&user, &amount);
+	}
+
+	pub fn set_balance_protected(env: Env, user: Address, amount: i128, nonce: u64) {
+		user.require_auth();
+		let key = (symbol_short!("nonce"), user.clone());
+		let expected: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+		assert_eq!(nonce, expected, "bad nonce");
+		env.storage().persistent().set(&key, &(nonce + 1));
+		env.storage().persistent().set(&user, &amount);
+	}
+}
+```
+
 **Limitations**
 
 - Detection is purely identifier-based; a nonce stored under a differently-named variable (e.g. `counter`, `ts`) will not clear the finding.
@@ -694,7 +721,7 @@ Upgrade and migration entrypoints replace the contract's executable code. Withou
 
 **Relationship to `unprotected-admin`**
 
-[`unprotected-admin`](#unprotected-admin-high) also flags `upgrade` and `migrate` by exact name match against its `SENSITIVE_NAMES` list. This check is broader: it matches on substring (e.g. `set_wasm_hash`, `replace_wasm_v2`) rather than requiring an exact name, so the two checks can both report the same function.
+[`unprotected-admin`](#unprotected-admin-high) also flags `upgrade` and `migrate` by exact name match against its `SENSITIVE_NAMES` list. This check is broader: it matches on substring (e.g. `set_wasm_hash`, `replace_wasm_v2`) rather than requiring an exact name, and it additionally checks that the auth call comes *before* the WASM swap. The double report on a plain `upgrade` / `migrate` entrypoint is **intentional** — two useful angles on the same bug — and a single fix (adding `require_auth`) clears both findings.
 
 **Limitations**
 
