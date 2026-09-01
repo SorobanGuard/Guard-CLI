@@ -78,7 +78,14 @@ impl<'ast> Visit<'ast> for SafeArithScan<'_> {
                     let left = &*self.binary_expr.left;
                     let right = &*self.binary_expr.right;
                     let recv = &*i.receiver;
-                    if (left == recv && right == arg) || (right == recv && left == arg) {
+                    let operands_match =
+                        (left == recv && right == arg) || (right == recv && left == arg);
+                    // Only suppress when the `checked_*` call guards *this* expression, i.e.
+                    // it sits at the same source location. An operand-equal `checked_*` on
+                    // another line (e.g. an earlier discarded computation) is unrelated and
+                    // must not silence a genuinely unchecked `a + b`.
+                    let same_site = i.span().start().line == self.binary_expr.span().start().line;
+                    if operands_match && same_site {
                         self.found = true;
                     }
                 }
@@ -381,6 +388,27 @@ impl C {
         let hits = UncheckedArithmeticCheck.run(&file, "");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].severity, Severity::Low);
+        Ok(())
+    }
+
+    #[test]
+    fn discarded_checked_add_does_not_suppress_later_unchecked_add() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env, a: i128, b: i128) -> i128 {
+        let _ = env;
+        let _preview = a.checked_add(b);
+        a + b
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedArithmeticCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
         Ok(())
     }
 

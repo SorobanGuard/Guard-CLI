@@ -9,8 +9,9 @@
 use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
 use crate::{Check, Finding, Severity};
 use std::collections::{HashMap, HashSet};
+use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprMethodCall, File, Pat, Stmt};
+use syn::{Expr, ExprIf, ExprMatch, ExprMethodCall, ExprWhile, File, Macro, Pat, Stmt, Token};
 
 const CHECK_NAME: &str = "unbounded-vec-growth";
 
@@ -82,10 +83,13 @@ struct BodyScan {
     grown: HashSet<String>,
     /// Bindings passed by value or by reference into a storage `.set(...)`.
     written_back: HashSet<String>,
-    /// Bindings that are the receiver of a `.len()` call.
+    /// Bindings whose `.len()` appears in a guard position (`if` / `while` / `match`
+    /// condition, or a `require!` / `assert!` argument) — an actual length cap.
     len_checked: HashSet<String>,
     /// First line at which each binding is grown, for finding placement.
     grow_line: HashMap<String, usize>,
+    /// Nesting depth of guard conditions currently being visited.
+    guard_depth: usize,
 }
 
 impl<'ast> Visit<'ast> for BodyScan {
@@ -115,7 +119,7 @@ impl<'ast> Visit<'ast> for BodyScan {
                     .or_insert_with(|| i.method.span().start().line);
                 self.grown.insert(recv);
             }
-        } else if method == "len" {
+        } else if method == "len" && self.guard_depth > 0 {
             if let Some(recv) = ident_of(&i.receiver) {
                 self.len_checked.insert(recv);
             }
@@ -128,6 +132,50 @@ impl<'ast> Visit<'ast> for BodyScan {
         }
 
         visit::visit_expr_method_call(self, i);
+    }
+
+    fn visit_expr_if(&mut self, i: &'ast ExprIf) {
+        self.guard_depth += 1;
+        self.visit_expr(&i.cond);
+        self.guard_depth -= 1;
+        self.visit_block(&i.then_branch);
+        if let Some((_, else_branch)) = &i.else_branch {
+            self.visit_expr(else_branch);
+        }
+    }
+
+    fn visit_expr_while(&mut self, i: &'ast ExprWhile) {
+        self.guard_depth += 1;
+        self.visit_expr(&i.cond);
+        self.guard_depth -= 1;
+        self.visit_block(&i.body);
+    }
+
+    fn visit_expr_match(&mut self, i: &'ast ExprMatch) {
+        self.guard_depth += 1;
+        self.visit_expr(&i.expr);
+        self.guard_depth -= 1;
+        for arm in &i.arms {
+            self.visit_arm(arm);
+        }
+    }
+
+    fn visit_macro(&mut self, m: &'ast Macro) {
+        let macro_name = m.path.segments.last().map(|s| s.ident.to_string());
+        let is_guard_macro = matches!(
+            macro_name.as_deref(),
+            Some("require" | "assert" | "assert_eq" | "assert_ne" | "debug_assert")
+        );
+        if is_guard_macro {
+            if let Ok(args) = m.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
+                self.guard_depth += 1;
+                for arg in &args {
+                    self.visit_expr(arg);
+                }
+                self.guard_depth -= 1;
+            }
+        }
+        visit::visit_macro(self, m);
     }
 }
 
@@ -217,6 +265,42 @@ impl C {
 }
 "#);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn flags_when_len_only_used_for_logging_after_write_back() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Vec};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn add(env: Env, x: u32) {
+        let mut items: Vec<u32> = env.storage().persistent().get(&0).unwrap_or(soroban_sdk::vec![&env]);
+        items.push_back(x);
+        env.storage().persistent().set(&0, &items);
+        log(&env, items.len());
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn passes_when_len_capped_via_require_macro() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Vec};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn add(env: Env, x: u32) {
+        let mut items: Vec<u32> = env.storage().persistent().get(&0).unwrap_or(soroban_sdk::vec![&env]);
+        require!(items.len() < 100, "capacity exceeded");
+        items.push_back(x);
+        env.storage().persistent().set(&0, &items);
+    }
+}
+"#);
+        assert!(hits.is_empty(), "{hits:#?}");
     }
 
     #[test]
