@@ -69,6 +69,25 @@ Common causes:
 
 ---
 
+## Intentional overlap between checks
+
+Some findings are reported by more than one check by design. This is **not** a false positive — the
+checks look at the same code from different angles, and fixing the underlying issue clears every
+related finding at once.
+
+| Code pattern | Checks that report it | Why the overlap is intentional |
+|---|---|---|
+| `pub fn upgrade` / `pub fn migrate` with no `require_auth` | [`unprotected-admin`](checks.md#unprotected-admin-high) + [`unprotected-upgrade`](checks.md#unprotected-upgrade-high) | `unprotected-admin` is the broad exact-name "privileged entrypoint" net; `unprotected-upgrade` is narrower, matches upgrade names by substring, and also checks that auth precedes the WASM swap. |
+
+(By contrast, `storage.get(...).unwrap()` and the `panic-in-contract` / `uninitialized-storage-read`
+pair are deliberately *de-duplicated* — that line is reported once, by the more specific check. See
+the "Relationship to" notes in [checks.md](checks.md).)
+
+If a single overlapping finding is genuinely noise for your contract, suppress the individual check
+by name with an inline annotation (see below).
+
+---
+
 ## Inline suppression annotations
 
 Use an inline suppression comment when a finding is intentional and should be ignored locally:

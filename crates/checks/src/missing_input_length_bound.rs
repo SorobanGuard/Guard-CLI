@@ -1,7 +1,7 @@
+use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
-use syn::visit::{self, Visit};
 use syn::spanned::Spanned;
-use syn::{ImplItem, ItemImpl, FnArg, Pat};
+use syn::{FnArg, Pat};
 use quote::ToTokens;
 
 
@@ -15,66 +15,36 @@ impl Check for MissingInputLengthBoundCheck {
     }
 
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
-        let mut visitor = InputLengthVisitor::default();
-        visit::visit_file(&mut visitor, file);
-        visitor.findings
-    }
-}
-
-#[derive(Default)]
-struct InputLengthVisitor {
-    findings: Vec<Finding>,
-}
-
-impl<'ast> Visit<'ast> for InputLengthVisitor {
-    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        if has_contractimpl_attr(&node.attrs) {
-            for item in &node.items {
-                if let ImplItem::Fn(method) = item {
-                    if matches!(method.vis, syn::Visibility::Public(_)) {
-                        let bytes_vec_params = find_bytes_vec_params(&method.sig.inputs);
-                        for (param_name, _) in bytes_vec_params {
-                            if !has_length_check(&method.block, &param_name) {
-                                self.findings.push(Finding {
-                                    check_name: CHECK_NAME.to_string(),
-                                    severity: Severity::Medium,
-                                    file_path: String::new(),
-                                    line: method.sig.fn_token.span().start().line,
-                                    function_name: method.sig.ident.to_string(),
-                                    description: format!(
-                                        "Parameter `{}` (Bytes/Vec) lacks length validation",
-                                        param_name
-                                    ),
-                                    rule_url: Some(
-                                        "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-input-length-bound-medium"
-                                            .to_string(),
-                                    ),
-                                    suggestion: Some(
-                                        "Validate parameter length with .len() or .is_empty()"
-                                            .to_string(),
-                                    ),
-                                });
-                            }
-                        }
+        let mut findings = Vec::new();
+        for method in contractimpl_functions_excluding_test(file) {
+            if matches!(method.vis, syn::Visibility::Public(_)) {
+                let bytes_vec_params = find_bytes_vec_params(&method.sig.inputs);
+                for (param_name, _) in bytes_vec_params {
+                    if !has_length_check(&method.block, &param_name) {
+                        findings.push(Finding {
+                            check_name: CHECK_NAME.to_string(),
+                            severity: Severity::Medium,
+                            file_path: String::new(),
+                            line: method.sig.fn_token.span().start().line,
+                            function_name: method.sig.ident.to_string(),
+                            description: format!(
+                                "Parameter `{}` (Bytes/Vec) lacks length validation",
+                                param_name
+                            ),
+                            rule_url: Some(
+                                "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-input-length-bound-medium"
+                                    .to_string(),
+                            ),
+                            suggestion: Some(
+                                "Validate parameter length with .len() or .is_empty()".to_string(),
+                            ),
+                        });
                     }
                 }
             }
         }
-        visit::visit_item_impl(self, node);
+        findings
     }
-}
-
-fn has_contractimpl_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        if let syn::Meta::Path(path) = &attr.meta {
-            path.segments
-                .last()
-                .map(|seg| seg.ident == "contractimpl")
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    })
 }
 
 fn find_bytes_vec_params(
@@ -206,6 +176,35 @@ impl C {
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 6);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_missing_length_bound_inside_cfg_test() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn process(env: Env, data: Bytes) {
+        data.len();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use soroban_sdk::{contractimpl, Env, Bytes};
+
+    #[contractimpl]
+    impl C {
+        pub fn process(env: Env, data: Bytes) {
+            let x = data;
+        }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = MissingInputLengthBoundCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 0);
         Ok(())
     }
 }

@@ -37,13 +37,14 @@ fn collect_items(
             }
             Item::Impl(imp) => {
                 if has_attr(&imp.attrs, "contractimpl") {
-                    let type_name = match &*imp.self_ty {
-                        syn::Type::Path(tp) => tp
-                            .path
-                            .get_ident()
-                            .map(|i| i.to_string())
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        _ => "unknown".to_string(),
+                    // Resolve the self-type name from the last path segment so qualified
+                    // (`impl crate::Foo`) and generic (`impl Foo<T>`) targets are matched
+                    // against their `#[contract]` struct instead of resolving to "unknown".
+                    let resolved = crate::util::impl_type_name(imp);
+                    let type_name = if resolved.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        resolved
                     };
                     impls.push((type_name, imp.span().start().line));
                 }
@@ -135,6 +136,20 @@ impl MyContract {
         assert_eq!(hits[0].severity, Severity::Low);
         assert_eq!(hits[0].check_name, CHECK_NAME);
         assert_eq!(hits[0].function_name, "MyContract");
+    }
+
+    #[test]
+    fn passes_when_contractimpl_target_is_qualified_path() {
+        let hits = run(r#"
+use soroban_sdk::{contract, contractimpl, Env};
+#[contract]
+pub struct Foo;
+#[contractimpl]
+impl crate::Foo {
+    pub fn hello(_env: Env) {}
+}
+"#);
+        assert!(hits.is_empty());
     }
 
     #[test]

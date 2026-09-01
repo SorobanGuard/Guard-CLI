@@ -19,8 +19,11 @@ impl Check for SymbolKeyCollisionCheck {
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
         let mut symbol_keys = std::collections::HashMap::new();
+        let mut str_consts = std::collections::HashMap::new();
+        collect_str_consts(&file.items, &mut str_consts);
         let mut visitor = SymbolKeyVisitor {
             symbol_keys: &mut symbol_keys,
+            str_consts: &str_consts,
             current_function: String::new(),
         };
         visitor.visit_file(file);
@@ -63,7 +66,39 @@ impl Check for SymbolKeyCollisionCheck {
 
 struct SymbolKeyVisitor<'a> {
     symbol_keys: &'a mut std::collections::HashMap<String, Vec<(usize, usize, String)>>,
+    /// `const NAME: &str = "..."` declarations, so `Symbol::new(env, NAME)` can be
+    /// resolved to its literal key and compared against `symbol_short!` literals.
+    str_consts: &'a std::collections::HashMap<String, String>,
     current_function: String,
+}
+
+/// Extract the value of a string-literal expression (`"foo"`).
+fn str_lit_value(expr: &syn::Expr) -> Option<String> {
+    if let syn::Expr::Lit(lit) = expr {
+        if let Lit::Str(s) = &lit.lit {
+            return Some(s.value());
+        }
+    }
+    None
+}
+
+/// Collect `const NAME: &str = "..."` declarations (module level and nested modules).
+fn collect_str_consts(items: &[syn::Item], out: &mut std::collections::HashMap<String, String>) {
+    for item in items {
+        match item {
+            syn::Item::Const(c) => {
+                if let Some(v) = str_lit_value(&c.expr) {
+                    out.insert(c.ident.to_string(), v);
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_str_consts(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl<'ast, 'a> Visit<'ast> for SymbolKeyVisitor<'a> {
@@ -105,15 +140,24 @@ impl<'ast, 'a> Visit<'ast> for SymbolKeyVisitor<'a> {
                 let last = segments[segments.len() - 1].ident.to_string();
                 let prev = segments[segments.len() - 2].ident.to_string();
                 if last == "new" && prev == "Symbol" {
-                    if let Some(syn::Expr::Lit(expr_lit)) = node.args.iter().nth(1) {
-                        if let Lit::Str(s) = &expr_lit.lit {
-                            let key = s.value();
-                            let span = node.span().start();
-                            self.symbol_keys
-                                .entry(key)
-                                .or_default()
-                                .push((span.column, span.line, self.current_function.clone()));
-                        }
+                    let key = match node.args.iter().nth(1) {
+                        Some(syn::Expr::Lit(expr_lit)) => match &expr_lit.lit {
+                            Lit::Str(s) => Some(s.value()),
+                            _ => None,
+                        },
+                        // A named `const` key — the idiomatic way to declare keys.
+                        Some(syn::Expr::Path(p)) => p
+                            .path
+                            .get_ident()
+                            .and_then(|id| self.str_consts.get(&id.to_string()).cloned()),
+                        _ => None,
+                    };
+                    if let Some(key) = key {
+                        let span = node.span().start();
+                        self.symbol_keys
+                            .entry(key)
+                            .or_default()
+                            .push((span.column, span.line, self.current_function.clone()));
                     }
                 }
             }
@@ -170,17 +214,76 @@ impl Contract {
     }
 
     #[test]
-    fn detects_module_level_const_collisions() {
+    fn detects_const_key_colliding_with_symbol_short_literal() {
         let src = r#"
-use soroban_sdk::{symbol_short, Symbol, Env};
+use soroban_sdk::{contractimpl, symbol_short, Symbol, Env};
+
+const BAL: &str = "bal";
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn foo(env: Env) {
+        let a = symbol_short!("bal");
+        let b = Symbol::new(&env, BAL);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = SymbolKeyCollisionCheck.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn detects_module_level_const_collisions() {
+        // Compilable, idiomatic module-level `Symbol` constants using `symbol_short!` —
+        // `Symbol::new(&env, "...")` cannot appear in a `const` initializer since `env` does
+        // not exist at module scope, so this fixture no longer references an undefined `env`.
+        let src = r#"
+use soroban_sdk::{symbol_short, Symbol};
 
 const BALANCE_KEY: Symbol = symbol_short!("bal");
-const OLD_ADMIN_KEY: Symbol = Symbol::new(&env, "bal");
+const OLD_ADMIN_KEY: Symbol = symbol_short!("bal");
 "#;
         let file = parse_file(src).unwrap();
         let findings = SymbolKeyCollisionCheck.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Medium);
         assert_eq!(findings[0].function_name, "const OLD_ADMIN_KEY");
+    }
+
+    /// Regression coverage for the non-literal-second-argument gap: `Symbol::new(&env, CONST)`
+    /// inside a method, where `CONST` is a `&str` constant rather than an inline string
+    /// literal. `visit_expr_call` only recognizes `Symbol::new`'s second argument when it is a
+    /// `Lit::Str` directly, so a collision expressed through a shared `&str` constant is
+    /// currently **not** detected. This test documents that gap; it should start failing (i.e.
+    /// findings.len() should become 1) once the check is taught to resolve constant references.
+    #[test]
+    fn does_not_detect_in_method_symbol_new_collision_via_shared_const() {
+        let src = r#"
+use soroban_sdk::{contractimpl, Symbol, Env};
+
+const OLD_ADMIN_KEY: &str = "bal";
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn foo(env: Env) {
+        let k1 = Symbol::new(&env, OLD_ADMIN_KEY);
+        let k2 = Symbol::new(&env, OLD_ADMIN_KEY);
+        let _ = (k1, k2);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = SymbolKeyCollisionCheck.run(&file, src);
+        assert!(
+            findings.is_empty(),
+            "known gap: Symbol::new(&env, CONST) with a non-literal second argument is not \
+             yet resolved to its constant value, so no collision is detected here"
+        );
     }
 }

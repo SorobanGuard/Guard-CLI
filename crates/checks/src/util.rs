@@ -233,6 +233,21 @@ pub(crate) fn receiver_chain_contains_events(expr: &Expr) -> bool {
     receiver_chain_contains(expr, "events")
 }
 
+/// Does this method call mutate persisted contract state in a way that requires prior
+/// authorization?
+///
+/// Deliberately excludes `extend_ttl`/`bump`: extending a ledger entry's time-to-live does
+/// not change the stored value, cannot move funds, and cannot escalate privilege — in Soroban
+/// it is a deliberately permissionless operation (anyone paying the rent may keep an entry
+/// alive). Only `set`, `remove`, and `append` actually change what is stored.
+pub(crate) fn is_storage_mutation_call(m: &syn::ExprMethodCall) -> bool {
+    let name = m.method.to_string();
+    if !matches!(name.as_str(), "set" | "remove" | "append") {
+        return false;
+    }
+    receiver_chain_contains_storage(&m.receiver)
+}
+
 /// Is `receiver` something `.require_auth()` / `.require_auth_for_args()` can be legally
 /// called on? Recognizes the `Env` parameter, `Address` parameters, function-local bindings
 /// of type `Address`, field accesses (`self.admin`, `self.owner`), and method-chain receivers
@@ -278,6 +293,8 @@ pub(crate) fn is_invoke_contract_method_name(name: &str) -> bool {
         name,
         "invoke_contract" | "invoke_contract_check" | "try_invoke_contract"
     )
+}
+
 /// Returns the name of the first parameter whose type is `Env` (or `soroban_sdk::Env`).
 pub fn env_param_name(sig: &Signature) -> Option<String> {
     for arg in &sig.inputs {

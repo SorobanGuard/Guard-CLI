@@ -1,3 +1,4 @@
+use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -13,9 +14,16 @@ impl Check for UnsafeRandomnessCheck {
     }
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
-        let mut visitor = RandomnessVisitor::default();
-        visit::visit_file(&mut visitor, file);
-        visitor.findings
+        let mut findings = Vec::new();
+        for method in contractimpl_functions_excluding_test(file) {
+            let mut visitor = RandomnessVisitor {
+                findings: Vec::new(),
+                current_function: method.sig.ident.to_string(),
+            };
+            visitor.visit_block(&method.block);
+            findings.append(&mut visitor.findings);
+        }
+        findings
     }
 }
 
@@ -131,6 +139,26 @@ impl C {
 impl C {
     pub fn safe(env: Env) {
         let base_fee = env.ledger().base_reserve_in_stroops();
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnsafeRandomnessCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_cfg_test_module() -> Result<(), syn::Error> {
+        let src = r#"
+#[cfg(test)]
+mod tests {
+    #[contractimpl]
+    impl C {
+        pub fn draw(env: Env) {
+            let seed = env.ledger().timestamp();
+        }
     }
 }
         "#;

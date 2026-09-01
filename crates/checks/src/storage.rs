@@ -39,10 +39,9 @@ impl Check for UnsafeStoragePatternsCheck {
 
 fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
     let name = m.method.to_string();
-    if !matches!(
-        name.as_str(),
-        "set" | "remove" | "extend_ttl" | "bump" | "append"
-    ) {
+    // `extend_ttl` / `bump` are TTL operations, not data writes: bumping the TTL of a
+    // temporary entry is the correct thing to do, not a misuse worth flagging.
+    if !matches!(name.as_str(), "set" | "remove" | "append") {
         return false;
     }
     receiver_chain_contains_storage(&m.receiver)
@@ -264,6 +263,29 @@ impl C {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].severity, Severity::Medium);
         assert!(hits[0].description.contains("temporary"));
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_temporary_extend_ttl() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+
+pub struct C;
+
+const K: soroban_sdk::Symbol = symbol_short!("k");
+
+#[contractimpl]
+impl C {
+    pub fn keep(env: Env) {
+        env.storage().temporary().extend_ttl(&K, 100, 1000);
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert!(hits.is_empty(), "{hits:?}");
         Ok(())
     }
 
