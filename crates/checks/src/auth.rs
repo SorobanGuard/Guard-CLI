@@ -1,7 +1,7 @@
 //! Missing `env.require_auth()` before storage writes in `#[contractimpl]` methods.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_storage, receiver_is_auth_gate,
+    contractimpl_functions_excluding_test, is_storage_mutation_call, receiver_is_auth_gate,
 };
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
@@ -101,17 +101,6 @@ fn address_param_names(sig: &syn::Signature) -> Vec<String> {
         }
     }
     names
-}
-
-fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    if !matches!(
-        name.as_str(),
-        "set" | "remove" | "extend_ttl" | "bump" | "append"
-    ) {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
 }
 
 fn is_env_require_auth(
@@ -530,6 +519,31 @@ impl Contract {
         assert!(
             hits.is_empty(),
             "`let admin: Address = ...; admin.require_auth()` should satisfy the check"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_only_storage_call_is_extend_ttl() -> Result<(), syn::Error> {
+        // #401: extending a ledger entry's TTL is not a state mutation and must not be
+        // flagged as requiring prior authorization.
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::Env;
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn bump_balance(env: Env, key: u32) {
+        env.storage().persistent().extend_ttl(&key, 100, 1000);
+    }
+}
+"#,
+        )?;
+        assert!(
+            hits.is_empty(),
+            "`extend_ttl` alone must not be treated as a storage mutation requiring auth"
         );
         Ok(())
     }
