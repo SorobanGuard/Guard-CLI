@@ -319,7 +319,6 @@ impl C {
     }
 
     #[test]
-    fn unrelated_validate_does_not_suppress_finding() {
     fn passes_when_require_auth_and_real_comparison_present() {
         let hits = run(r#"
 use soroban_sdk::{contractimpl, Env, Address};
