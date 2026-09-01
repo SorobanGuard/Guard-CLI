@@ -16,7 +16,11 @@ pub struct GuardConfig {
 pub struct ScanConfig {
     /// Default scan path (overridden by the CLI positional argument).
     pub path: Option<String>,
-    /// Filter out findings below this severity ("high" | "medium" | "low").
+    /// Severity threshold for the `--fail-on` exit gate ("high" | "medium" | "low").
+    ///
+    /// Equivalent to the `--fail-on` flag (the flag wins if both are set): the
+    /// process exits `1` when a finding at or above this severity is present.
+    /// This does **not** filter findings out of the printed output.
     pub min_severity: Option<String>,
 }
 
