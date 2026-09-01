@@ -123,6 +123,26 @@ impl C {
     }
 
     #[test]
+    fn does_not_flag_when_length_checked() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn process(env: Env, data: Bytes) {
+        if data.len() > 1000 {
+            panic!("input too long");
+        }
+        let x = data;
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = MissingInputLengthBoundCheck;
+        let findings = check.run(&file, src);
+        assert!(findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn ignores_fixed_size_bytes_n() -> Result<(), syn::Error> {
         let src = r#"
 #[contractimpl]

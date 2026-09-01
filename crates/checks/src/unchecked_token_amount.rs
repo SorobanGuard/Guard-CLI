@@ -130,7 +130,27 @@ impl C {
         let file = parse_file(src)?;
         let check = UncheckedTokenAmountCheck;
         let findings = check.run(&file, src);
-        assert!(findings.len() > 0);
+        assert_eq!(findings.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_flag_guarded_transfer() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn send_tokens(token: Address, to: Address, amount: u128) {
+        if amount > 0 {
+            let client = token::Client::new(&env, &token);
+            client.transfer(&to, &amount);
+        }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UncheckedTokenAmountCheck;
+        let findings = check.run(&file, src);
+        assert!(findings.is_empty());
         Ok(())
     }
 }

@@ -139,6 +139,11 @@ fn ttl_fixtures() {
     assert_fixture_pair("ttl", "missing-ttl-extension");
 }
 
+#[test]
+fn input_length_fixtures() {
+    assert_fixture_pair("input-length", "missing-input-length-bound");
+}
+
 /// Regression test for issue #362: a function that writes two distinct persistent keys but
 /// only calls extend_ttl on one of them must still produce a finding for the unextended key.
 /// The old function-scoped `has_extend` flag would have suppressed both findings.
