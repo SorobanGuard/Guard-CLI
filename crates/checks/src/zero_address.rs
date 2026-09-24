@@ -31,6 +31,25 @@ const SENSITIVE_NAMES: &[&str] = &[
     "set_operator",
 ];
 
+/// True if `fn_name` is, or contains, one of `SENSITIVE_NAMES` as a run of whole
+/// `_`-separated words — so real-world variants such as `set_owner_v2`,
+/// `initialize_admin`, `try_set_admin` and `set_operator_address` are covered,
+/// the same way `unprotected-admin` prefix-matches its sensitive names (#30).
+///
+/// Matching whole words rather than raw substrings keeps short entries precise:
+/// `init` matches `init_pool` or `try_init`, but not `initial_supply` or
+/// `reinit_cache`, where "init" is only part of a longer word.
+fn is_sensitive_name(fn_name: &str) -> bool {
+    let lowered = fn_name.to_ascii_lowercase();
+    let words: Vec<&str> = lowered.split('_').filter(|w| !w.is_empty()).collect();
+    SENSITIVE_NAMES.iter().any(|sensitive| {
+        let needle: Vec<&str> = sensitive.split('_').collect();
+        words
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
+    })
+}
+
 /// Method names that, called directly on the address parameter, are themselves a
 /// zero/default check (e.g. `admin.is_zero()`). Matched exactly — never by
 /// substring — so unrelated calls such as `.unwrap_or_default()` can never match.
@@ -195,8 +214,7 @@ impl Check for MissingZeroAddressCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let fn_name = method.sig.ident.to_string();
-            let is_sensitive = SENSITIVE_NAMES.contains(&fn_name.as_str());
-            if !is_sensitive {
+            if !is_sensitive_name(&fn_name) {
                 continue;
             }
             if !has_address_param(method) {
@@ -365,6 +383,83 @@ impl C {
 }
 "#);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn flags_prefixed_and_suffixed_sensitive_name_variants() {
+        // #370: variants of sensitive names used to be skipped entirely because
+        // only exact names matched.
+        for name in [
+            "set_owner_v2",
+            "initialize_admin",
+            "try_set_admin",
+            "set_operator_address",
+        ] {
+            let src = format!(
+                r#"
+use soroban_sdk::{{contractimpl, Env, Address}};
+pub struct C;
+#[contractimpl]
+impl C {{
+    pub fn {name}(env: Env, who: Address) {{
+        env.storage().instance().set(&"k", &who);
+    }}
+}}
+"#
+            );
+            let hits = run(&src);
+            assert_eq!(hits.len(), 1, "expected `{name}` to be flagged");
+            assert_eq!(hits[0].function_name, name);
+        }
+    }
+
+    #[test]
+    fn passes_guarded_variant_of_sensitive_name() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn set_owner_v2(env: Env, new_owner: Address) {
+        assert!(new_owner != Address::default(), "zero address");
+        env.storage().instance().set(&"owner", &new_owner);
+    }
+}
+"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn does_not_match_sensitive_name_inside_a_longer_word() {
+        // `init` must match whole words only: `initial_supply` and
+        // `reinit_cache` are not initialisers.
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn initial_supply(env: Env, to: Address) {
+        env.storage().instance().set(&"to", &to);
+    }
+    pub fn reinit_cache(env: Env, who: Address) {
+        env.storage().instance().set(&"who", &who);
+    }
+}
+"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn is_sensitive_name_matches_whole_words_only() {
+        assert!(is_sensitive_name("set_admin"));
+        assert!(is_sensitive_name("init_pool"));
+        assert!(is_sensitive_name("try_init"));
+        assert!(is_sensitive_name("transfer_ownership_with_delay"));
+        assert!(!is_sensitive_name("initial_supply"));
+        assert!(is_sensitive_name("set_admin_fee"));
+        assert!(!is_sensitive_name("set"));
+        assert!(!is_sensitive_name("owner"));
+        assert!(!is_sensitive_name("deposit"));
     }
 
     #[test]

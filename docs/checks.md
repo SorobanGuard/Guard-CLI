@@ -367,7 +367,9 @@ Self-transfers waste ledger space, waste the caller's gas, and may indicate a lo
 
 **What it detects**
 
-In `#[contractimpl]` methods whose name matches a sensitive set (e.g. `set_owner`, `set_admin`, `initialize`, `init`): function parameters of type `Address` that are not guarded by a zero-address check (`require_auth`, `assert`, or comparison against a default/zero address) before being used.
+In `#[contractimpl]` methods whose name contains a sensitive name (`set_owner`, `set_admin`, `initialize`, `init`, `transfer_ownership`, `update_admin`, `set_manager`, `set_operator`) as whole `_`-separated words, so variants such as `set_owner_v2`, `initialize_admin`, `try_set_admin`, and `set_operator_address` are covered while `initial_supply` is not: function parameters of type `Address` that are never compared against a default/zero address (e.g. `assert!(admin != Address::default())` or `admin.is_zero()`).
+
+`require_auth()` is not treated as a guard: it proves the caller is authorised, not that the address argument is non-zero.
 
 **Why it matters**
 
