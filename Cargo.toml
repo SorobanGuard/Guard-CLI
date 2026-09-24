@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/cli", "crates/analyzer", "crates/checks"]
-exclude = ["test-contracts"]
+exclude = ["test-contracts", "examples/all-findings"]
 
 [workspace.package]
 version = "0.1.0"
