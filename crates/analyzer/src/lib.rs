@@ -43,6 +43,11 @@ fn build_fn_spans(file: &syn::File) -> Vec<FnSpan> {
 pub enum ScanError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("cannot read scan path {path}: {source}")]
+    ScanPath {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("Permission denied reading {path}")]
     PermissionDenied { path: PathBuf },
     #[error("IO error reading {path}: {source}")]
@@ -511,7 +516,10 @@ pub fn scan_directory(
     excludes: &[String],
     includes: &[String],
 ) -> Result<(Vec<Finding>, usize, usize, Vec<ScanError>), ScanError> {
-    let root = root.canonicalize()?;
+    let root = root.canonicalize().map_err(|source| ScanError::ScanPath {
+        path: root.to_path_buf(),
+        source,
+    })?;
     let checks = default_checks();
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
@@ -547,7 +555,10 @@ pub fn scan_directory_with_checks(
     includes: &[String],
     checks: &[Box<dyn Check + Send + Sync>],
 ) -> Result<(Vec<FileScanResult>, usize, usize, Vec<ScanError>), ScanError> {
-    let root = root.canonicalize()?;
+    let root = root.canonicalize().map_err(|source| ScanError::ScanPath {
+        path: root.to_path_buf(),
+        source,
+    })?;
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
 
@@ -601,7 +612,10 @@ pub fn scan_files(
     excludes: &[String],
     includes: &[String],
 ) -> Result<(Vec<Finding>, usize, usize, Vec<ScanError>), ScanError> {
-    let root = root.canonicalize()?;
+    let root = root.canonicalize().map_err(|source| ScanError::ScanPath {
+        path: root.to_path_buf(),
+        source,
+    })?;
     let exclude_patterns = compile_globs(excludes)?;
     let include_patterns = compile_globs(includes)?;
 
@@ -961,6 +975,21 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn missing_scan_root_error_names_path_for_all_entry_points() {
+        let missing = std::env::temp_dir().join("soroban-guard-missing-scan-root");
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let errors = [
+            scan_directory(&missing, &[], &[]).unwrap_err().to_string(),
+            scan_directory_with_checks(&missing, &[], &[], &[]).unwrap_err().to_string(),
+            scan_files(&[], &missing, &[], &[]).unwrap_err().to_string(),
+        ];
+        for message in errors {
+            assert!(message.contains(missing.to_string_lossy().as_ref()), "{message}");
+        }
+    }
+
     fn scan_directory_rejects_invalid_exclude_glob() {
         let root = std::env::temp_dir().join(format!(
             "soroban-guard-invalid-glob-{}-{}",
