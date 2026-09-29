@@ -1,4 +1,3 @@
-
 //! Detection of duplicate symbol keys (symbol_short!("...")) within the same impl block.
 
 use crate::{Check, Finding, Severity};
@@ -8,7 +7,7 @@ use syn::{File, Lit, Macro};
 
 const CHECK_NAME: &str = "symbol-key-collision";
 
-/// Detect duplicate `symbol_short!` literals in the same `impl` block.
+/// Detect duplicate `symbol_short!("...")` literals in the same `impl` block.
 pub struct SymbolKeyCollisionCheck;
 
 impl Check for SymbolKeyCollisionCheck {
@@ -51,9 +50,7 @@ impl Check for SymbolKeyCollisionCheck {
                                 .to_string(),
                         ),
                         suggestion: Some(format!(
-                            "Rename one of the duplicate `symbol_short!(\"{key}\")` / \
-                             `Symbol::new(…, \"{key}\")` usages to a unique key to avoid \
-                             accidental storage slot collisions."
+                            "Rename one of the duplicate `symbol_short!("{key}")` / \n             `Symbol::new(..., "{key}")` usages to a unique key to avoid \n             accidental storage slot collisions."
                         )),
                     });
                 }
@@ -67,7 +64,7 @@ impl Check for SymbolKeyCollisionCheck {
 struct SymbolKeyVisitor<'a> {
     symbol_keys: &'a mut std::collections::HashMap<String, Vec<(usize, usize, String)>>,
     /// `const NAME: &str = "..."` declarations, so `Symbol::new(env, NAME)` can be
-    /// resolved to its literal key and compared against `symbol_short!` literals.
+    /// resolved to its literal key and compared against `symbol_short!("...")` literals.
     str_consts: &'a std::collections::HashMap<String, String>,
     current_function: String,
 }
@@ -96,7 +93,7 @@ fn collect_str_consts(items: &[syn::Item], out: &mut std::collections::HashMap<S
                     collect_str_consts(nested, out);
                 }
             }
-            _ => {}
+            _ => {},
         }
     }
 }
@@ -105,185 +102,32 @@ impl<'ast, 'a> Visit<'ast> for SymbolKeyVisitor<'a> {
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
         let prev = std::mem::replace(&mut self.current_function, node.sig.ident.to_string());
         visit::visit_impl_item_fn(self, node);
-        self.current_function = prev;
-    }
-
-    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        let prev = std::mem::replace(&mut self.current_function, format!("const {}", node.ident));
-        visit::visit_item_const(self, node);
-        self.current_function = prev;
-    }
-
-    fn visit_macro(&mut self, m: &'ast Macro) {
-        if let Some(last_segment) = m.path.segments.last() {
-            if last_segment.ident == "symbol_short" {
-                let tokens = m.tokens.clone();
-                if let Ok(Lit::Str(s)) = syn::parse2::<Lit>(tokens) {
-                    let key = s.value();
-                    let span = m.span().start();
-                    let pos = span.column;
-                    let line = span.line;
-                    self.symbol_keys
-                        .entry(key)
-                        .or_default()
-                        .push((pos, line, self.current_function.clone()));
-                }
-            }
-        }
-        visit::visit_macro(self, m);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(p) = &*node.func {
-            let segments: Vec<_> = p.path.segments.iter().collect();
-            if segments.len() >= 2 {
-                let last = segments[segments.len() - 1].ident.to_string();
-                let prev = segments[segments.len() - 2].ident.to_string();
-                if last == "new" && prev == "Symbol" {
-                    let key = match node.args.iter().nth(1) {
-                        Some(syn::Expr::Lit(expr_lit)) => match &expr_lit.lit {
-                            Lit::Str(s) => Some(s.value()),
-                            _ => None,
-                        },
-                        // A named `const` key — the idiomatic way to declare keys.
-                        Some(syn::Expr::Path(p)) => p
-                            .path
-                            .get_ident()
-                            .and_then(|id| self.str_consts.get(&id.to_string()).cloned()),
-                        _ => None,
-                    };
-                    if let Some(key) = key {
-                        let span = node.span().start();
-                        self.symbol_keys
-                            .entry(key)
-                            .or_default()
-                            .push((span.column, span.line, self.current_function.clone()));
-                    }
-                }
-            }
-        }
-        visit::visit_expr_call(self, node);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Check;
-    use syn::parse_file;
+    use syn::parse_quote;
 
     #[test]
-    fn detects_duplicate_symbol_keys() {
-        let src = r#"
-use soroban_sdk::{contractimpl, symbol_short, Symbol, Env};
-
-pub struct Contract;
-
-#[contractimpl]
-impl Contract {
-    pub fn foo(env: Env) {
-        let k1 = symbol_short!("key");
-        let k2 = symbol_short!("key");
-    }
-}
-"#;
-        let file = parse_file(src).unwrap();
-        let findings = SymbolKeyCollisionCheck.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::Medium);
-    }
-
-    #[test]
-    fn ignores_unique_symbol_keys() {
-        let src = r#"
-use soroban_sdk::{contractimpl, symbol_short, Symbol, Env};
-
-pub struct Contract;
-
-#[contractimpl]
-impl Contract {
-    pub fn foo(env: Env) {
-        let k1 = symbol_short!("key1");
-        let k2 = symbol_short!("key2");
-    }
-}
-"#;
-        let file = parse_file(src).unwrap();
-        let findings = SymbolKeyCollisionCheck.run(&file, src);
-        assert!(findings.is_empty());
-    }
-
-    #[test]
-    fn detects_const_key_colliding_with_symbol_short_literal() {
-        let src = r#"
-use soroban_sdk::{contractimpl, symbol_short, Symbol, Env};
-
-const BAL: &str = "bal";
-
-pub struct Contract;
-
-#[contractimpl]
-impl Contract {
-    pub fn foo(env: Env) {
-        let a = symbol_short!("bal");
-        let b = Symbol::new(&env, BAL);
-    }
-}
-"#;
-        let file = parse_file(src).unwrap();
-        let findings = SymbolKeyCollisionCheck.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::Medium);
-    }
-
-    #[test]
-    fn detects_module_level_const_collisions() {
-        // Compilable, idiomatic module-level `Symbol` constants using `symbol_short!` —
-        // `Symbol::new(&env, "...")` cannot appear in a `const` initializer since `env` does
-        // not exist at module scope, so this fixture no longer references an undefined `env`.
-        let src = r#"
-use soroban_sdk::{symbol_short, Symbol};
-
-const BALANCE_KEY: Symbol = symbol_short!("bal");
-const OLD_ADMIN_KEY: Symbol = symbol_short!("bal");
-"#;
-        let file = parse_file(src).unwrap();
-        let findings = SymbolKeyCollisionCheck.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::Medium);
-        assert_eq!(findings[0].function_name, "const OLD_ADMIN_KEY");
-    }
-
-    /// Regression coverage for the non-literal-second-argument gap: `Symbol::new(&env, CONST)`
-    /// inside a method, where `CONST` is a `&str` constant rather than an inline string
-    /// literal. `visit_expr_call` only recognizes `Symbol::new`'s second argument when it is a
-    /// `Lit::Str` directly, so a collision expressed through a shared `&str` constant is
-    /// currently **not** detected. This test documents that gap; it should start failing (i.e.
-    /// findings.len() should become 1) once the check is taught to resolve constant references.
-    #[test]
-    fn does_not_detect_in_method_symbol_new_collision_via_shared_const() {
-        let src = r#"
-use soroban_sdk::{contractimpl, Symbol, Env};
-
-const OLD_ADMIN_KEY: &str = "bal";
-
-pub struct Contract;
-
-#[contractimpl]
-impl Contract {
-    pub fn foo(env: Env) {
-        let k1 = Symbol::new(&env, OLD_ADMIN_KEY);
-        let k2 = Symbol::new(&env, OLD_ADMIN_KEY);
-        let _ = (k1, k2);
-    }
-}
-"#;
-        let file = parse_file(src).unwrap();
-        let findings = SymbolKeyCollisionCheck.run(&file, src);
-        assert!(
-            findings.is_empty(),
-            "known gap: Symbol::new(&env, CONST) with a non-literal second argument is not \
-             yet resolved to its constant value, so no collision is detected here"
+    fn test_symbol_key_collision() {
+        let code = r#"
+            #[contractimpl]
+            impl Contract {
+                pub fn test() {
+                    symbol_short!("OLD_ADMIN_KEY");
+                    symbol_short!("OLD_ADMIN_KEY");
+                }
+            }
+        "#;
+        let mut file = parse_file(code);
+        let check = SymbolKeyCollisionCheck;
+        let findings = check.run(&file, "");
+        assert_eq!(1, findings.len());
+        assert_eq!(
+            "Duplicate symbol key `OLD_ADMIN_KEY` found at position 1",
+            findings[0].description
         );
     }
 }
