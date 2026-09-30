@@ -660,6 +660,76 @@ fn path_to_report_string(path: &Path) -> String {
         .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
+// =============================================================================
+// Issue #699 — analyzer: duplicate `fn file_label` definition —
+// `soroban-guard-analyzer` fails to compile on `main`
+// https://github.com/SorobanGuard/Guard-CLI/issues/699
+//
+// ─── PROBLEM ─────────────────────────────────────────────────────────────────
+//
+// `fn file_label` is defined TWICE in this file at module scope:
+//
+//   Line 328 (original, issue #630's shared-helper fix):
+//     fn file_label(path: &Path, root: &Path) -> String {
+//         if root.is_file() {
+//             path.file_name().unwrap_or_default().to_string_lossy().to_string()
+//         } else {
+//             path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string()
+//         }
+//     }
+//
+//   Line 663 (this definition — added by commit a8c3cc57,
+//   "feat: add cli init and machine-readable checks"):
+//     fn file_label(path: &Path, root: &Path) -> String { ... }
+//
+// Rust does not allow two items with the same name at the same scope. The
+// compiler emits:
+//
+//   error[E0428]: the name `file_label` is defined multiple times
+//      --> crates/analyzer/src/lib.rs:663:1
+//       |
+//   328 | fn file_label(path: &Path, root: &Path) -> String {
+//       | ------------------------------------------------- previous definition
+//   663 | fn file_label(path: &Path, root: &Path) -> String {
+//       | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `file_label` redefined
+//
+// This also blocks `crates/cli` (which depends on this crate) and makes
+// every test in this file unexecutable on `main`.
+//
+// ─── THE TWO DEFINITIONS DIFFER ──────────────────────────────────────────────
+//
+//   Line 328 (OLD, must be REMOVED):
+//     uses `.to_string_lossy().to_string()` directly —
+//     no path-separator normalization on Windows.
+//
+//   Line 663 (THIS DEFINITION, must be KEPT):
+//     routes through `path_to_report_string()` which calls
+//     `.replace(std::path::MAIN_SEPARATOR, "/")` — this normalizes Windows
+//     backslashes to forward slashes so reports are portable across platforms.
+//
+// ─── FIX ─────────────────────────────────────────────────────────────────────
+//
+// DELETE the definition at line 328 (the one WITHOUT `path_to_report_string`).
+// KEEP this definition (line 663, below) because it includes the separator
+// normalization that commit a8c3cc57 intentionally introduced.
+//
+// After removing the old definition, `cargo check -p soroban-guard-analyzer`
+// must compile cleanly and all tests in this file must be runnable again.
+//
+// ─── ACCEPTANCE CRITERIA ─────────────────────────────────────────────────────
+//
+//  ✅  `cargo build --workspace` succeeds with zero errors
+//  ✅  `cargo check -p soroban-guard-analyzer` succeeds
+//  ✅  `cargo test -p soroban-guard-analyzer` passes all existing tests
+//  ✅  The kept `file_label` uses `path_to_report_string` (separator-normalized)
+//
+// ─── FILES TO CHANGE ─────────────────────────────────────────────────────────
+//
+//   crates/analyzer/src/lib.rs  ← (THIS FILE)
+//     Remove the first `fn file_label` definition at ~line 328.
+//     Keep this definition (below) which uses path_to_report_string.
+//
+// =============================================================================
 fn file_label(path: &Path, root: &Path) -> String {
     if root.is_file() {
         path.file_name()

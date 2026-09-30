@@ -1,6 +1,91 @@
 //! Detect a `require_auth()` call - on the `Env` parameter or on an `Address`
 //! parameter - made *after* a storage write in `#[contractimpl]` methods.
 
+// =============================================================================
+// Issue #700 — checks: auth_order.rs duplicates util.rs's env/address
+// parameter helpers instead of reusing them
+// https://github.com/SorobanGuard/Guard-CLI/issues/700
+//
+// ─── PROBLEM ─────────────────────────────────────────────────────────────────
+//
+// This file privately reimplements four functions that already exist as `pub`
+// in `crates/checks/src/util.rs`. The private copies here are byte-for-byte
+// identical to the public versions:
+//
+//   Private copy here (approx lines)   Public version in util.rs
+//   ─────────────────────────────────  ──────────────────────────────────
+//   fn env_param_name      (~L61-72)   pub fn env_param_name   (L332-343)
+//   fn type_is_env         (~L74-82)   pub fn type_is_env      (L345-353)
+//   fn type_is_address     (~L84-93)   pub fn type_is_address  (L355-364)
+//   fn address_param_names (~L95-106)  pub fn address_param_names (L366-378)
+//
+// util.rs's stated convention (from its `pat_ident_name` doc comment):
+//   "Lives here once so every check that needs [this] shares it, rather
+//    than each keeping its own private copy."
+//
+// Having private copies creates the exact drift risk already seen elsewhere
+// in this crate — the `is_storage_mutation_call` divergence between
+// events.rs and util.rs. The two copies can silently diverge when one is
+// updated and the other is not.
+//
+// ─── FIX ─────────────────────────────────────────────────────────────────────
+//
+// Step 1 — Extend the existing `use crate::util` import at the top of this
+//           file to include the four shared helpers:
+//
+//   use crate::util::{
+//       contractimpl_functions_excluding_test,
+//       is_storage_mutation_call,
+//       receiver_is_auth_gate,
+//       env_param_name,        // ← add these four
+//       type_is_env,
+//       type_is_address,
+//       address_param_names,
+//   };
+//
+// Step 2 — Delete all four private function definitions from this file
+//   (the four `fn` blocks that are currently private to this module).
+//
+// That's the complete change. All call sites in this file already use the
+// unqualified names (e.g. `type_is_env(ty)`, `address_param_names(sig)`) so
+// they will resolve to the util.rs versions automatically — no call-site edits.
+//
+// ─── WHY THIS IS SAFE ────────────────────────────────────────────────────────
+//
+// The four functions are byte-for-byte identical between this file and util.rs.
+// Replacing the private copies with imports is a pure refactor — no behavior
+// change whatsoever. `cargo test -p soroban-guard-checks` must pass with
+// identical results before and after.
+//
+// ─── VERIFICATION STEPS ──────────────────────────────────────────────────────
+//
+//   # 1. Compiles cleanly
+//   cargo check -p soroban-guard-checks
+//
+//   # 2. All tests still pass with identical behavior
+//   cargo test  -p soroban-guard-checks
+//
+//   # 3. No private copies remain (must return zero matches)
+//   Select-String -Path "crates\checks\src\auth_order.rs" `
+//     -Pattern "^fn env_param_name|^fn type_is_env|^fn type_is_address|^fn address_param_names"
+//
+// ─── ACCEPTANCE CRITERIA ─────────────────────────────────────────────────────
+//
+//  ✅  auth_order.rs's private copies of the four functions removed
+//  ✅  use crate::util import extended with all four function names
+//  ✅  `cargo test -p soroban-guard-checks` passes with identical behavior
+//  ✅  No other file's behavior changes
+//
+// ─── FILES TO CHANGE ─────────────────────────────────────────────────────────
+//
+//   crates/checks/src/auth_order.rs  ← (THIS FILE)
+//     1. Add env_param_name, type_is_env, type_is_address, address_param_names
+//        to the existing `use crate::util` block
+//     2. Delete the four private fn definitions below
+//   crates/checks/src/util.rs        ← no change needed (pub fns already exist)
+//
+// =============================================================================
+
 use crate::util::{
     contractimpl_functions_excluding_test, is_storage_mutation_call, receiver_is_auth_gate,
 };
