@@ -1,10 +1,8 @@
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
+use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{FnArg, Pat};
-use quote::ToTokens;
-
-
 const CHECK_NAME: &str = "missing-input-length-bound";
 
 pub struct MissingInputLengthBoundCheck;

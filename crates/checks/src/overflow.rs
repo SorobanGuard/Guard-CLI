@@ -445,7 +445,8 @@ impl C {
     }
 
     #[test]
-    fn flags_unguarded_arithmetic_despite_guarded_arithmetic_in_same_function() -> Result<(), syn::Error> {
+    fn flags_unguarded_arithmetic_despite_guarded_arithmetic_in_same_function(
+    ) -> Result<(), syn::Error> {
         let file = parse_file(
             r#"
 use soroban_sdk::{contractimpl, Env};

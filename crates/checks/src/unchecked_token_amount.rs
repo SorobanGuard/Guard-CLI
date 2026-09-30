@@ -1,9 +1,7 @@
 use crate::{Check, Finding, Severity};
-use syn::visit::{self, Visit};
 use quote::ToTokens;
-use syn::{ExprMethodCall, Block};
-
-
+use syn::visit::{self, Visit};
+use syn::{Block, ExprMethodCall};
 const CHECK_NAME: &str = "unchecked-token-amount";
 const TRANSFER_METHODS: &[&str] = &["transfer", "transfer_from", "xfer", "mint"];
 
@@ -84,7 +82,10 @@ impl<'ast> Visit<'ast> for AmountGuardVisitor {
                 if ident == "amount"
                     && matches!(
                         node.op,
-                        syn::BinOp::Gt(_) | syn::BinOp::Ge(_) | syn::BinOp::Lt(_) | syn::BinOp::Le(_)
+                        syn::BinOp::Gt(_)
+                            | syn::BinOp::Ge(_)
+                            | syn::BinOp::Lt(_)
+                            | syn::BinOp::Le(_)
                     )
                 {
                     self.found_guard = true;

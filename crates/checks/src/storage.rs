@@ -439,7 +439,9 @@ impl C {
         )?;
         let hits = UnsafeStoragePatternsCheck.run(&file, "");
         assert_eq!(
-            hits.iter().filter(|h| h.description.contains("Symbol::new")).count(),
+            hits.iter()
+                .filter(|h| h.description.contains("Symbol::new"))
+                .count(),
             1,
             "an upper-cased parameter is still caller-controlled, not a stable const: {hits:?}"
         );

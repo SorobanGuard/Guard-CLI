@@ -110,7 +110,11 @@ impl MyContract {
 "#;
         let file = parse_file(src).unwrap();
         let hits = MutableGlobalStateCheck.run(&file, "");
-        assert_eq!(hits.len(), 1, "should flag local static mut inside impl method");
+        assert_eq!(
+            hits.len(),
+            1,
+            "should flag local static mut inside impl method"
+        );
         assert!(hits[0].description.contains("COUNTER"));
         assert_eq!(hits[0].severity, Severity::High);
     }
@@ -125,7 +129,10 @@ mod tests {
 "#;
         let file = parse_file(src).unwrap();
         let hits = MutableGlobalStateCheck.run(&file, "");
-        assert!(hits.is_empty(), "should not flag static mut inside #[cfg(test)] module");
+        assert!(
+            hits.is_empty(),
+            "should not flag static mut inside #[cfg(test)] module"
+        );
     }
 
     #[test]
@@ -137,7 +144,10 @@ mod tests {
 "#;
         let file = parse_file(src).unwrap();
         let hits = MutableGlobalStateCheck.run(&file, "");
-        assert!(hits.is_empty(), "should not flag static mut inside module named `tests`");
+        assert!(
+            hits.is_empty(),
+            "should not flag static mut inside module named `tests`"
+        );
     }
 
     #[test]

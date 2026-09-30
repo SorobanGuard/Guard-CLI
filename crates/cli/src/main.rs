@@ -139,11 +139,8 @@ fn run_scan(
 ) -> i32 {
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
         Ok((results, files_scanned, files_skipped, _check_panics)) => {
-            let findings: Vec<Finding> =
-                results.into_iter().flat_map(|r| r.findings).collect();
-            let should_fail = findings
-                .iter()
-                .any(|f| f.severity <= opts.fail_threshold);
+            let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
+            let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
 
             // Produce the serialized payload for the selected structured format,
             // then emit it via a single shared write-or-print path (Issue #430).

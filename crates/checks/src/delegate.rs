@@ -93,7 +93,10 @@ impl<'ast> Visit<'ast> for DelegateVisitor {
 }
 
 fn is_invoke_or_try_call(i: &ExprMethodCall) -> bool {
-    matches!(i.method.to_string().as_str(), "invoke_contract" | "try_call")
+    matches!(
+        i.method.to_string().as_str(),
+        "invoke_contract" | "try_call"
+    )
 }
 
 fn is_env_receiver(expr: &Expr, env_ident: &str) -> bool {
