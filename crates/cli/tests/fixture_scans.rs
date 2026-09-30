@@ -92,6 +92,38 @@ fn reentrancy_fixtures() {
 }
 
 #[test]
+fn contract_deployment_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("contract-deployment-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan contract-deployment-vulnerable: {error}"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.check_name == "unprotected-contract-deployment"),
+        "contract-deployment-vulnerable did not produce unprotected-contract-deployment; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn token_amount_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("token-amount-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan token-amount-vulnerable: {error}"));
+    assert!(
+        findings.iter().any(|f| f.check_name == "unchecked-token-amount"),
+        "token-amount-vulnerable did not produce unchecked-token-amount; findings: {findings:#?}"
+    );
+}
+
+#[test]
+fn upgrade_vulnerable_still_triggers_check() {
+    let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-vulnerable"), &[], &[])
+        .unwrap_or_else(|error| panic!("failed to scan upgrade-vulnerable: {error}"));
+    assert!(
+        findings.iter().any(|f| f.check_name == "unprotected-upgrade"),
+        "upgrade-vulnerable did not produce unprotected-upgrade; findings: {findings:#?}"
+    );
+}
+
+#[test]
 fn cli_scan_path_does_not_emit_duplicate_findings() {
     let checks = default_checks_with_config(&[], &[]);
     let (results, _, _, _) = scan_directory_with_checks(
@@ -144,6 +176,11 @@ fn token_mint_fixtures() {
 }
 
 #[test]
+fn token_amount_fixtures() {
+    assert_fixture_pair("token-amount", "unchecked-token-amount");
+}
+
+#[test]
 fn contract_deployment_safe_produces_no_findings() {
     let (findings, _, _, _) = scan_directory(&fixture_path("contract-deployment-safe"), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan contract-deployment-safe: {error}"));
@@ -156,13 +193,8 @@ fn contract_deployment_safe_produces_no_findings() {
 }
 
 #[test]
-fn upgrade_safe_produces_no_findings() {
-    let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-safe"), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan upgrade-safe: {error}"));
-    assert!(
-        findings.iter().all(|f| f.check_name != "unprotected-upgrade"),
-        "upgrade-safe unexpectedly produced unprotected-upgrade; findings: {findings:#?}"
-    );
+fn upgrade_fixtures() {
+    assert_fixture_pair("upgrade", "unprotected-upgrade");
 }
 
 #[test]
@@ -180,6 +212,13 @@ fn admin_event_safe_produces_no_findings() {
             .all(|f| f.check_name != "missing-event-for-admin-change"),
         "admin-event-safe unexpectedly produced missing-event-for-admin-change; findings: {findings:#?}"
     );
+fn admin_event_fixtures() {
+    assert_fixture_pair("admin-event", "missing-event-for-admin-change");
+}
+
+#[test]
+fn nonce_fixtures() {
+    assert_fixture_pair("nonce", "missing-nonce");
 }
 
 #[test]
@@ -200,6 +239,11 @@ fn ttl_fixtures() {
 #[test]
 fn input_length_fixtures() {
     assert_fixture_pair("input-length", "missing-input-length-bound");
+}
+
+#[test]
+fn large_loop_fixtures() {
+    assert_fixture_pair("large-loop", "large-loop");
 }
 
 /// Regression test for issue #362: a function that writes two distinct persistent keys but
@@ -341,7 +385,7 @@ path = "src"
 
     // Scan using the path from config (via current directory config)
     let config_root = match config::load(&root) {
-        Ok(Some(cfg)) => {
+        Ok((Some(cfg), _)) => {
             if let Some(path_str) = cfg.scan.path {
                 root.join(&path_str)
             } else {

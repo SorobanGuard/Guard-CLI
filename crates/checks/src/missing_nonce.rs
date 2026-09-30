@@ -108,7 +108,10 @@ struct NonceKeywordVisitor {
 impl<'ast> Visit<'ast> for NonceKeywordVisitor {
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         if let Some(ident) = node.path.get_ident() {
-            if NONCE_KEYWORDS.iter().any(|keyword| ident == keyword) {
+            // Use the same case-insensitive substring match as the macro and
+            // string-literal paths so idiomatic names like `tx_nonce`,
+            // `user_nonce`, or `nonce_value` are recognised (issue #666).
+            if str_contains_nonce_keyword(&ident.to_string()) {
                 self.found = true;
             }
         }
@@ -250,6 +253,28 @@ impl C {
         let check = MissingNonceCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        Ok(())
+    }
+
+    /// Regression test for #666: compound names that contain a nonce keyword
+    /// (tx_nonce, user_nonce, nonce_value) must be recognised as nonce protection.
+    #[test]
+    fn recognises_compound_nonce_identifier_names() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn update(env: Env, user: Address, tx_nonce: u64) {
+        env.storage().instance().set(&symbol_short!("val"), &tx_nonce);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = MissingNonceCheck;
+        let findings = check.run(&file, src);
+        assert!(
+            findings.is_empty(),
+            "tx_nonce should be recognised as nonce protection, got: {:?}", findings
+        );
         Ok(())
     }
 

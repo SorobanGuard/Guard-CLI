@@ -1,7 +1,8 @@
 //! Missing `env.require_auth()` before storage writes in `#[contractimpl]` methods.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, is_storage_mutation_call, receiver_is_auth_gate,
+    address_param_names, contractimpl_functions_excluding_test, env_param_name,
+    is_storage_mutation_call, receiver_is_auth_gate, type_is_address, type_is_env,
 };
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
@@ -56,51 +57,6 @@ impl Check for MissingRequireAuthCheck {
         }
         out
     }
-}
-
-/// Returns the name of the first parameter whose type is `Env` (or `soroban_sdk::Env`).
-fn env_param_name(sig: &syn::Signature) -> Option<String> {
-    for arg in &sig.inputs {
-        let FnArg::Typed(pat_type) = arg else {
-            continue;
-        };
-        if !type_is_env(&pat_type.ty) {
-            continue;
-        }
-        if let Pat::Ident(ident) = &*pat_type.pat {
-            return Some(ident.ident.to_string());
-        }
-    }
-    None
-}
-
-fn type_is_env(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else {
-        return false;
-    };
-    tp.path.segments.last().is_some_and(|s| s.ident == "Env")
-}
-
-fn type_is_address(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else {
-        return false;
-    };
-    tp.path.segments.last().is_some_and(|s| s.ident == "Address")
-}
-
-fn address_param_names(sig: &syn::Signature) -> Vec<String> {
-    let mut names = Vec::new();
-    for arg in &sig.inputs {
-        let FnArg::Typed(pat_type) = arg else {
-            continue;
-        };
-        if type_is_address(&pat_type.ty) {
-            if let Pat::Ident(ident) = &*pat_type.pat {
-                names.push(ident.ident.to_string());
-            }
-        }
-    }
-    names
 }
 
 fn is_env_require_auth(
