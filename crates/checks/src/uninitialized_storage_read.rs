@@ -35,6 +35,19 @@ impl Check for UninitializedStorageReadCheck {
     }
 }
 
+/// Returns true when `expr` is a `.has(&key)` call on a storage receiver chain.
+fn is_storage_has(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(m) => {
+            m.method == "has" && receiver_chain_contains_storage(&m.receiver)
+        }
+        _ => false,
+    }
+}
+
+/// Returns true when `expr` is a `.get(…)`/`.get_unchecked(…)` call on a
+/// storage receiver chain — i.e. a raw storage read that returns `Option<T>`.
+fn is_storage_get(expr: &Expr) -> bool {
 /// Returns `true` when the block contains a `.has(&key)` call on a storage
 /// receiver where the key argument token-text matches `read_key_text` AND
 /// the `.has()` call appears **before** the line of the unsafe read
@@ -100,6 +113,119 @@ fn is_storage_get(expr: &Expr) -> Option<String> {
             is_storage_get(&m.receiver)
         }
         _ => None,
+    }
+}
+
+/// Returns the argument expression passed to a `.has(…)` call, if any.
+fn has_key_arg(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::MethodCall(m) if m.method == "has" => m.args.first(),
+        _ => None,
+    }
+}
+
+/// Returns the argument expression passed to a `.get(…)`/`.get_unchecked(…)`
+/// call, if any.
+fn get_key_arg(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::MethodCall(m) if m.method == "get" || m.method == "get_unchecked" => {
+            m.args.first()
+        }
+        _ => None,
+    }
+}
+
+/// Returns true when the two key expressions refer to the same storage key.
+///
+/// This is a conservative syntactic comparison: identical token streams (e.g.
+/// the same `&K` constant or the same `&key` identifier) are treated as the
+/// same key. Anything else is treated as a different key so that a guard on an
+/// unrelated key does not suppress the finding.
+fn same_key(a: &Expr, b: &Expr) -> bool {
+    let a = quote::quote!(#a).to_string();
+    let b = quote::quote!(#b).to_string();
+    a == b
+}
+
+/// Returns true when `block` contains a `.has(&key)` guard that dominates the
+/// flagged read of `key` — i.e. a guard in a divergent (early-return) branch
+/// that gates the read, rather than any `.has()` call anywhere in the function.
+fn block_has_gating_has_guard(block: &syn::Block, key: &Expr) -> bool {
+    let mut v = GatingHasGuardVisitor { key, found: false };
+    v.visit_block(block);
+    v.found
+}
+
+struct GatingHasGuardVisitor<'a> {
+    key: &'a Expr,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for GatingHasGuardVisitor<'_> {
+    fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+        // A guard gates the read when the `if` condition is a `.has(&key)`
+        // check on the same key and the branch diverges (returns/panics),
+        // so control only reaches the read when the key is present.
+        if let Expr::MethodCall(m) = &*i.cond {
+            if is_storage_has(&i.cond) {
+                if let Some(arg) = has_key_arg(&i.cond) {
+                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+            // Also handle the negated form `if !has(&key) { return …; }`.
+            if m.method == "has" {
+                if let Some(arg) = has_key_arg(&i.cond) {
+                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+        }
+        if let Expr::Unary(u) = &*i.cond {
+            if matches!(u.op, syn::UnOp::Not(_)) && is_storage_has(&u.expr) {
+                if let Some(arg) = has_key_arg(&u.expr) {
+                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+        }
+        visit::visit_expr_if(self, i);
+    }
+}
+
+/// Returns true when `block` always diverges (returns, panics, etc.) so that
+/// reaching the end of the `if` branch is impossible.
+fn block_diverges(block: &syn::Block) -> bool {
+    let mut v = DivergesVisitor { found: false };
+    v.visit_block(block);
+    v.found
+}
+
+#[derive(Default)]
+struct DivergesVisitor {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for DivergesVisitor {
+    fn visit_expr_return(&mut self, _i: &'ast syn::ExprReturn) {
+        self.found = true;
+    }
+
+    fn visit_macro(&mut self, i: &'ast syn::Macro) {
+        if i.path.is_ident("panic")
+            || i.path.is_ident("unreachable")
+            || i.path.is_ident("todo")
+            || i.path.is_ident("unimplemented")
+        {
+            self.found = true;
+        }
+        visit::visit_macro(self, i);
     }
 }
 
