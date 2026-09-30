@@ -161,6 +161,11 @@ fn std_imports_fixtures() {
 }
 
 #[test]
+fn contract_annotation_fixtures() {
+    assert_fixture_pair("contract-annotation", "missing-contract-annotation");
+}
+
+#[test]
 fn key_collision_fixtures() {
     assert_fixture_pair("key-collision", "symbol-key-collision");
 }
