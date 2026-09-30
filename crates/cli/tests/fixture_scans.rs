@@ -146,6 +146,11 @@ fn cli_scan_path_does_not_emit_duplicate_findings() {
 }
 
 #[test]
+fn delegate_call_risk_fixtures() {
+    assert_fixture_pair("delegate", "delegate-call-risk");
+}
+
+#[test]
 fn self_transfer_fixtures() {
     assert_fixture_pair("self-transfer", "self-transfer");
 }
