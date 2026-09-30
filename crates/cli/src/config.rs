@@ -50,7 +50,7 @@ pub fn load(scan_root: &Path) -> Result<Option<GuardConfig>, String> {
     }
     let raw = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("could not read {}: {e}", config_path.display()))?;
-    let cfg: GuardConfig = toml::from_str(&raw)
-        .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let cfg: GuardConfig =
+        toml::from_str(&raw).map_err(|e| format!("{}: {e}", config_path.display()))?;
     Ok(Some(cfg))
 }
