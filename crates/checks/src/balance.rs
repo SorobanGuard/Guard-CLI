@@ -81,28 +81,70 @@ impl Check for MissingBalanceCheck {
 /// Accumulates the `(line, column)` position of every token-client `transfer`/`transfer_from`
 /// call and every token-client `balance`/`authorized` call in a function body. Per-call-site
 /// evaluation is done in the caller after the walk finishes.
+///
+/// Scoping is handled with a stack of `HashSet<String>` frames — one frame per block nesting
+/// level. When a nested block introduces a `let` that shadows an outer token-client binding
+/// with a non-token-client value, only the innermost frame is affected. Once the block exits,
+/// the outer frame (and its token-client binding) is restored automatically, matching Rust's
+/// actual lexical scoping rules.
 #[derive(Default)]
 struct BodyScan {
-    /// Local bindings initialised from `token::Client::new(...)` / `TokenClient::new(...)`
-    /// (or an aliased client type, e.g. `use ...::Client as Tok; Tok::new(...)`).
-    token_bindings: HashSet<String>,
+    /// Scope stack: each entry holds the set of token-client binding names that are
+    /// *newly introduced* at that nesting level. The outermost frame (index 0) corresponds
+    /// to the function body block; nested blocks push additional frames. A name is
+    /// considered a live token-client binding if it appears in *any* frame on the stack.
+    scope_stack: Vec<HashSet<String>>,
     /// Alias idents (`Tok`) that map to `Client` / `TokenClient` via `use ... as`.
     token_client_aliases: HashSet<String>,
     transfers: Vec<(usize, usize)>,
     balances: Vec<(usize, usize)>,
 }
 
+impl BodyScan {
+    /// Returns `true` if `name` is currently tracked as a token-client binding in any
+    /// live scope frame.
+    fn is_token_binding(&self, name: &str) -> bool {
+        self.scope_stack.iter().any(|frame| frame.contains(name))
+    }
+
+    /// Records a `let` binding at the current (innermost) scope level. If `is_token` is
+    /// `true`, inserts `name`; otherwise removes it from the current frame (shadowing).
+    /// Bindings in outer frames are not affected, preserving them for when the inner
+    /// block exits.
+    fn record_binding(&mut self, name: String, is_token: bool) {
+        let frame = self
+            .scope_stack
+            .last_mut()
+            .expect("scope_stack must be non-empty during a visit");
+        if is_token {
+            frame.insert(name);
+        } else {
+            // Remove from the current frame only. An outer frame may still hold the name
+            // if it was introduced there — that outer binding will become visible again
+            // after this inner frame is popped.
+            frame.remove(&name);
+        }
+    }
+}
+
 impl<'ast> Visit<'ast> for BodyScan {
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        // Push a fresh scope frame before descending into any block so that `let`
+        // bindings (and shadows) inside are isolated from outer frames.
+        self.scope_stack.push(HashSet::new());
+        visit::visit_block(self, block);
+        self.scope_stack.pop();
+    }
+
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
         // Collect token-client bindings in source order so later calls resolve against
-        // them. Re-binding the same name to something else clears the entry.
+        // them. Re-binding the same name to something else removes it from the *current*
+        // frame only, leaving outer frames (and their token-client entries) intact.
         if let Stmt::Local(local) = stmt {
             if let (Some(name), Some(init)) = (binding_ident(&local.pat), &local.init) {
-                if expr_is_token_client_ctor(&init.expr, &self.token_client_aliases) {
-                    self.token_bindings.insert(name);
-                } else {
-                    self.token_bindings.remove(&name);
-                }
+                let is_token =
+                    expr_is_token_client_ctor(&init.expr, &self.token_client_aliases);
+                self.record_binding(name, is_token);
             }
         }
         visit::visit_stmt(self, stmt);
@@ -111,7 +153,7 @@ impl<'ast> Visit<'ast> for BodyScan {
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
         let method = i.method.to_string();
         let on_token_client = ident_of(&i.receiver)
-            .map(|r| self.token_bindings.contains(&r))
+            .map(|r| self.is_token_binding(&r))
             .unwrap_or(false);
         if on_token_client {
             let start = i.method.span().start();
@@ -373,5 +415,35 @@ impl C {
         let file = syn::parse_file("use soroban_sdk::Address as Addr;")?;
         assert!(collect_token_client_aliases(&file).is_empty());
         Ok(())
+    }
+
+    /// Regression test for #683: a nested-block shadow of a token-client binding to a
+    /// non-token-client value must not permanently remove the outer binding from tracking.
+    /// After the inner block exits, the outer `token` binding must still be live, so an
+    /// unguarded `transfer` call on it after the block must still be flagged.
+    #[test]
+    fn nested_block_shadow_does_not_suppress_outer_token_binding() {
+        let src = r#"
+#[contractimpl]
+impl Token {
+    pub fn send(env: Env, cond: bool) {
+        let token = token::Client::new(&env, &id);
+        if cond {
+            // Shadow `token` with a non-client type inside the block.
+            let token = SomeOtherType::new();
+            token.transfer(&x, &y);   // unrelated, should not be tracked
+        }
+        // After the block, the outer `token` (a real token::Client) is live again.
+        // This transfer has no preceding balance() check — must be flagged.
+        token.transfer(&sender, &recv, &amount);
+    }
+}
+"#;
+        let lines = finding_lines(src);
+        assert_eq!(
+            lines.len(),
+            1,
+            "the outer token.transfer after the nested block must be flagged; got lines: {lines:?}"
+        );
     }
 }
