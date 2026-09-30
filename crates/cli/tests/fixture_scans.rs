@@ -156,13 +156,8 @@ fn contract_deployment_safe_produces_no_findings() {
 }
 
 #[test]
-fn upgrade_safe_produces_no_findings() {
-    let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-safe"), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan upgrade-safe: {error}"));
-    assert!(
-        findings.iter().all(|f| f.check_name != "unprotected-upgrade"),
-        "upgrade-safe unexpectedly produced unprotected-upgrade; findings: {findings:#?}"
-    );
+fn upgrade_fixtures() {
+    assert_fixture_pair("upgrade", "unprotected-upgrade");
 }
 
 #[test]
