@@ -1193,7 +1193,10 @@ mod tests {
                 ScanError::Multiple(errs) => {
                     assert_eq!(errs.len(), 2, "expected both broken files reported");
                     let paths: Vec<PathBuf> = errs.iter().map(scan_error_path).collect();
-                    assert!(paths.windows(2).all(|w| w[0] <= w[1]), "not sorted: {paths:?}");
+                    assert!(
+                        paths.windows(2).all(|w| w[0] <= w[1]),
+                        "not sorted: {paths:?}"
+                    );
                     assert!(paths
                         .iter()
                         .any(|p| p.to_string_lossy().ends_with("a_broken.rs")));

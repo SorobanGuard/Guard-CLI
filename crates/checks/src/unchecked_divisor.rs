@@ -36,8 +36,8 @@ struct DivisorExprVisitor {
 impl<'ast> Visit<'ast> for DivisorExprVisitor {
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
         if matches!(node.op, BinOp::Div(_) | BinOp::DivAssign(_)) && !is_literal(&node.right) {
-            let description = "Divisor is not validated to be non-zero; division by zero will panic"
-                .to_string();
+            let description =
+                "Divisor is not validated to be non-zero; division by zero will panic".to_string();
             self.findings.push(Finding {
                 check_name: CHECK_NAME.to_string(),
                 severity: Severity::High,

@@ -2,12 +2,15 @@ use crate::util::contractimpl_functions_excluding_test;
 use crate::util::receiver_chain_contains_events;
 use crate::util::receiver_chain_contains_storage;
 use crate::{Check, Finding, Severity};
-use syn::visit::{self, Visit};
 use syn::spanned::Spanned;
-
-
+use syn::visit::{self, Visit};
 const CHECK_NAME: &str = "missing-event-for-admin-change";
-const ADMIN_NAMES: &[&str] = &["set_owner", "set_admin", "transfer_ownership", "set_operator"];
+const ADMIN_NAMES: &[&str] = &[
+    "set_owner",
+    "set_admin",
+    "transfer_ownership",
+    "set_operator",
+];
 
 pub struct MissingEventForAdminChangeCheck;
 

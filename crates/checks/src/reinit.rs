@@ -119,8 +119,10 @@ impl<'ast> Visit<'ast> for BodyScan {
 fn is_storage_guard_check(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::MethodCall(mc) => {
-            matches!(mc.method.to_string().as_str(), "has" | "is_some" | "is_none")
-                && receiver_chain_contains_storage(&mc.receiver)
+            matches!(
+                mc.method.to_string().as_str(),
+                "has" | "is_some" | "is_none"
+            ) && receiver_chain_contains_storage(&mc.receiver)
         }
         syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Not(_)) => is_storage_guard_check(&u.expr),
         syn::Expr::Paren(p) => is_storage_guard_check(&p.expr),

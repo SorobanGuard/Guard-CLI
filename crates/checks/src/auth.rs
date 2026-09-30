@@ -85,7 +85,10 @@ fn type_is_address(ty: &Type) -> bool {
     let Type::Path(tp) = ty else {
         return false;
     };
-    tp.path.segments.last().is_some_and(|s| s.ident == "Address")
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "Address")
 }
 
 fn address_param_names(sig: &syn::Signature) -> Vec<String> {

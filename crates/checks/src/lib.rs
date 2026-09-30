@@ -25,16 +25,16 @@ pub mod storage;
 pub mod transfer;
 pub mod ttl;
 pub mod unchecked_divisor;
-pub mod unsafe_randomness;
-pub mod vec_growth;
-pub mod xc_input;
-pub mod zero_address;
 pub mod unchecked_token_amount;
 pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod unsafe_randomness;
 pub mod util;
+pub mod vec_growth;
+pub mod xc_input;
+pub mod zero_address;
 
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
@@ -61,15 +61,15 @@ pub use storage::UnsafeStoragePatternsCheck;
 pub use transfer::SelfTransferCheck;
 pub use ttl::MissingTtlExtensionCheck;
 pub use unchecked_divisor::UncheckedDivisorCheck;
-pub use unsafe_randomness::UnsafeRandomnessCheck;
-pub use vec_growth::UnboundedVecGrowthCheck;
-pub use xc_input::UnsafeCrossContractInputCheck;
-pub use zero_address::MissingZeroAddressCheck;
 pub use unchecked_token_amount::UncheckedTokenAmountCheck;
 pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
 pub use unprotected_token_mint::UnprotectedTokenMintCheck;
 pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use unsafe_randomness::UnsafeRandomnessCheck;
+pub use vec_growth::UnboundedVecGrowthCheck;
+pub use xc_input::UnsafeCrossContractInputCheck;
+pub use zero_address::MissingZeroAddressCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -156,7 +156,9 @@ pub trait Check {
 pub fn group_by_file<'a>(findings: &'a [Finding]) -> BTreeMap<&'a str, Vec<&'a Finding>> {
     let mut map: BTreeMap<&'a str, Vec<&'a Finding>> = BTreeMap::new();
     for finding in findings {
-        map.entry(finding.file_path.as_str()).or_default().push(finding);
+        map.entry(finding.file_path.as_str())
+            .or_default()
+            .push(finding);
     }
     map
 }
@@ -265,7 +267,10 @@ mod registry_tests {
 
     #[test]
     fn default_and_configured_check_lists_share_same_names() {
-        let default_names: Vec<_> = default_checks().iter().map(|check| check.name().to_string()).collect();
+        let default_names: Vec<_> = default_checks()
+            .iter()
+            .map(|check| check.name().to_string())
+            .collect();
         let configured_names: Vec<_> = default_checks_with_config(&[], &[])
             .iter()
             .map(|check| check.name().to_string())
@@ -279,11 +284,21 @@ mod registry_tests {
         use std::collections::HashSet;
 
         for names in [
-            default_checks().iter().map(|c| c.name().to_string()).collect::<Vec<_>>(),
-            default_checks_with_config(&[], &[]).iter().map(|c| c.name().to_string()).collect::<Vec<_>>(),
+            default_checks()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect::<Vec<_>>(),
+            default_checks_with_config(&[], &[])
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect::<Vec<_>>(),
         ] {
             let unique: HashSet<_> = names.iter().cloned().collect();
-            assert_eq!(names.len(), unique.len(), "duplicate check name found in {names:?}");
+            assert_eq!(
+                names.len(),
+                unique.len(),
+                "duplicate check name found in {names:?}"
+            );
         }
     }
 }
@@ -300,7 +315,9 @@ pub fn default_checks_with_config(
     // plain instance from `all_checks_base()` for one built with the extra sensitive names.
     for check in checks.iter_mut() {
         if check.name() == UnprotectedAdminCheck::new().name() {
-            *check = Box::new(UnprotectedAdminCheck::with_extra_names(extra_sensitive_names.to_vec()));
+            *check = Box::new(UnprotectedAdminCheck::with_extra_names(
+                extra_sensitive_names.to_vec(),
+            ));
         }
     }
     checks.retain(|c| !disabled.contains(&c.name().to_string()));
