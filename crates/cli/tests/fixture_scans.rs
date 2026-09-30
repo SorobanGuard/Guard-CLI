@@ -197,6 +197,11 @@ fn input_length_fixtures() {
     assert_fixture_pair("input-length", "missing-input-length-bound");
 }
 
+#[test]
+fn balance_fixtures() {
+    assert_fixture_pair("balance", "missing-balance-check");
+}
+
 /// Regression test for issue #362: a function that writes two distinct persistent keys but
 /// only calls extend_ttl on one of them must still produce a finding for the unextended key.
 /// The old function-scoped `has_extend` flag would have suppressed both findings.
