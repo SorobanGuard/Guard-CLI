@@ -79,7 +79,7 @@ impl<'ast> Visit<'ast> for StorageMutationVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         if self.line.is_none() {
             let name = node.method.to_string();
-            if matches!(name.as_str(), "set" | "remove" | "extend_ttl" | "bump" | "append")
+            if matches!(name.as_str(), "set" | "remove" | "append")
                 && receiver_chain_contains_storage(&node.receiver)
             {
                 self.line = Some(node.span().start().line);
@@ -282,6 +282,54 @@ impl C {
         let check = UnprotectedTokenMintCheck;
         let findings = check.run(&file, src);
         assert!(findings.is_empty());
+        Ok(())
+    }
+
+    // Regression test for #710: extend_ttl before require_auth must not be treated as
+    // the sensitive operation, so a properly-guarded mint must not be flagged.
+    #[test]
+    fn passes_when_extend_ttl_precedes_require_auth_and_set() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn mint(env: Env, to: Address, amount: u128) {
+        env.storage().temporary().extend_ttl(&symbol_short!("other"), 100, 200);
+        env.require_auth();
+        env.storage().instance().set(&symbol_short!("supply"), &amount);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedTokenMintCheck;
+        let findings = check.run(&file, src);
+        assert!(
+            findings.is_empty(),
+            "extend_ttl before require_auth must not trigger a finding; got: {:?}",
+            findings
+        );
+        Ok(())
+    }
+
+    // The real set() is still unprotected even though extend_ttl appears first.
+    #[test]
+    fn flags_unprotected_set_even_when_extend_ttl_is_present() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn mint(env: Env, to: Address, amount: u128) {
+        env.storage().temporary().extend_ttl(&symbol_short!("other"), 100, 200);
+        env.storage().instance().set(&symbol_short!("supply"), &amount);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedTokenMintCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(
+            findings.len(),
+            1,
+            "missing-auth before set() must still flag even if extend_ttl came first"
+        );
         Ok(())
     }
 
