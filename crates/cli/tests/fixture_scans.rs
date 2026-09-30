@@ -164,7 +164,9 @@ fn upgrade_safe_produces_no_findings() {
     let (findings, _, _, _) = scan_directory(&fixture_path("upgrade-safe"), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan upgrade-safe: {error}"));
     assert!(
-        findings.iter().all(|f| f.check_name != "unprotected-upgrade"),
+        findings
+            .iter()
+            .all(|f| f.check_name != "unprotected-upgrade"),
         "upgrade-safe unexpectedly produced unprotected-upgrade; findings: {findings:#?}"
     );
 }
@@ -207,8 +209,8 @@ fn input_length_fixtures() {
 #[test]
 fn ttl_mixed_key_scenario_produces_finding() {
     let path = fixture_path("ttl-vulnerable");
-    let (findings, _, _, _) = scan_directory(&path, &[], &[])
-        .expect("failed to scan ttl-vulnerable");
+    let (findings, _, _, _) =
+        scan_directory(&path, &[], &[]).expect("failed to scan ttl-vulnerable");
 
     // The `update` function writes KEY and KEY2 but only extends TTL for KEY2.
     // There must be at least one finding for KEY's missing extension in `update`.
@@ -358,9 +360,7 @@ path = "src"
 
     let (findings, _, _, _) = scan_directory(&config_root, &[], &[]).unwrap();
     assert!(
-        findings
-            .iter()
-            .any(|f| f.check_name == "unprotected-admin"),
+        findings.iter().any(|f| f.check_name == "unprotected-admin"),
         "Should find unprotected-admin check using path from config"
     );
 
