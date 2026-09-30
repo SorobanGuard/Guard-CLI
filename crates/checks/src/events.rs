@@ -55,6 +55,29 @@ impl Check for MissingEventEmissionCheck {
     }
 }
 
+// Issue #698 — planned fix: this private copy diverges from the canonical
+// `crate::util::is_storage_mutation_call` (util.rs), which deliberately excludes
+// `extend_ttl` / `bump`. A TTL bump doesn't change stored data, can't move funds and
+// is intentionally permissionless in Soroban. Because this copy includes them, a
+// function that only bumps TTL is falsely reported as "writes to storage but does not
+// emit an event".
+//
+// Change: delete this function and add `is_storage_mutation_call` to the existing
+// `use crate::util::{...}` import at the top of the file. Both call sites
+// (`FuncBodyScan::visit_expr_method_call` and `FirstStorageWrite`) then use the shared
+// definition unchanged. `receiver_chain_contains_storage` stays imported only if
+// something else still uses it, otherwise it is dropped to keep clippy clean.
+//
+// Regression tests to add in `mod tests` below:
+//   - `passes_when_function_only_extends_ttl`: a `#[contractimpl]` method whose body
+//     is only `env.storage().instance().extend_ttl(100, 200);` -> no findings.
+//   - `passes_when_function_only_bumps`: same with `env.storage().persistent().bump(&key, 100);`
+//     -> no findings.
+//   - `flags_set_even_when_ttl_is_also_extended`: `set(..)` + `extend_ttl(..)` with no
+//     event -> one finding whose `line` points at the `set`, not at `extend_ttl`
+//     (checks `first_storage_write_line` uses the shared predicate too).
+// The existing `flags_storage_write_without_event` and `passes_with_event` must keep
+// passing unchanged.
 fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
     let name = m.method.to_string();
     if !matches!(

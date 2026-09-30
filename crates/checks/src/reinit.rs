@@ -100,6 +100,35 @@ impl<'ast> Visit<'ast> for BodyScan {
             // is a storage presence check, e.g. `require!(!env.storage().instance().has(&k), ..)`.
             // A `require!` validating unrelated input (e.g. `require!(fee >= 0, ..)`) must not
             // count, since it never gates the storage write.
+            //
+            // Issue #617 — planned fix: `parse_body_with(Expr::parse_without_eager_brace)`
+            // must consume the *whole* macro body, so the common form
+            // `require!(cond, "message")` fails on the trailing `, "message"`, returns
+            // `Err`, and `has_guard` is never set. That is why
+            // `tests::passes_when_require_guard_checks_storage_presence` fails today.
+            // Replace it with a comma-separated expression list and check only the
+            // first argument:
+            //
+            //     use syn::{punctuated::Punctuated, Token};
+            //     if let Ok(args) = i.parse_body_with(
+            //         Punctuated::<syn::Expr, Token![,]>::parse_terminated,
+            //     ) {
+            //         if args.first().is_some_and(is_storage_guard_check) {
+            //             self.has_guard = true;
+            //         }
+            //     }
+            //
+            // `parse_terminated` accepts `cond`, `cond,` and `cond, "msg"`, so all three
+            // shapes work. The message argument is never inspected, and an empty
+            // `require!()` yields no first argument, so it is not a guard.
+            // Tests to add in `mod tests` below:
+            //   - `passes_when_require_without_message_checks_storage_presence`:
+            //     `require!(!env.storage().instance().has(&0));` -> no finding.
+            //   - `flags_init_when_require_with_message_only_validates_fee`:
+            //     `require!(fee >= 0, "bad fee");` followed by a storage `set` -> one
+            //     finding. This complements the existing
+            //     `flags_init_when_require_only_validates_unrelated_input` and pins that
+            //     the new parser still rejects non-storage conditions.
             if let Ok(cond) = i.parse_body_with(syn::Expr::parse_without_eager_brace) {
                 if is_storage_guard_check(&cond) {
                     self.has_guard = true;
