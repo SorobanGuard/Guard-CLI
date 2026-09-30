@@ -1,4 +1,4 @@
-use crate::util::contractimpl_functions_excluding_test;
+use crate::util::{contractimpl_functions_excluding_test, env_param_name};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -19,6 +19,7 @@ impl Check for UnsafeRandomnessCheck {
             let mut visitor = RandomnessVisitor {
                 findings: Vec::new(),
                 current_function: method.sig.ident.to_string(),
+                env_ident: env_param_name(&method.sig).unwrap_or_else(|| "env".to_string()),
             };
             visitor.visit_block(&method.block);
             findings.append(&mut visitor.findings);
@@ -31,6 +32,7 @@ impl Check for UnsafeRandomnessCheck {
 struct RandomnessVisitor {
     findings: Vec<Finding>,
     current_function: String,
+    env_ident: String,
 }
 
 impl<'ast> Visit<'ast> for RandomnessVisitor {
@@ -43,7 +45,7 @@ impl<'ast> Visit<'ast> for RandomnessVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method_name = node.method.to_string();
         if (method_name == "timestamp" || method_name == "sequence")
-            && is_ledger_receiver(&node.receiver)
+            && is_ledger_receiver(&node.receiver, &self.env_ident)
         {
             self.findings.push(Finding {
                 check_name: CHECK_NAME.to_string(),
@@ -52,8 +54,8 @@ impl<'ast> Visit<'ast> for RandomnessVisitor {
                 line: node.span().start().line,
                 function_name: self.current_function.clone(),
                 description: format!(
-                    "env.ledger().{}() should not be used as randomness source",
-                    method_name
+                    "{}.ledger().{}() should not be used as randomness source",
+                    self.env_ident, method_name
                 ),
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-randomness-high"
@@ -68,25 +70,17 @@ impl<'ast> Visit<'ast> for RandomnessVisitor {
     }
 }
 
-fn is_ledger_receiver(expr: &syn::Expr) -> bool {
+fn is_ledger_receiver(expr: &syn::Expr, env_ident: &str) -> bool {
     if let syn::Expr::MethodCall(method_call) = expr {
         if method_call.method == "ledger" {
-            return is_env_receiver(&method_call.receiver);
+            return is_env_receiver(&method_call.receiver, env_ident);
         }
     }
     false
 }
 
-fn is_env_receiver(expr: &syn::Expr) -> bool {
-    if let syn::Expr::Path(path) = expr {
-        path.path
-            .segments
-            .last()
-            .map(|seg| seg.ident == "env")
-            .unwrap_or(false)
-    } else {
-        false
-    }
+fn is_env_receiver(expr: &syn::Expr, env_ident: &str) -> bool {
+    matches!(expr, syn::Expr::Path(path) if path.path.is_ident(env_ident))
 }
 
 #[cfg(test)]
@@ -110,6 +104,24 @@ impl C {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].check_name, "unsafe-randomness");
         assert!(findings[0].description.contains("timestamp"));
+        Ok(())
+    }
+
+    #[test]
+    fn flags_ledger_timestamp_with_renamed_env_parameter() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn draw(e: Env) {
+        let seed = e.ledger().timestamp();
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnsafeRandomnessCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("e.ledger().timestamp()"));
         Ok(())
     }
 
