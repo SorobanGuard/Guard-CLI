@@ -166,6 +166,11 @@ fn upgrade_safe_produces_no_findings() {
 }
 
 #[test]
+fn vec_growth_fixtures() {
+    assert_fixture_pair("vec-growth", "unbounded-vec-growth");
+}
+
+#[test]
 fn admin_event_safe_produces_no_findings() {
     let (findings, _, _, _) = scan_directory(&fixture_path("admin-event-safe"), &[], &[])
         .unwrap_or_else(|error| panic!("failed to scan admin-event-safe: {error}"));
