@@ -11,17 +11,3 @@ impl ArithmeticSafe {
         a.checked_add(b)
     }
 }
-
-
-#[contractimpl]
-impl DelegateSafe {
-    /// ✅ The callee address comes from the caller, not from storage.
-    /// No delegate-call-risk finding should be produced.
-    pub fn forward(env: Env, callee: Address) {
-        env.invoke_contract::<()>(
-            &callee,
-            &symbol_short!("ping"),
-            soroban_sdk::vec![&env],
-        );
-    }
-}

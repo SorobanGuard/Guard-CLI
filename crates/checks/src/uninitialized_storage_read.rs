@@ -35,22 +35,59 @@ impl Check for UninitializedStorageReadCheck {
     }
 }
 
-fn block_has_storage_has_guard(block: &syn::Block) -> bool {
-    let mut v = StorageHasGuardVisitor::default();
+/// Returns true when `expr` is a `.has(&key)` call on a storage receiver chain.
+fn is_storage_has(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(m) => {
+            m.method == "has" && receiver_chain_contains_storage(&m.receiver)
+        }
+        _ => false,
+    }
+}
+
+/// Returns true when `expr` is a `.get(…)`/`.get_unchecked(…)` call on a
+/// storage receiver chain — i.e. a raw storage read that returns `Option<T>`.
+fn is_storage_get(expr: &Expr) -> bool {
+/// Returns `true` when the block contains a `.has(&key)` call on a storage
+/// receiver where the key argument token-text matches `read_key_text` AND
+/// the `.has()` call appears **before** the line of the unsafe read
+/// (`read_line`).
+fn block_has_storage_has_guard(block: &syn::Block, read_key_text: &str, read_line: usize) -> bool {
+    let mut v = StorageHasGuardVisitor {
+        read_key_text,
+        read_line,
+        found: false,
+    };
     v.visit_block(block);
     v.found
 }
 
-#[derive(Default)]
-struct StorageHasGuardVisitor {
+struct StorageHasGuardVisitor<'a> {
+    read_key_text: &'a str,
+    read_line: usize,
     found: bool,
 }
 
-impl<'ast> Visit<'ast> for StorageHasGuardVisitor {
+impl<'ast> Visit<'ast> for StorageHasGuardVisitor<'ast> {
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
-        if i.method == "has" && receiver_chain_contains_storage(&i.receiver) {
-            self.found = true;
+        if self.found {
             return;
+        }
+        if i.method == "has" && receiver_chain_contains_storage(&i.receiver) {
+            // The .has() call must appear before the unwrap site.
+            let has_line = i.method.span().start().line;
+            if has_line < self.read_line {
+                // And the key argument must match the read key.
+                if let Some(arg) = i.args.first() {
+                    use quote::ToTokens;
+                    let arg_text = arg.to_token_stream().to_string();
+                    // Compare stripping whitespace for robustness (&KEY vs & KEY).
+                    if arg_text.replace(' ', "") == self.read_key_text.replace(' ', "") {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
         }
         visit::visit_expr_method_call(self, i);
     }
@@ -58,15 +95,137 @@ impl<'ast> Visit<'ast> for StorageHasGuardVisitor {
 
 /// Returns true when the receiver chain contains `.storage()` followed by a
 /// `.get(…)` call — i.e. this is a raw storage read that returns `Option<T>`.
-fn is_storage_get(expr: &Expr) -> bool {
+/// Also returns the first argument (the key) as a token string when found.
+fn is_storage_get(expr: &Expr) -> Option<String> {
     match expr {
         Expr::MethodCall(m) => {
-            if m.method == "get" || m.method == "get_unchecked" {
-                return receiver_chain_contains_storage(&m.receiver);
+            if (m.method == "get" || m.method == "get_unchecked")
+                && receiver_chain_contains_storage(&m.receiver)
+            {
+                use quote::ToTokens;
+                let key_text = m
+                    .args
+                    .first()
+                    .map(|a| a.to_token_stream().to_string())
+                    .unwrap_or_default();
+                return Some(key_text);
             }
             is_storage_get(&m.receiver)
         }
-        _ => false,
+        _ => None,
+    }
+}
+
+/// Returns the argument expression passed to a `.has(…)` call, if any.
+fn has_key_arg(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::MethodCall(m) if m.method == "has" => m.args.first(),
+        _ => None,
+    }
+}
+
+/// Returns the argument expression passed to a `.get(…)`/`.get_unchecked(…)`
+/// call, if any.
+fn get_key_arg(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::MethodCall(m) if m.method == "get" || m.method == "get_unchecked" => {
+            m.args.first()
+        }
+        _ => None,
+    }
+}
+
+/// Returns true when the two key expressions refer to the same storage key.
+///
+/// This is a conservative syntactic comparison: identical token streams (e.g.
+/// the same `&K` constant or the same `&key` identifier) are treated as the
+/// same key. Anything else is treated as a different key so that a guard on an
+/// unrelated key does not suppress the finding.
+fn same_key(a: &Expr, b: &Expr) -> bool {
+    let a = quote::quote!(#a).to_string();
+    let b = quote::quote!(#b).to_string();
+    a == b
+}
+
+/// Returns true when `block` contains a `.has(&key)` guard that dominates the
+/// flagged read of `key` — i.e. a guard in a divergent (early-return) branch
+/// that gates the read, rather than any `.has()` call anywhere in the function.
+fn block_has_gating_has_guard(block: &syn::Block, key: &Expr) -> bool {
+    let mut v = GatingHasGuardVisitor { key, found: false };
+    v.visit_block(block);
+    v.found
+}
+
+struct GatingHasGuardVisitor<'a> {
+    key: &'a Expr,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for GatingHasGuardVisitor<'_> {
+    fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+        // A guard gates the read when the `if` condition is a `.has(&key)`
+        // check on the same key and the branch diverges (returns/panics),
+        // so control only reaches the read when the key is present.
+        if let Expr::MethodCall(m) = &*i.cond {
+            if is_storage_has(&i.cond) {
+                if let Some(arg) = has_key_arg(&i.cond) {
+                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+            // Also handle the negated form `if !has(&key) { return …; }`.
+            if m.method == "has" {
+                if let Some(arg) = has_key_arg(&i.cond) {
+                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+        }
+        if let Expr::Unary(u) = &*i.cond {
+            if matches!(u.op, syn::UnOp::Not(_)) && is_storage_has(&u.expr) {
+                if let Some(arg) = has_key_arg(&u.expr) {
+                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+        }
+        visit::visit_expr_if(self, i);
+    }
+}
+
+/// Returns true when `block` always diverges (returns, panics, etc.) so that
+/// reaching the end of the `if` branch is impossible.
+fn block_diverges(block: &syn::Block) -> bool {
+    let mut v = DivergesVisitor { found: false };
+    v.visit_block(block);
+    v.found
+}
+
+#[derive(Default)]
+struct DivergesVisitor {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for DivergesVisitor {
+    fn visit_expr_return(&mut self, _i: &'ast syn::ExprReturn) {
+        self.found = true;
+    }
+
+    fn visit_macro(&mut self, i: &'ast syn::Macro) {
+        if i.path.is_ident("panic")
+            || i.path.is_ident("unreachable")
+            || i.path.is_ident("todo")
+            || i.path.is_ident("unimplemented")
+        {
+            self.found = true;
+        }
+        visit::visit_macro(self, i);
     }
 }
 
@@ -80,33 +239,33 @@ impl Visit<'_> for StorageReadVisitor<'_> {
     fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
         let method = i.method.to_string();
         // Flag `.unwrap()` or `.expect(…)` chained directly onto a storage `.get(…)` call.
-        if (method == "unwrap" || method == "expect")
-            && is_storage_get(&i.receiver)
-            && !block_has_storage_has_guard(self.block)
-        {
-            self.out.push(Finding {
-                check_name: CHECK_NAME.to_string(),
-                severity: Severity::High,
-                file_path: String::new(),
-                line: i.span().start().line,
-                function_name: self.fn_name.clone(),
-                description: format!(
-                    "`{}` reads from storage with `.{}()` and immediately calls `.{method}()`. \
-                     If the key has never been written the contract will panic on uninitialized storage.",
-                    self.fn_name,
-                    "get",
-                    method = method,
-                ),
-                rule_url: Some(
-                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#uninitialized-storage-read-high"
-                        .to_string(),
-                ),
-                suggestion: Some(
-                    "Use `.unwrap_or_default()`, `.unwrap_or(fallback)`, or guard with \
-                     `env.storage().<tier>().has(&key)` before reading."
-                        .to_string(),
-                ),
-            });
+        if method == "unwrap" || method == "expect" {
+            if let Some(key_text) = is_storage_get(&i.receiver) {
+                let read_line = i.span().start().line;
+                if !block_has_storage_has_guard(self.block, &key_text, read_line) {
+                    self.out.push(Finding {
+                        check_name: CHECK_NAME.to_string(),
+                        severity: Severity::High,
+                        file_path: String::new(),
+                        line: read_line,
+                        function_name: self.fn_name.clone(),
+                        description: format!(
+                            "`{}` reads from storage with `.get()` and immediately calls `.{method}()`. \
+                             If the key has never been written the contract will panic on uninitialized storage.",
+                            self.fn_name,
+                        ),
+                        rule_url: Some(
+                            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#uninitialized-storage-read-high"
+                                .to_string(),
+                        ),
+                        suggestion: Some(
+                            "Use `.unwrap_or_default()`, `.unwrap_or(fallback)`, or guard with \
+                             `env.storage().<tier>().has(&key)` before reading."
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
         }
         visit::visit_expr_method_call(self, i);
     }
@@ -198,6 +357,80 @@ impl C {
         )?;
         let hits = UninitializedStorageReadCheck.run(&file, "");
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    /// A `.has(&K)` guard for the same key before the read should suppress.
+    #[test]
+    fn ignores_correct_has_guard_before_read() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+const K: soroban_sdk::Symbol = symbol_short!("k");
+#[contractimpl]
+impl C {
+    pub fn get_val(env: Env) -> u32 {
+        if env.storage().persistent().has(&K) {
+            env.storage().persistent().get(&K).unwrap()
+        } else {
+            0
+        }
+    }
+}
+"#,
+        )?;
+        let hits = UninitializedStorageReadCheck.run(&file, "");
+        assert!(hits.is_empty(), "matching has() guard should suppress finding");
+        Ok(())
+    }
+
+    /// A `.has(&OTHER_KEY)` guard for a *different* key must NOT suppress the finding.
+    #[test]
+    fn flags_has_guard_for_wrong_key() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+const ADMIN_KEY: soroban_sdk::Symbol = symbol_short!("admin");
+const OTHER_KEY: soroban_sdk::Symbol = symbol_short!("other");
+#[contractimpl]
+impl C {
+    pub fn get_admin(env: Env) -> u32 {
+        if env.storage().instance().has(&OTHER_KEY) {
+            // guard is for OTHER_KEY, not ADMIN_KEY — should still flag
+        }
+        env.storage().persistent().get(&ADMIN_KEY).unwrap()
+    }
+}
+"#,
+        )?;
+        let hits = UninitializedStorageReadCheck.run(&file, "");
+        assert_eq!(hits.len(), 1, "wrong-key has() guard must not suppress the finding");
+        Ok(())
+    }
+
+    /// A `.has(&K)` guard that appears *after* the read must NOT suppress the finding.
+    #[test]
+    fn flags_has_guard_after_read() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+const K: soroban_sdk::Symbol = symbol_short!("k");
+#[contractimpl]
+impl C {
+    pub fn get_val(env: Env) -> u32 {
+        let v = env.storage().persistent().get(&K).unwrap();
+        // guard comes too late
+        let _ = env.storage().persistent().has(&K);
+        v
+    }
+}
+"#,
+        )?;
+        let hits = UninitializedStorageReadCheck.run(&file, "");
+        assert_eq!(hits.len(), 1, "has() guard after the read must not suppress the finding");
         Ok(())
     }
 }

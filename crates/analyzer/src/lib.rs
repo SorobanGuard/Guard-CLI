@@ -138,16 +138,6 @@ impl CheckPanicReport {
     }
 }
 
-impl From<&ScanError> for CheckPanicReport {
-    fn from(err: &ScanError) -> Self {
-        match err {
-            ScanError::CheckPanic { .. } => CheckPanicReport {
-                panics: vec![CheckPanic::from(err)],
-            },
-            _ => CheckPanicReport::default(),
-        }
-    }
-}
 
 #[derive(Default)]
 struct Suppressions {
@@ -261,9 +251,27 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
         })
         .map(|s| s.impl_type.clone())
         .unwrap_or_default();
+
+    // When the finding has an empty function_name (some checks intentionally omit it),
+    // look up the suppression using the actual function name from the span so the
+    // function_checks key matches what parse_suppressions inserted.
+    let lookup_fn_name = if finding.function_name.is_empty() {
+        fn_spans
+            .iter()
+            .find(|s| {
+                s.impl_type == impl_type
+                    && s.start_line <= finding.line
+                    && finding.line <= s.end_line
+            })
+            .map(|s| s.function_name.as_str())
+            .unwrap_or("")
+    } else {
+        finding.function_name.as_str()
+    };
+
     suppressions.function_checks.contains(&(
         impl_type,
-        finding.function_name.clone(),
+        lookup_fn_name.to_string(),
         finding.check_name.clone(),
     ))
 }
@@ -322,22 +330,6 @@ pub fn is_ignored_path(path: &Path) -> bool {
 }
 
 /// The path relative to `root` shown in findings: the bare file name when `root`
-/// itself is a single file, otherwise the path stripped of the `root` prefix.
-/// Shared by [`run_checks_for_file`] and [`scan_directory_with_checks`] so the two
-/// copies of this logic can't drift (issue #630).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    }
-}
 
 /// Path used to sort a [`ScanError`] for deterministic multi-error reporting (#629).
 fn scan_error_path(err: &ScanError) -> PathBuf {
@@ -655,21 +647,6 @@ pub fn scan_directory_with_checks(
     Ok((results, files_scanned, files_skipped, check_panics))
 }
 
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
 ///
@@ -1798,6 +1775,57 @@ mod dedup_tests {
         assert_eq!(
             auth_after_write_count, 1,
             "expected exactly one auth-after-storage-write finding, got {auth_after_write_count}"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Regression test for #620: when the divisor is validated to be non-zero before
+    /// the division, `unchecked-divisor` should not fire, and
+    /// `suppress_redundant_division_finding` must not suppress the unrelated
+    /// `integer-division-truncation` finding on that same division.
+    #[test]
+    fn validated_divisor_still_reports_truncation() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-division-validated-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+            #![no_std]
+            use soroban_sdk::{contract, contractimpl, Env};
+
+            #[contract]
+            pub struct C;
+
+            #[contractimpl]
+            impl C {
+                pub fn share(_env: Env, total: i128, parts: i128) -> i128 {
+                    if parts == 0 {
+                        panic!("parts must not be zero");
+                    }
+                    total / parts
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> = vec![
+            Box::new(soroban_guard_checks::UncheckedDivisorCheck),
+            Box::new(soroban_guard_checks::IntegerDivisionTruncationCheck),
+        ];
+        let (results, _, _, _) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let findings: Vec<_> = results.iter().flat_map(|r| r.findings.iter()).collect();
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check_name == "integer-division-truncation"),
+            "expected integer-division-truncation on a validated-but-truncating division; findings: {findings:#?}"
         );
 
         fs::remove_dir_all(root).unwrap();

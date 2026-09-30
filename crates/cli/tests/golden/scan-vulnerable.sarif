@@ -157,7 +157,9 @@
                 "text": "State-mutating function emits no events"
               }
             }
-          ]
+          ],
+          "version": "0.1.0",
+          "semanticVersion": "0.1.0"
         }
       }
     }
