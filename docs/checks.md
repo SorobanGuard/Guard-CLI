@@ -293,8 +293,14 @@ Integer division truncates the fractional part, which can lead to precision loss
 
 - Syntactic only — any non-literal divisor triggers the finding regardless of actual values.
 - Does not detect `checked_div` misuse or rounding strategies.
+- **Overlap with `unchecked-divisor`:** when a division's divisor is both non-literal
+  and unvalidated, `unchecked-divisor` (High) also fires on the same file/line/function.
+  The analyzer's `suppress_redundant_division_finding` drops the `integer-division-truncation`
+  finding in that case, since the High finding already covers the same expression.
+  Validating the divisor first (so `unchecked-divisor` does not fire) lets
+  `integer-division-truncation` surface on its own.
 
-**Fixture:** tests in `crates/checks/src/division.rs`
+**Fixture:** `test-contracts/division-vulnerable/`, `test-contracts/division-safe/`; tests in `crates/checks/src/division.rs`
 
 ---
 
@@ -367,16 +373,19 @@ Self-transfers waste ledger space, waste the caller's gas, and may indicate a lo
 
 **What it detects**
 
-In `#[contractimpl]` methods whose name matches a sensitive set (e.g. `set_owner`, `set_admin`, `initialize`, `init`): function parameters of type `Address` that are not guarded by a zero-address check (`require_auth`, `assert`, or comparison against a default/zero address) before being used.
+In `#[contractimpl]` methods whose name matches a sensitive set (e.g. `set_owner`, `set_admin`, `initialize`, `init`): function parameters of type `Address` that are not guarded by an invalid-destination check before being used.
 
 **Why it matters**
 
-Setting an admin or owner to `Address::default()` (the zero address) can permanently lock privileged functions. The check ensures that sensitive address parameters are validated before use.
+`soroban_sdk::Address` has no zero/default value — unlike EVM's `address(0)`, there is no all-zero `Address` to compare against, and `Address::default()`, `.is_zero()` and `.is_default()` do not exist on the type (verified against `soroban-sdk = "22.0.0"`). The closest real invalid-destination check on Stellar is comparing the parameter against the contract's own address via `env.current_contract_address()`: accidentally setting the admin/owner to the contract's own address can permanently lock privileged functions, since the contract cannot call `require_auth()` on its own behalf. The check accepts a `!=`/`==` comparison (directly, or inside `assert!`/`require!`) between the sensitive `Address` parameter and `env.current_contract_address()`.
+
+An authorization check such as `require_auth()` proves the *caller* is authorised; it does not validate the *value* of the address argument, so it is not accepted as a guard on its own.
 
 **Limitations**
 
-- Guard detection is heuristic — only standard patterns are recognized.
+- Guard detection is heuristic — only standard patterns are recognized (a direct comparison against `env.current_contract_address()`).
 - External validation in helper functions is not tracked.
+- `Address::default()`, `.is_zero()` and `.is_default()` are intentionally **not** accepted, since they do not compile against `soroban-sdk`.
 
 **Fixture:** tests in `crates/checks/src/zero_address.rs`
 

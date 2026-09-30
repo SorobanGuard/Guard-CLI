@@ -35,6 +35,21 @@ jobs:
       - name: Build
         run: cargo build --workspace --release
 
+  msrv:
+    name: MSRV (1.74)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.74
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+
+      - name: Check MSRV
+        run: cargo check --workspace
+
   fixture-check:
     runs-on: ubuntu-latest
     steps:

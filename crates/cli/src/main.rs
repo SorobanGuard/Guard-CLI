@@ -62,8 +62,8 @@ enum Commands {
         #[arg(long, value_name = "PATTERN")]
         exclude: Vec<String>,
         /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
-        #[arg(long, default_value = "high")]
-        fail_on: String,
+        #[arg(long)]
+        fail_on: Option<String>,
         /// Disable a named check (may be repeated)
         #[arg(long, value_name = "CHECK")]
         disable_check: Vec<String>,
@@ -220,7 +220,18 @@ fn run_scan(
             if opts.json {
                 let envelope = serde_json::json!({ "error": e.to_string(), "errors": messages });
                 match serde_json::to_string_pretty(&envelope) {
-                    Ok(payload) => println!("{}", payload),
+                    Ok(payload) => {
+                        // #669: --output must be written even when the scan errors so that
+                        // CI pipelines that unconditionally upload the output artifact get a
+                        // machine-readable error document instead of a missing file.
+                        if let Some(ref out_path) = opts.output {
+                            if let Err(write_err) = write_output(out_path, &payload) {
+                                eprintln!("{} {}", "error:".red().bold(), write_err);
+                            }
+                        } else {
+                            println!("{}", payload);
+                        }
+                    }
                     Err(json_err) => eprintln!("{} {}", "error:".red().bold(), json_err),
                 }
             } else {
@@ -291,6 +302,26 @@ fn is_leap(year: u64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+/// Emit a setup-time error in the correct format and exit with code 2.
+///
+/// When `use_json` is true (i.e. `--json` was passed) the message is wrapped in
+/// the same `{"error":…,"errors":[…]}` envelope used by scan-time errors so
+/// that automation parsing `--json` output always gets machine-readable JSON,
+/// regardless of whether the failure happened during setup or scanning (#670).
+/// Otherwise the message is printed to stderr as plain text.
+fn emit_setup_error(message: &str, use_json: bool) -> ! {
+    if use_json {
+        let envelope = serde_json::json!({ "error": message, "errors": [message] });
+        match serde_json::to_string_pretty(&envelope) {
+            Ok(payload) => println!("{}", payload),
+            Err(e) => eprintln!("{} {}", "error:".red().bold(), e),
+        }
+    } else {
+        eprintln!("{} {}", "error:".red().bold(), message);
+    }
+    std::process::exit(2)
+}
+
 /// Parse a `--fail-on` / `min_severity` string into a `Severity`.
 ///
 /// Returns `Ok(Severity)` for `"high"`, `"medium"`, or `"low"` (case-insensitive).
@@ -339,7 +370,7 @@ fn main() {
             }
             // Try to load soroban-guard.toml from current directory to get default path.
             let config_for_default = match config::load(&PathBuf::from(".")) {
-                Ok(c) => c.unwrap_or_default(),
+                Ok((c, _)) => c.unwrap_or_default(),
                 Err(e) => {
                     eprintln!("{} {}", "error:".red().bold(), e);
                     std::process::exit(2);
@@ -373,30 +404,43 @@ fn main() {
                 }
             };
 
-            // Load soroban-guard.toml from the scan root (if present).
+            // Load soroban-guard.toml, searching upward from the scan path.
             let cfg = match config::load(&scan_path) {
-                Ok(c) => c.unwrap_or_default(),
+                Ok((c, config_path)) => {
+                    if verbose {
+                        match &config_path {
+                            Some(p) => eprintln!("Using config file {}", p.display()),
+                            None => eprintln!("No soroban-guard.toml found"),
+                        }
+                    }
+                    c.unwrap_or_default()
+                }
                 Err(e) => {
-                    eprintln!("{} {}", "error:".red().bold(), e);
-                    std::process::exit(2);
+                    emit_setup_error(&e.to_string(), json);
                 }
             };
 
-            // CLI --fail-on takes precedence; fall back to config min_severity.
-            let effective_fail_on = if fail_on != "high" {
-                fail_on.clone()
+            // CLI --fail-on takes precedence over config min_severity.
+            // Because --fail-on is now Option<String>, Some(_) always means the
+            // user explicitly set the flag (even --fail-on high), while None means
+            // they did not — so we can correctly fall back to the config value
+            // without the old `!= "high"` hack that broke explicit --fail-on high
+            // (issue #667).
+            let effective_fail_on = if let Some(ref flag) = fail_on {
+                flag.clone()
             } else {
-                cfg.scan.min_severity.clone().unwrap_or(fail_on.clone())
+                cfg.scan.min_severity.clone().unwrap_or_else(|| "high".to_string())
             };
             let fail_threshold = match parse_fail_on(&effective_fail_on) {
                 Ok(sev) => sev,
                 Err(bad) => {
-                    eprintln!(
-                        "{} unknown --fail-on value `{}`. Expected one of: high, medium, low",
-                        "error:".red().bold(),
-                        bad
+                    emit_setup_error(
+                        &format!(
+                            "unknown --fail-on value `{}`. Expected one of: high, medium, low",
+                            bad
+                        ),
+                        json,
                     );
-                    std::process::exit(2);
                 }
             };
 
@@ -414,12 +458,13 @@ fn main() {
                 let known_names: HashSet<&str> = known_checks.iter().map(|c| c.name()).collect();
                 for name in &all_disabled {
                     if !known_names.contains(name.as_str()) {
-                        eprintln!(
-                            "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
-                            "error:".red().bold(),
-                            name
+                        emit_setup_error(
+                            &format!(
+                                "unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+                                name
+                            ),
+                            json,
                         );
-                        std::process::exit(2);
                     }
                 }
             }
@@ -444,6 +489,15 @@ fn main() {
                 includes: include.clone(),
                 max_findings,
             };
+
+            // #671: --output without a structured format flag writes nothing and
+            // produces no visible output — warn the user so the mistake is obvious.
+            if output.is_some() && !json && !sarif && !markdown {
+                eprintln!(
+                    "{} --output has no effect without --json, --sarif, or --markdown",
+                    "warning:".yellow().bold()
+                );
+            }
 
             // Run the initial scan.
             let exit_code = run_scan(&opts, &active_checks);
@@ -506,7 +560,7 @@ fn main() {
                             ) && event
                                 .paths
                                 .iter()
-                                .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
+                                .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false) && !is_ignored_path(p));
 
                             if !is_relevant {
                                 continue;
@@ -681,19 +735,33 @@ fn truncate(findings: &[Finding], max: usize) -> (&[Finding], usize) {
 }
 
 fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value {
-    let mut rules = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    // Collect the highest severity observed for each check name so that
+    // defaultConfiguration.level reflects the worst-case rule level rather than
+    // whichever finding happens to appear first in the slice.
+    let mut rule_severity: std::collections::BTreeMap<&str, Severity> =
+        std::collections::BTreeMap::new();
     for finding in findings {
-        if seen.insert(finding.check_name.clone()) {
-            rules.push(serde_json::json!({
-                "id": finding.check_name,
-                "shortDescription": { "text": describe_rule(&finding.check_name) },
-                "fullDescription": { "text": describe_rule(&finding.check_name) },
-                "defaultConfiguration": { "level": severity_to_sarif_level(finding.severity) },
-                "helpUri": "https://github.com/SorobanGuard/Guard-CLI"
-            }));
+        let entry = rule_severity
+            .entry(finding.check_name.as_str())
+            .or_insert(finding.severity);
+        if finding.severity < *entry {
+            // Severity::High < Medium < Low (rank 0 < 1 < 2), so a smaller
+            // rank means higher severity — keep the most severe.
+            *entry = finding.severity;
         }
     }
+    let rules: Vec<serde_json::Value> = rule_severity
+        .iter()
+        .map(|(name, &sev)| {
+            serde_json::json!({
+                "id": name,
+                "shortDescription": { "text": describe_rule(name) },
+                "fullDescription": { "text": describe_rule(name) },
+                "defaultConfiguration": { "level": severity_to_sarif_level(sev) },
+                "helpUri": "https://github.com/SorobanGuard/Guard-CLI"
+            })
+        })
+        .collect();
     let results = findings
         .iter()
         .map(|finding| {
@@ -719,7 +787,9 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
                 "driver": {
                     "name": "soroban-guard",
                     "informationUri": "https://github.com/SorobanGuard/Guard-CLI",
-                    "rules": rules
+                    "rules": rules,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "semanticVersion": env!("CARGO_PKG_VERSION")
                 }
             },
             "invocations": [{
@@ -769,10 +839,10 @@ const CHECK_METADATA: &[CheckMeta] = &[
     },
     CheckMeta {
         name: "unchecked-arithmetic",
-        severity: "medium",
-        short: "Flags unchecked arithmetic on contract state",
+        severity: "high",
+        short: "Flags unchecked arithmetic on contract state (High / Medium / Low per operand)",
         rule: "Wrapping arithmetic operations may overflow",
-        long: Some("Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs."),
+        long: Some("Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs. Severity is computed per call site: High for financial-named operands (e.g. amount, balance, price), Low for index-named operands, Medium otherwise."),
     },
     CheckMeta {
         name: "unprotected-admin",
@@ -1068,6 +1138,11 @@ fn json_payload(
     let (high, medium, low) = severity_counts(findings);
 
     let envelope = serde_json::json!({
+        "tool": {
+            "name": "soroban-guard",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "schema_version": 1,
         "summary": {
             "total": findings.len(),
             "high": high,
@@ -1157,16 +1232,11 @@ fn hyperlink(url: &str, text: &str) -> String {
 }
 
 fn style_check_name(check_name: &str, severity: Severity) -> String {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return check_name.to_string();
+    match severity {
+        Severity::High => check_name.red().bold().to_string(),
+        Severity::Medium => check_name.magenta().to_string(),
+        Severity::Low => check_name.dimmed().to_string(),
     }
-
-    let prefix = match severity {
-        Severity::High => "\u{1b}[31m\u{1b}[1m",
-        Severity::Medium => "\u{1b}[35m",
-        Severity::Low => "\u{1b}[2m",
-    };
-    format!("{prefix}{check_name}\u{1b}[0m")
 }
 
 fn print_pretty(
@@ -1273,6 +1343,14 @@ mod tests {
             "soroban-guard"
         );
         assert_eq!(
+            payload["runs"][0]["tool"]["driver"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            payload["runs"][0]["tool"]["driver"]["semanticVersion"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
             payload["runs"][0]["results"][0]["ruleId"],
             "missing-require-auth"
         );
@@ -1331,6 +1409,26 @@ mod tests {
         assert_eq!(payload["summary"]["low"], 0);
         assert_eq!(payload["summary"]["files_scanned"], 3);
         assert_eq!(payload["summary"]["files_skipped"], 2);
+    }
+
+    #[test]
+    fn json_payload_includes_tool_metadata_and_schema_version() {
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/lib.rs".to_string(),
+            line: 10,
+            function_name: "set_balance".to_string(),
+            description: "Missing auth".to_string(),
+            rule_url: None,
+            suggestion: None,
+        }];
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&json_payload(&findings, 1, 0).unwrap()).unwrap();
+        assert_eq!(payload["tool"]["name"], "soroban-guard");
+        assert_eq!(payload["tool"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload["schema_version"], 1);
     }
 
     #[test]
@@ -1671,8 +1769,17 @@ mod tests {
 
         for check in default_checks() {
             let name = check.name();
-            // Inherently multi-severity: `infer_severity` picks High/Medium/Low per call site.
+            // unchecked-arithmetic uses per-call-site severity inference (High/Medium/Low)
+            // so it is intentionally skipped from the docs-header comparison below — the
+            // docs page documents all three levels and there is no single canonical value.
+            // CHECK_METADATA.severity is set to "high" (the worst-case level) so that
+            // list-checks --json and explain report the most safety-conservative answer.
             if name == "unchecked-arithmetic" {
+                let (table_sev, _) = describe_check(name);
+                assert_eq!(
+                    table_sev, "high",
+                    "unchecked-arithmetic CHECK_METADATA.severity should be \"high\" (worst-case)"
+                );
                 continue;
             }
             let Some(doc_sev) = documented.get(name) else {
