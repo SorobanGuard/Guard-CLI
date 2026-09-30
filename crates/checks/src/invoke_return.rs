@@ -129,10 +129,15 @@ struct IdentUsageVisitor<'a> {
 }
 
 impl<'ast, 'a> Visit<'ast> for IdentUsageVisitor<'a> {
-    fn visit_ident(&mut self, ident: &'ast Ident) {
-        if ident == self.target {
+    /// Only count actual *reads* (identifier appearing in expression position).
+    /// Overriding `visit_expr_path` instead of `visit_ident` avoids counting
+    /// `Pat::Ident` nodes (variable declarations / shadowing `let` bindings) as
+    /// uses of the identifier.
+    fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+        if expr.path.is_ident(self.target) {
             self.used = true;
         }
+        visit::visit_expr_path(self, expr);
     }
 
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
@@ -161,18 +166,52 @@ impl<'ast, 'a> Visit<'ast> for IdentUsageVisitor<'a> {
     }
 }
 
+/// Returns `true` if `ident` is *read* (used in expression position) in `stmts`.
+///
+/// Stops scanning as soon as a shadowing `let <ident> = …` is encountered —
+/// any subsequent use of the same name refers to the new binding, not the
+/// original `invoke_contract` result.
 fn is_ident_used_in_stmts(ident: &Ident, stmts: &[Stmt]) -> bool {
-    let mut visitor = IdentUsageVisitor {
-        target: ident,
-        used: false,
-    };
     for stmt in stmts {
+        // Check for a shadowing re-declaration *before* visiting the statement
+        // for reads.  A `let res = …` pattern rebinds `res`, so uses of `res`
+        // after this point belong to the new binding.
+        if let Stmt::Local(local) = stmt {
+            let pat = match &local.pat {
+                Pat::Type(pt) => &*pt.pat,
+                other => other,
+            };
+            if let Pat::Ident(pi) = pat {
+                if pi.ident == *ident {
+                    // This statement re-declares the name.  The RHS initialiser
+                    // of the shadowing let (if any) is still part of the *old*
+                    // scope — check it for reads before stopping.
+                    if let Some(init) = &local.init {
+                        let mut visitor = IdentUsageVisitor {
+                            target: ident,
+                            used: false,
+                        };
+                        visitor.visit_expr(&init.expr);
+                        if visitor.used {
+                            return true;
+                        }
+                    }
+                    // The name is now shadowed; don't look further.
+                    return false;
+                }
+            }
+        }
+
+        let mut visitor = IdentUsageVisitor {
+            target: ident,
+            used: false,
+        };
         visitor.visit_stmt(stmt);
         if visitor.used {
             return true;
         }
     }
-    visitor.used
+    false
 }
 
 #[cfg(test)]
@@ -324,5 +363,45 @@ impl C {
 }
 "#);
         assert_eq!(hits.len(), 1);
+    }
+
+    /// Regression test for issue #694: a shadowing `let res = 5;` must NOT count
+    /// as a "use" of the original invoke_contract result.  The original return value
+    /// was never actually read — the binding was immediately shadowed — so the check
+    /// must still produce a finding.
+    #[test]
+    fn flags_invoke_result_shadowed_without_use() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Symbol, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env, callee: Address) {
+        let res: i128 = env.invoke_contract(&callee, &Symbol::short("do"), ());
+        let res = 5i128;   // shadows without reading the invoke result
+        let _ = res;
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1, "shadowing let should not count as a use; got: {hits:#?}");
+    }
+
+    /// Shadowing where the RHS of the shadowing let *reads* the original binding
+    /// — that IS a genuine use and must suppress the finding.
+    #[test]
+    fn passes_when_shadowing_rhs_reads_original_binding() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Symbol, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env, callee: Address) -> i128 {
+        let res: i128 = env.invoke_contract(&callee, &Symbol::short("do"), ());
+        let res = res + 1;  // RHS reads original `res` before shadowing
+        res
+    }
+}
+"#);
+        assert!(hits.is_empty(), "RHS of shadowing let reads original binding — should pass; got: {hits:#?}");
     }
 }
