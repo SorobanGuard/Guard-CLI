@@ -1,8 +1,8 @@
+use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
-use syn::visit::{self, Visit};
 use quote::ToTokens;
-use syn::{ExprMethodCall, Block};
-
+use syn::visit::{self, Visit};
+use syn::Block;
 
 const CHECK_NAME: &str = "unchecked-token-amount";
 const TRANSFER_METHODS: &[&str] = &["transfer", "transfer_from", "xfer", "mint"];
@@ -15,51 +15,59 @@ impl Check for UncheckedTokenAmountCheck {
     }
 
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
-        let mut visitor = TokenAmountVisitor::default();
-        visit::visit_file(&mut visitor, file);
-        visitor.findings
+        let mut out = Vec::new();
+
+        for method in contractimpl_functions_excluding_test(file) {
+            // Only inspect public contract methods (private helpers are not
+            // callable from the outside and should not be flagged).
+            if !matches!(method.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+
+            let function_name = method.sig.ident.to_string();
+
+            // Walk all method calls inside this function body looking for
+            // transfer-like calls that lack an amount guard.
+            let mut visitor = TransferCallVisitor {
+                function_name: function_name.clone(),
+                block: &method.block,
+                findings: Vec::new(),
+            };
+            visit::visit_block(&mut visitor, &method.block);
+            out.extend(visitor.findings);
+        }
+
+        out
     }
 }
 
-#[derive(Default)]
-struct TokenAmountVisitor {
+/// Walks a single function body looking for transfer-like method calls that
+/// are not protected by an amount guard.
+struct TransferCallVisitor<'a> {
+    function_name: String,
+    block: &'a Block,
     findings: Vec<Finding>,
-    current_block: Option<Box<Block>>,
-    current_function: String,
 }
 
-impl<'ast> Visit<'ast> for TokenAmountVisitor {
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        let prev = std::mem::replace(&mut self.current_function, node.sig.ident.to_string());
-        let prev_block = self.current_block.replace(Box::new(node.block.clone()));
-        visit::visit_impl_item_fn(self, node);
-        self.current_block = prev_block;
-        self.current_function = prev;
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+impl<'ast> Visit<'ast> for TransferCallVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let method_name = node.method.to_string();
         if TRANSFER_METHODS.iter().any(|&m| method_name.contains(m)) {
-            if let Some(ref _block) = self.current_block {
-                if !has_amount_guard(_block) {
-                    self.findings.push(Finding {
-                        check_name: CHECK_NAME.to_string(),
-                        severity: Severity::Medium,
-                        file_path: String::new(),
-                        line: node.method.span().start().line,
-                        function_name: self.current_function.clone(),
-                        description:
-                            "Token transfer amount is not validated to be greater than zero"
-                                .to_string(),
-                        rule_url: Some(
-                            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-token-amount-medium"
-                                .to_string(),
-                        ),
-                        suggestion: Some(
-                            "Validate amount > 0 before transfer call".to_string(),
-                        ),
-                    });
-                }
+            if !has_amount_guard(self.block) {
+                self.findings.push(Finding {
+                    check_name: CHECK_NAME.to_string(),
+                    severity: Severity::Medium,
+                    file_path: String::new(),
+                    line: node.method.span().start().line,
+                    function_name: self.function_name.clone(),
+                    description: "Token transfer amount is not validated to be greater than zero"
+                        .to_string(),
+                    rule_url: Some(
+                        "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-token-amount-medium"
+                            .to_string(),
+                    ),
+                    suggestion: Some("Validate amount > 0 before transfer call".to_string()),
+                });
             }
         }
         visit::visit_expr_method_call(self, node);
@@ -84,7 +92,10 @@ impl<'ast> Visit<'ast> for AmountGuardVisitor {
                 if ident == "amount"
                     && matches!(
                         node.op,
-                        syn::BinOp::Gt(_) | syn::BinOp::Ge(_) | syn::BinOp::Lt(_) | syn::BinOp::Le(_)
+                        syn::BinOp::Gt(_)
+                            | syn::BinOp::Ge(_)
+                            | syn::BinOp::Lt(_)
+                            | syn::BinOp::Le(_)
                     )
                 {
                     self.found_guard = true;
@@ -151,6 +162,76 @@ impl C {
         let check = UncheckedTokenAmountCheck;
         let findings = check.run(&file, src);
         assert!(findings.is_empty());
+        Ok(())
+    }
+
+    // --- regression tests for issue #708 ---
+
+    /// A plain `impl` block (no `#[contractimpl]`) must never produce a
+    /// finding, even when it contains transfer-like calls without amount
+    /// guards.  Before the fix the whole-file visitor would walk it and flag
+    /// its methods as if they were contract entry points.
+    #[test]
+    fn does_not_flag_plain_impl_without_contractimpl() -> Result<(), syn::Error> {
+        let src = r#"
+impl Helper {
+    pub fn pay(token: Address, to: Address, amount: u128) {
+        let client = token::Client::new(&env, &token);
+        client.transfer(&to, &amount);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UncheckedTokenAmountCheck;
+        let findings = check.run(&file, src);
+        assert!(
+            findings.is_empty(),
+            "plain impl block should not be flagged, got: {:?}",
+            findings
+        );
+        Ok(())
+    }
+
+    /// A `#[contractimpl]` impl nested inside a `#[cfg(test)]` module is
+    /// test-only scaffolding and must not produce findings.  Before the fix
+    /// the whole-file visitor would descend into it and flag its methods.
+    #[test]
+    fn does_not_flag_contractimpl_inside_cfg_test() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn send_tokens(token: Address, to: Address, amount: u128) {
+        if amount > 0 {
+            let client = token::Client::new(&env, &token);
+            client.transfer(&to, &amount);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use soroban_sdk::{contractimpl, Address};
+
+    #[contractimpl]
+    impl C {
+        pub fn send_tokens(token: Address, to: Address, amount: u128) {
+            // test mock — no amount guard intentionally
+            let client = token::Client::new(&env, &token);
+            client.transfer(&to, &amount);
+        }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UncheckedTokenAmountCheck;
+        let findings = check.run(&file, src);
+        // Only the production impl (which IS guarded) should be visited → 0 findings.
+        assert_eq!(
+            findings.len(),
+            0,
+            "cfg(test) impl should not be flagged, got: {:?}",
+            findings
+        );
         Ok(())
     }
 }
