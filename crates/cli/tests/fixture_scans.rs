@@ -144,15 +144,8 @@ fn token_mint_fixtures() {
 }
 
 #[test]
-fn contract_deployment_safe_produces_no_findings() {
-    let (findings, _, _, _) = scan_directory(&fixture_path("contract-deployment-safe"), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan contract-deployment-safe: {error}"));
-    assert!(
-        findings
-            .iter()
-            .all(|f| f.check_name != "unprotected-contract-deployment"),
-        "contract-deployment-safe unexpectedly produced unprotected-contract-deployment; findings: {findings:#?}"
-    );
+fn contract_deployment_fixtures() {
+    assert_fixture_pair("contract-deployment", "unprotected-contract-deployment");
 }
 
 #[test]
