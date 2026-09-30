@@ -102,6 +102,50 @@ impl<'ast> Visit<'ast> for ReentrancyVisitor {
         }
         visit::visit_expr_method_call(self, i);
     }
+
+    /// Evaluate each branch of an `if`/`else if`/`else` independently.
+    ///
+    /// A write in one branch and an invoke in a mutually-exclusive branch are
+    /// **not** a checks-effects-interactions violation — those two statements can
+    /// never execute together in the same invocation.  Only flag if a *single*
+    /// branch contains both a write and a subsequent invoke.
+    fn visit_expr_if(&mut self, expr_if: &'ast syn::ExprIf) {
+        // Snapshot state inherited from before the if expression.
+        let wrote_before = self.wrote;
+        let re_read_before = self.re_read_after_write;
+
+        // Evaluate the `then` branch in isolation.
+        let mut then_visitor = ReentrancyVisitor {
+            wrote: wrote_before,
+            re_read_after_write: re_read_before,
+            invoke_after_write_line: self.invoke_after_write_line,
+        };
+        then_visitor.visit_block(&expr_if.then_branch);
+
+        // Evaluate the `else` branch (if present) in isolation, starting from
+        // the *same* pre-if state, not the then-branch's exit state.
+        let mut else_visitor = ReentrancyVisitor {
+            wrote: wrote_before,
+            re_read_after_write: re_read_before,
+            invoke_after_write_line: self.invoke_after_write_line,
+        };
+        if let Some((_, else_expr)) = &expr_if.else_branch {
+            else_visitor.visit_expr(else_expr);
+        }
+
+        // Propagate any new findings from either branch back to self.
+        if self.invoke_after_write_line.is_none() {
+            if then_visitor.invoke_after_write_line.is_some() {
+                self.invoke_after_write_line = then_visitor.invoke_after_write_line;
+            } else if else_visitor.invoke_after_write_line.is_some() {
+                self.invoke_after_write_line = else_visitor.invoke_after_write_line;
+            }
+        }
+
+        // After the if expression, state is the union of both branches (conservative).
+        self.wrote = then_visitor.wrote || else_visitor.wrote;
+        self.re_read_after_write = then_visitor.re_read_after_write && else_visitor.re_read_after_write;
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +266,58 @@ impl C {
 }
 "#);
         assert!(hits.is_empty());
+    }
+
+    /// Regression test for issue #696: a storage write in the `if` branch and an
+    /// `invoke_contract` in the mutually-exclusive `else` branch must NOT be
+    /// flagged — they can never execute together in the same invocation.
+    #[test]
+    fn passes_write_in_if_invoke_in_else_are_disjoint() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn dispatch(env: Env, cond: bool, to: Address, amount: i128) {
+        if cond {
+            env.storage().persistent().set(&to, &amount);
+        } else {
+            env.invoke_contract::<()>(&to, &soroban_sdk::symbol_short!("cb"), soroban_sdk::vec![&env]);
+        }
+    }
+}
+"#);
+        assert!(
+            hits.is_empty(),
+            "write in if-branch and invoke in else-branch are disjoint paths — no reentrancy risk; got: {hits:#?}"
+        );
+    }
+
+    /// Confirm that a write followed by an invoke *within the same branch* is still
+    /// flagged after the branch-scoping change.
+    #[test]
+    fn flags_write_then_invoke_in_same_branch() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn dispatch(env: Env, cond: bool, to: Address, amount: i128) {
+        if cond {
+            env.storage().persistent().set(&to, &amount);
+            env.invoke_contract::<()>(&to, &soroban_sdk::symbol_short!("cb"), soroban_sdk::vec![&env]);
+        }
+    }
+}
+"#);
+        assert_eq!(
+            hits.len(),
+            1,
+            "write then invoke in same branch should still be flagged; got: {hits:#?}"
+        );
     }
 }
