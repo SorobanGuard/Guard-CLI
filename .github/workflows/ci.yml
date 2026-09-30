@@ -75,3 +75,8 @@ jobs:
                 cargo check --manifest-path "$manifest"
                 echo "::endgroup::"
               ' sh
+
+      - name: Check examples/all-findings compiles against soroban-sdk
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/examples
+        run: cargo check --manifest-path examples/all-findings/Cargo.toml
