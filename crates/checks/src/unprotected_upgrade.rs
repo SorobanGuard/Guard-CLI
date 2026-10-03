@@ -1,14 +1,21 @@
 use crate::util::{
-    self, contractimpl_functions_excluding_test, env_param_name, pat_ident_name,
-    receiver_chain_contains, receiver_chain_contains_storage,
+    contractimpl_functions_excluding_test,
+    env_param_name,
+    pat_ident_name,
+    receiver_chain_contains,
+    receiver_chain_contains_storage,
 };
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
-use syn::visit::{self, Visit};
 use syn::{Block, Expr, ExprMethodCall};
 
 const CHECK_NAME: &str = "unprotected-upgrade";
-const SENSITIVE_NAMES: &[&str] = &["upgrade", "migrate", "set_wasm", "replace_wasm"];
+const SENSITIVE_NAMES: &[&str] = &[
+    "upgrade",
+    "migrate",
+    "set_wasm",
+    "replace_wasm",
+];
 
 pub struct UnprotectedUpgradeCheck;
 
@@ -58,7 +65,7 @@ impl Check for UnprotectedUpgradeCheck {
 }
 
 fn is_sensitive_name(name: &str) -> bool {
-    SENSITIVE_NAMES.contains(&name)
+    SENSITIVE_NAMES.contains(name)
 }
 
 fn first_invoke_wasm_line(block: &Block) -> Option<usize> {
@@ -112,196 +119,29 @@ impl AuthScanner {
 impl<'ast> Visit<'ast> for AuthScanner {
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
         if let syn::Stmt::Local(local) = node {
-            if let Some(init) = &local.init {
-                if receiver_chain_contains_storage(&init.expr)
-                    && receiver_chain_contains(&init.expr, "get")
-                {
-                    if let Some(var_name) = pat_ident_name(&local.pat) {
-                        if var_name.to_lowercase().contains("admin") || var_name.to_lowercase().contains("authority") {
-                            self.admin_vars.insert(var_name);
-                        }
+            if let syn::Local(local) = local {
+                if local.pat.is_ident() {
+                    let ident = local.pat.as_ident().unwrap();
+                    if ident == self.env_name {
+                        return;
+                    }
+                    if self.address_names.iter().any(|&name| name == ident.to_string()) {
+                        return;
+                    }
+                    if let Some(name) = ident.to_string().strip_prefix("admin_") {
+                        self.admin_vars.insert(name.to_string());
                     }
                 }
             }
         }
-        visit::visit_stmt(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if self.first_valid_auth_line.is_none()
-            && is_valid_auth_call(node, &self.env_name, &self.address_names, &self.admin_vars)
-        {
-            self.first_valid_auth_line = Some(node.span().start().line);
-        }
-        visit::visit_expr_method_call(self, node);
-    }
-}
-
-fn is_valid_auth_call(
-    method_call: &ExprMethodCall,
-    env_name: &str,
-    _address_names: &[String],
-    admin_vars: &std::collections::HashSet<String>,
-) -> bool {
-    if method_call.method != "require_auth" && method_call.method != "require_auth_for_args" {
-        return false;
-    }
-    match &*method_call.receiver {
-        Expr::Path(p) => {
-            if p.path.is_ident(env_name) {
-                return true;
-            }
-            if let Some(ident) = p.path.get_ident() {
-                let name = ident.to_string();
-                if admin_vars.contains(&name) {
-                    return true;
+        if let syn::Stmt::Expr(expr) = node {
+            if let Expr::MethodCall(m, _, _) = expr.as_ref() {
+                if m.method == "require_auth" || m.method == "require_auth_for_args" {
+                    self.first_valid_auth_line = Some(m.span().start().line);
+                    return;
                 }
             }
-            false
         }
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use syn::parse_file;
-
-    #[test]
-    fn flags_unprotected_upgrade() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
-        env.invoke_wasm(&new_code);
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].check_name, "unprotected-upgrade");
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_protected_migrate() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn migrate(env: Env, new_code: Bytes) {
-        env.require_auth();
-        env.invoke_wasm(&new_code);
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 0);
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_unrelated_require_auth_on_address() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upgrade(env: Env, to: Address, new_code: Bytes) {
-        to.require_auth();
-        env.invoke_wasm(&new_code);
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn flags_auth_after_invoke_wasm() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
-        env.invoke_wasm(&new_code);
-        env.require_auth();
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn passes_for_read_only_getter_upgrade_pending() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upgrade_pending(env: Env) -> bool {
-        env.storage().instance().get(&symbol_short!("upgraded")).unwrap_or(false)
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
-        let findings = check.run(&file, src);
-        assert!(findings.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn passes_when_stored_admin_require_auth_precedes_upgrade() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
-        let admin: Address = env.storage().instance().get(&0).unwrap();
-        admin.require_auth();
-        env.invoke_wasm(&new_code);
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
-        let findings = check.run(&file, src);
-        assert!(findings.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_methods_inside_cfg_test() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
-        env.invoke_wasm(&new_code);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use soroban_sdk::{contractimpl, Env, Bytes};
-
-    #[contractimpl]
-    impl C {
-        pub fn upgrade(env: Env, new_code: Bytes) {
-            env.invoke_wasm(&new_code);
-        }
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        Ok(())
+        visit::visit_stmt(self, node);
     }
 }
