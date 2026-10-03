@@ -1,13 +1,10 @@
-#![no_std]
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+use soroban_sdk::{contractimpl, Symbol, Env};
 
-#[contract]
-pub struct AdminEventSafe;
+pub struct Contract;
 
 #[contractimpl]
-impl AdminEventSafe {
-    pub fn set_owner(env: Env, new_owner: Address) {
-        env.storage().instance().set(&symbol_short!("owner"), &new_owner);
+impl Contract {
+    pub fn set_owner(env: Env, new_owner: Symbol) {
         env.events().publish((symbol_short!("own_chg"),), &new_owner);
     }
 }
