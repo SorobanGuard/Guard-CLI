@@ -1,5 +1,9 @@
 
 //! Detection of duplicate symbol keys (symbol_short!("...")) within the same impl block.
+//!
+//! Two unrelated `#[contractimpl]` blocks in the same file that happen to reuse
+//! the same key name are **not** flagged — each impl block is checked in
+//! isolation because different contracts have separate storage namespaces.
 
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
@@ -8,7 +12,10 @@ use syn::{File, Lit, Macro};
 
 const CHECK_NAME: &str = "symbol-key-collision";
 
-/// Detect duplicate `symbol_short!` literals in the same `impl` block.
+/// Detect duplicate `symbol_short!` / `Symbol::new` literals within the same
+/// `impl` block.  Two independent `#[contractimpl]` blocks (different
+/// contracts, different storage namespaces) reusing the same key name are **not**
+/// flagged.
 pub struct SymbolKeyCollisionCheck;
 
 impl Check for SymbolKeyCollisionCheck {
@@ -18,49 +25,86 @@ impl Check for SymbolKeyCollisionCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
-        let mut symbol_keys = std::collections::HashMap::new();
         let mut str_consts = std::collections::HashMap::new();
         collect_str_consts(&file.items, &mut str_consts);
-        let mut visitor = SymbolKeyVisitor {
-            symbol_keys: &mut symbol_keys,
-            str_consts: &str_consts,
-            current_function: String::new(),
-        };
-        visitor.visit_file(file);
 
-        for (key, positions) in symbol_keys {
-            if positions.len() > 1 {
-                for (pos, line, fn_name) in positions.iter().skip(1) {
-                    let loc = if fn_name.is_empty() {
-                        "module level".to_string()
-                    } else {
-                        fn_name.clone()
+        // Visit each top-level impl block independently so that two unrelated
+        // `#[contractimpl]` blocks (different contracts, different storage
+        // namespaces) reusing the same key name do not produce a false positive.
+        // Module-level `const` declarations (outside any impl) are still
+        // checked as a single group.
+        let mut module_level_keys: std::collections::HashMap<
+            String,
+            Vec<(usize, usize, String)>,
+        > = std::collections::HashMap::new();
+
+        for item in &file.items {
+            match item {
+                syn::Item::Impl(impl_block) => {
+                    // Each impl block gets its own key map.
+                    let mut impl_keys: std::collections::HashMap<
+                        String,
+                        Vec<(usize, usize, String)>,
+                    > = std::collections::HashMap::new();
+                    let mut visitor = SymbolKeyVisitor {
+                        symbol_keys: &mut impl_keys,
+                        str_consts: &str_consts,
+                        current_function: String::new(),
                     };
-                    findings.push(Finding {
-                        check_name: CHECK_NAME.to_string(),
-                        severity: Severity::Medium,
-                        file_path: String::new(),
-                        line: *line,
-                        function_name: loc,
-                        description: format!(
-                            "Duplicate symbol key `{}` found at position {}",
-                            key, pos
-                        ),
-                        rule_url: Some(
-                            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#symbol-key-collision-medium"
-                                .to_string(),
-                        ),
-                        suggestion: Some(format!(
-                            "Rename one of the duplicate `symbol_short!(\"{key}\")` / \
-                             `Symbol::new(…, \"{key}\")` usages to a unique key to avoid \
-                             accidental storage slot collisions."
-                        )),
-                    });
+                    visitor.visit_item_impl(impl_block);
+                    emit_findings(&impl_keys, &mut findings);
+                }
+                // Collect module-level symbol keys (const initialisers, free functions, etc.)
+                other => {
+                    let mut visitor = SymbolKeyVisitor {
+                        symbol_keys: &mut module_level_keys,
+                        str_consts: &str_consts,
+                        current_function: String::new(),
+                    };
+                    visitor.visit_item(other);
                 }
             }
         }
+        emit_findings(&module_level_keys, &mut findings);
 
         findings
+    }
+}
+
+fn emit_findings(
+    symbol_keys: &std::collections::HashMap<String, Vec<(usize, usize, String)>>,
+    findings: &mut Vec<Finding>,
+) {
+    for (key, positions) in symbol_keys {
+        if positions.len() > 1 {
+            for (pos, line, fn_name) in positions.iter().skip(1) {
+                let loc = if fn_name.is_empty() {
+                    "module level".to_string()
+                } else {
+                    fn_name.clone()
+                };
+                findings.push(Finding {
+                    check_name: CHECK_NAME.to_string(),
+                    severity: Severity::Medium,
+                    file_path: String::new(),
+                    line: *line,
+                    function_name: loc,
+                    description: format!(
+                        "Duplicate symbol key `{}` found at position {}",
+                        key, pos
+                    ),
+                    rule_url: Some(
+                        "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#symbol-key-collision-medium"
+                            .to_string(),
+                    ),
+                    suggestion: Some(format!(
+                        "Rename one of the duplicate `symbol_short!(\"{key}\")` / \
+                         `Symbol::new(…, \"{key}\")` usages to a unique key to avoid \
+                         accidental storage slot collisions."
+                    )),
+                });
+            }
+        }
     }
 }
 
@@ -284,6 +328,69 @@ impl Contract {
             findings.is_empty(),
             "known gap: Symbol::new(&env, CONST) with a non-literal second argument is not \
              yet resolved to its constant value, so no collision is detected here"
+        );
+    }
+
+    /// Regression test for issue #695: two *unrelated* `#[contractimpl]` blocks in the same
+    /// file that each independently use `symbol_short!("bal")` for their own contract's
+    /// storage namespace should produce **no** finding — different contracts have different
+    /// storage namespaces, so the same key name is not a collision.
+    #[test]
+    fn no_false_positive_for_unrelated_impl_blocks_sharing_key_name() {
+        let src = r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+
+pub struct ContractA;
+pub struct ContractB;
+
+#[contractimpl]
+impl ContractA {
+    pub fn get_balance(env: Env) -> i128 {
+        env.storage().instance().get(&symbol_short!("bal")).unwrap_or(0)
+    }
+}
+
+#[contractimpl]
+impl ContractB {
+    pub fn get_balance(env: Env) -> i128 {
+        env.storage().instance().get(&symbol_short!("bal")).unwrap_or(0)
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = SymbolKeyCollisionCheck.run(&file, src);
+        assert!(
+            findings.is_empty(),
+            "two unrelated #[contractimpl] blocks reusing the same key name in separate \
+             storage namespaces should not be flagged as a collision; got: {findings:#?}"
+        );
+    }
+
+    /// Confirm that a *true* collision within a single impl block is still detected
+    /// after the per-impl scoping change.
+    #[test]
+    fn still_detects_collision_within_single_impl_block() {
+        let src = r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn foo(env: Env) {
+        let _ = env.storage().instance().get::<_, i128>(&symbol_short!("bal")).unwrap_or(0);
+    }
+    pub fn bar(env: Env) {
+        let _ = env.storage().instance().get::<_, i128>(&symbol_short!("bal")).unwrap_or(0);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = SymbolKeyCollisionCheck.run(&file, src);
+        assert_eq!(
+            findings.len(),
+            1,
+            "duplicate key within the same impl block should still be flagged; got: {findings:#?}"
         );
     }
 }
