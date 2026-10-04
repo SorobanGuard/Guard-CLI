@@ -1,4 +1,17 @@
 {
+  "tool": {
+    "name": "soroban-guard",
+    "version": "0.1.0"
+  },
+  "schema_version": 1,
+  "summary": {
+    "files_scanned": 1,
+    "files_skipped": 0,
+    "high": 3,
+    "low": 0,
+    "medium": 3,
+    "total": 6
+  },
   "findings": [
     {
       "check_name": "missing-require-auth",
@@ -60,13 +73,5 @@
       "severity": "medium",
       "suggestion": "Add `env.events().publish((symbol_short!(\"bump\"), …), &payload)` after the storage write so off-chain indexers can track this state change."
     }
-  ],
-  "summary": {
-    "files_scanned": 1,
-    "files_skipped": 0,
-    "high": 3,
-    "low": 0,
-    "medium": 3,
-    "total": 6
-  }
+  ]
 }

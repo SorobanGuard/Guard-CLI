@@ -1,7 +1,8 @@
 //! Missing `env.require_auth()` before storage writes in `#[contractimpl]` methods.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, is_storage_mutation_call, receiver_is_auth_gate,
+    address_param_names, contractimpl_functions_excluding_test, env_param_name,
+    is_storage_mutation_call, receiver_is_auth_gate, type_is_address, type_is_env,
 };
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;

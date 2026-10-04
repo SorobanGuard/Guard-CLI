@@ -13,6 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - crates.io publishing metadata and release process documentation.
 - Documentation for the `forbidden-std-imports` check.
 
+### Changed
+
+- `soroban-guard.toml`: unknown keys anywhere in the file (a typo like
+  `disable` instead of `disabled`, or a misplaced section like `[check]`
+  instead of `[checks]`) are now a malformed-config error (exit `2`, naming
+  the offending key) instead of being silently ignored.
+
 ### Fixed
 
 - `unsafe-storage-patterns`: `Symbol::new` detection now matches the last two

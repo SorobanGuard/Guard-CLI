@@ -1,19 +1,26 @@
-//! Missing zero-address check: `Address` parameters with no zero/default assertion.
+//! Missing zero-address check: `Address` parameters with no invalid-destination assertion.
 
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    BinOp, Expr, ExprBinary, ExprMethodCall, File, FnArg, Pat, PatType, Token, Type, TypePath,
+    BinOp, Expr, ExprBinary, File, FnArg, Pat, PatType, Token, Type, TypePath,
 };
 
 const CHECK_NAME: &str = "missing-zero-address-check";
 
 /// Flags public `#[contractimpl]` methods whose name suggests admin/ownership
 /// semantics, that accept an `Address` parameter, and whose body never actually
-/// compares that parameter against a zero/default `Address` (e.g.
-/// `assert!(admin != Address::default())` or `admin.is_zero()`).
+/// compares that parameter against a known-invalid destination (e.g.
+/// `assert!(admin != env.current_contract_address())`).
+///
+/// `soroban_sdk::Address` has no zero/default value — `Address::default()`,
+/// `.is_zero()` and `.is_default()` do not exist on the type (soroban-sdk 22).
+/// The closest real "invalid destination" on Stellar is the contract's own
+/// address: accidentally passing it as the new admin/owner would make the
+/// contract permanently control itself, which is exactly the failure mode
+/// this check guards against. See `docs/checks.md` for the rationale.
 ///
 /// An authorization check such as `require_auth()` proves the *caller* is
 /// authorised; it says nothing about the *value* of the address argument being
@@ -30,11 +37,6 @@ const SENSITIVE_NAMES: &[&str] = &[
     "set_manager",
     "set_operator",
 ];
-
-/// Method names that, called directly on the address parameter, are themselves a
-/// zero/default check (e.g. `admin.is_zero()`). Matched exactly — never by
-/// substring — so unrelated calls such as `.unwrap_or_default()` can never match.
-const ADDRESS_PREDICATE_METHODS: &[&str] = &["is_zero", "is_default"];
 
 fn is_address_type(ty: &Type) -> bool {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -87,13 +89,19 @@ fn is_addr_param_ref(e: &Expr, addr_params: &[String]) -> bool {
     }
 }
 
-/// True for an expression that produces the default/zero value being compared
-/// against, e.g. `Address::default()` or `Default::default()`.
+/// True for an expression that produces the "invalid destination" value being
+/// compared against: the contract's own address, via `env.current_contract_address()`
+/// (or `Env::current_contract_address(&env)`). This is the only compiling
+/// invalid-destination guard on `soroban_sdk::Address` — see the module docs.
 fn is_default_producing(e: &Expr) -> bool {
     match e {
+        Expr::MethodCall(m) => m.method == "current_contract_address",
         Expr::Call(c) => {
             if let Expr::Path(p) = &*c.func {
-                p.path.segments.last().is_some_and(|s| s.ident == "default")
+                p.path
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.ident == "current_contract_address")
             } else {
                 false
             }
@@ -126,11 +134,7 @@ fn expr_contains_zero_check(expr: &Expr, addr_params: &[String]) -> bool {
         }
         Expr::Unary(u) => expr_contains_zero_check(&u.expr, addr_params),
         Expr::Paren(p) => expr_contains_zero_check(&p.expr, addr_params),
-        Expr::MethodCall(m) => {
-            (ADDRESS_PREDICATE_METHODS.contains(&m.method.to_string().as_str())
-                && is_addr_param_ref(&m.receiver, addr_params))
-                || expr_contains_zero_check(&m.receiver, addr_params)
-        }
+        Expr::MethodCall(m) => expr_contains_zero_check(&m.receiver, addr_params),
         _ => false,
     }
 }
@@ -160,16 +164,6 @@ impl<'ast, 'a> Visit<'ast> for BodyScan<'a> {
         visit::visit_expr_binary(self, i);
     }
 
-    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
-        let name = i.method.to_string();
-        if ADDRESS_PREDICATE_METHODS.contains(&name.as_str())
-            && is_addr_param_ref(&i.receiver, self.addr_params)
-        {
-            self.has_guard = true;
-        }
-        visit::visit_expr_method_call(self, i);
-    }
-
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         let name = mac
             .path
@@ -177,7 +171,7 @@ impl<'ast, 'a> Visit<'ast> for BodyScan<'a> {
             .last()
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
-        if matches!(name.as_str(), "assert" | "require")
+        if matches!(name.as_str(), "assert" | "require" | "assert_eq" | "assert_ne")
             && macro_contains_zero_check(mac, self.addr_params)
         {
             self.has_guard = true;
@@ -219,8 +213,8 @@ impl Check for MissingZeroAddressCheck {
                 function_name: fn_name.clone(),
                 description: format!(
                     "Method `{fn_name}` accepts `Address` parameter(s) ({}) but does not \
-                     assert they are non-default. Passing a zero/default address to an admin \
-                     function can lock the contract permanently.",
+                     assert they are not the contract's own address. Passing the contract's \
+                     address to an admin function can lock the contract permanently.",
                     addr_params.join(", ")
                 ),
                 rule_url: Some(
@@ -228,8 +222,9 @@ impl Check for MissingZeroAddressCheck {
                         .to_string(),
                 ),
                 suggestion: Some(format!(
-                    "Add `assert!({} != Address::default(), \"zero address\");` at the top \
-                     of `{fn_name}` to reject the default/zero address.",
+                    "Add `assert!({} != env.current_contract_address(), \"invalid address\");` \
+                     at the top of `{fn_name}` to reject the contract's own address as the \
+                     destination.",
                     addr_params.first().map(String::as_str).unwrap_or("addr")
                 )),
             });
@@ -310,7 +305,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn initialize(env: Env, admin: Address) {
-        assert!(admin != Address::default());
+        assert!(admin != env.current_contract_address());
         env.storage().instance().set(&"admin", &admin);
     }
 }
@@ -327,7 +322,7 @@ pub struct C;
 impl C {
     pub fn set_owner(env: Env, new_owner: Address) {
         env.require_auth();
-        assert!(new_owner != Address::default(), "zero address");
+        assert!(new_owner != env.current_contract_address(), "invalid address");
         env.storage().instance().set(&"owner", &new_owner);
     }
 }
@@ -336,15 +331,14 @@ impl C {
     }
 
     #[test]
-    fn passes_when_is_zero_predicate_present() {
+    fn passes_when_current_contract_address_comparison_present() {
         let hits = run(r#"
 use soroban_sdk::{contractimpl, Env, Address};
 pub struct C;
 #[contractimpl]
 impl C {
     pub fn set_admin(env: Env, admin: Address) {
-        self.validate_fee_config();
-        assert!(!admin.is_zero());
+        assert!(admin != env.current_contract_address());
         env.storage().instance().set(&"admin", &admin);
     }
 }

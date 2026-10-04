@@ -351,4 +351,4 @@ See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--jso
 
 ## License
 
-MIT OR Apache-2.0 (see workspace `Cargo.toml`).
+MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).

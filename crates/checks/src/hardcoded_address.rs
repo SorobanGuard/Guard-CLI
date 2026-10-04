@@ -78,44 +78,71 @@ fn function_spans(file: &File) -> Vec<(usize, usize, String)> {
 
 /// Strips `//` and `/* ... */` comments from each line (block comments may span lines), so
 /// keys that only appear in a comment aren't reported as real string literals.
+///
+/// The scanner is string-literal-aware: `//` or `/*` that appear inside a `"..."` string
+/// are **not** treated as comment delimiters, avoiding false negatives on lines such as:
+/// ```rust
+/// let url = "https://api.example.com"; let admin = "GABC...(56 chars)";
+/// ```
+/// where the `//` inside the URL string would otherwise truncate the line and miss the address.
 fn effective_lines(source: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(source.lines().count());
     let mut in_block_comment = false;
     for line in source.lines() {
         let mut effective = String::new();
-        let mut rest = line;
-        loop {
+        let bytes = line.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        // Walk the line byte-by-byte so we can properly track string literals.
+        'line: while i < len {
             if in_block_comment {
-                match rest.find("*/") {
-                    Some(end) => {
-                        rest = &rest[end + 2..];
-                        in_block_comment = false;
+                // Inside a block comment – look for the closing `*/`.
+                if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    in_block_comment = false;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                // Line comment – everything from here to end of line is discarded.
+                break 'line;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                // Block comment opens – do not emit these two chars.
+                in_block_comment = true;
+                i += 2;
+            } else if bytes[i] == b'"' {
+                // Enter a string literal – copy it verbatim (including the delimiters)
+                // so the address scanner can still find keys inside string literals,
+                // while NOT treating `//` or `/*` inside the string as comment markers.
+                effective.push('"');
+                i += 1;
+                loop {
+                    if i >= len {
+                        // Unterminated string – stop (handles raw-ish edge cases gracefully).
+                        break;
                     }
-                    None => break,
+                    if bytes[i] == b'\\' {
+                        // Escaped character: copy both bytes and skip.
+                        effective.push(bytes[i] as char);
+                        i += 1;
+                        if i < len {
+                            effective.push(bytes[i] as char);
+                            i += 1;
+                        }
+                    } else if bytes[i] == b'"' {
+                        // Closing quote.
+                        effective.push('"');
+                        i += 1;
+                        break;
+                    } else {
+                        effective.push(bytes[i] as char);
+                        i += 1;
+                    }
                 }
             } else {
-                let line_comment = rest.find("//");
-                let block_comment = rest.find("/*");
-                match (line_comment, block_comment) {
-                    // A block comment starts strictly before any `//` on the
-                    // line (or there is no `//` at all): consume through
-                    // its `*/` (or the rest of the line, if unterminated)
-                    // and keep scanning what follows on this line.
-                    (lc, Some(bc)) if lc.map_or(true, |lc| bc < lc) => {
-                        effective.push_str(&rest[..bc]);
-                        rest = &rest[bc + 2..];
-                        in_block_comment = true;
-                    }
-                    // Otherwise a `//` (if any) is what ends the line.
-                    (Some(lc), _) => {
-                        effective.push_str(&rest[..lc]);
-                        break;
-                    }
-                    (None, _) => {
-                        effective.push_str(rest);
-                        break;
-                    }
-                }
+                effective.push(bytes[i] as char);
+                i += 1;
             }
         }
         out.push(effective);
@@ -230,6 +257,64 @@ impl C {
         let file = parse_file(source)?;
         let hits = HardcodedAddressCheck.run(&file, source);
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    /// Regression test for #684: a `//` inside a URL string literal must NOT be treated as a
+    /// line-comment start. The hardcoded address that follows on the same line must still be
+    /// flagged.
+    #[test]
+    fn url_string_does_not_suppress_address_on_same_line() -> Result<(), syn::Error> {
+        let addr = format!("G{}", "A".repeat(55));
+        let source = format!(
+            r#"
+use soroban_sdk::{{contractimpl, Address, Env}};
+
+pub struct C;
+
+#[contractimpl]
+impl C {{
+    pub fn setup(env: Env) {{
+        let _url = "https://api.example.com"; let admin = "{addr}";
+        let _ = admin;
+    }}
+}}
+"#
+        );
+        let file = parse_file(&source)?;
+        let hits = HardcodedAddressCheck.run(&file, &source);
+        assert!(
+            hits.iter().any(|h| h.description.contains(&addr)),
+            "address after URL string should be flagged; hits: {hits:#?}"
+        );
+        Ok(())
+    }
+
+    /// A `//` comment that genuinely follows code on the same line should still be stripped.
+    #[test]
+    fn real_line_comment_after_code_is_stripped() -> Result<(), syn::Error> {
+        let addr = format!("G{}", "A".repeat(55));
+        // The address appears only in the comment — should NOT be flagged.
+        let source = format!(
+            r#"
+use soroban_sdk::{{contractimpl, Env}};
+
+pub struct C;
+
+#[contractimpl]
+impl C {{
+    pub fn noop(env: Env) {{
+        let _ = env; // key: {addr}
+    }}
+}}
+"#
+        );
+        let file = parse_file(&source)?;
+        let hits = HardcodedAddressCheck.run(&file, &source);
+        assert!(
+            hits.is_empty(),
+            "address inside a real line comment must not be flagged; hits: {hits:#?}"
+        );
         Ok(())
     }
 }
