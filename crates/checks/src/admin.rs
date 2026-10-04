@@ -118,6 +118,33 @@ fn body_has_auth_gate(block: &Block, address_names: &[String]) -> bool {
     v.found || v.storage_read_and_conditional
 }
 
+fn block_diverges(block: &Block) -> bool {
+    block.stmts.iter().any(|stmt| match stmt {
+        syn::Stmt::Expr(expr, _) => expr_diverges(expr),
+        syn::Stmt::Macro(stmt) => stmt.mac.path.is_ident("panic"),
+        _ => false,
+    })
+}
+
+fn expr_diverges(expr: &Expr) -> bool {
+    match expr {
+        Expr::Return(_) => true,
+        Expr::Macro(expr) => expr.mac.path.is_ident("panic"),
+        Expr::MethodCall(expr) => {
+            matches!(expr.method.to_string().as_str(), "require_auth" | "require_auth_for_args")
+        }
+        Expr::Block(expr) => block_diverges(&expr.block),
+        Expr::If(expr) => {
+            block_diverges(&expr.then_branch)
+                && expr
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, branch)| expr_diverges(branch))
+        }
+        _ => false,
+    }
+}
+
 #[derive(Default)]
 struct AuthGateScan {
     found: bool,
@@ -271,6 +298,64 @@ pub struct C;
 impl C {
     pub fn set_owner(env: Env, owner: Address) {
         env.require_auth_for_args((owner,));
+    }
+}
+"#,
+        )?;
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
+        assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_storage_admin_write_after_noop_if() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn set_admin(env: Env, new_admin: Address) {
+        let admin: Address = env.storage().instance().get(&ADMIN_KEY).unwrap();
+        if admin != new_admin { /* no-op */ }
+        env.storage().instance().set(&ADMIN_KEY, &new_admin);
+    }
+}
+"#,
+        )?;
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function_name, "set_admin");
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_storage_admin_if_branch_diverges() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn set_admin(env: Env, admin: Address, caller: Address) {
+        let stored: Address = env.storage().instance().get(&ADMIN_KEY).unwrap();
+        if caller != stored {
+            return;
+            let _ = admin;
+        }
+    }
+
+    pub fn set_owner(env: Env, owner: Address, caller: Address) {
+        let stored: Address = env.storage().instance().get(&OWNER_KEY).unwrap();
+        if caller == stored {
+            let _ = owner;
+        } else {
+            panic!("unauthorized");
+        }
     }
 }
 "#,

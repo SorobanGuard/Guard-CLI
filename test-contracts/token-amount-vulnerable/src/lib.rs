@@ -6,8 +6,8 @@ pub struct TokenAmountVulnerable;
 
 #[contractimpl]
 impl TokenAmountVulnerable {
-    pub fn transfer_unsafe(env: Env, to: Address, amount: u128) {
-        let token = soroban_sdk::token::Client::new(&env, &Address::default());
-        token.transfer(&to, &amount);
+    pub fn transfer_unsafe(env: Env, token: Address, from: Address, to: Address, amount: i128) {
+        let client = soroban_sdk::token::Client::new(&env, &token);
+        client.transfer(&from, &to, &amount);
     }
 }
