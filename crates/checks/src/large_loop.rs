@@ -52,13 +52,16 @@ impl<'ast> Visit<'ast> for LoopFinder {
     fn visit_expr(&mut self, node: &'ast Expr) {
         match node {
             Expr::Loop(_) => {
-                self.loops.push((node.span().start().line, "loop".to_string()));
+                self.loops
+                    .push((node.span().start().line, "loop".to_string()));
             }
             Expr::While(_) => {
-                self.loops.push((node.span().start().line, "while".to_string()));
+                self.loops
+                    .push((node.span().start().line, "while".to_string()));
             }
             Expr::ForLoop(_) => {
-                self.loops.push((node.span().start().line, "for".to_string()));
+                self.loops
+                    .push((node.span().start().line, "for".to_string()));
             }
             _ => {}
         }

@@ -132,8 +132,10 @@ impl Visit<'_> for TtlVisitor {
                 } else {
                     // Unknown key shape — record with an empty sentinel so it is never
                     // suppressed (conservative: always report).
-                    self.mutations
-                        .push((format!("__unknown_{}", i.span().start().line), i.span().start().line));
+                    self.mutations.push((
+                        format!("__unknown_{}", i.span().start().line),
+                        i.span().start().line,
+                    ));
                 }
             }
         } else if is_persistent_extend_ttl(i) {

@@ -1,4 +1,3 @@
-
 //! Detection of duplicate symbol keys (symbol_short!("...")) within the same impl block.
 //!
 //! Two unrelated `#[contractimpl]` blocks in the same file that happen to reuse
@@ -167,10 +166,11 @@ impl<'ast, 'a> Visit<'ast> for SymbolKeyVisitor<'a> {
                     let span = m.span().start();
                     let pos = span.column;
                     let line = span.line;
-                    self.symbol_keys
-                        .entry(key)
-                        .or_default()
-                        .push((pos, line, self.current_function.clone()));
+                    self.symbol_keys.entry(key).or_default().push((
+                        pos,
+                        line,
+                        self.current_function.clone(),
+                    ));
                 }
             }
         }
@@ -198,10 +198,11 @@ impl<'ast, 'a> Visit<'ast> for SymbolKeyVisitor<'a> {
                     };
                     if let Some(key) = key {
                         let span = node.span().start();
-                        self.symbol_keys
-                            .entry(key)
-                            .or_default()
-                            .push((span.column, span.line, self.current_function.clone()));
+                        self.symbol_keys.entry(key).or_default().push((
+                            span.column,
+                            span.line,
+                            self.current_function.clone(),
+                        ));
                     }
                 }
             }

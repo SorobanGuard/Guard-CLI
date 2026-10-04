@@ -92,7 +92,10 @@ impl PanicVisitor<'_> {
 impl<'ast> Visit<'ast> for PanicVisitor<'_> {
     fn visit_macro(&mut self, i: &'ast syn::Macro) {
         let name = macro_name(i);
-        if matches!(name.as_str(), "panic" | "unreachable" | "todo" | "unimplemented") {
+        if matches!(
+            name.as_str(),
+            "panic" | "unreachable" | "todo" | "unimplemented"
+        ) {
             self.push(i.span().start().line, &format!("{name}!"));
         }
         visit::visit_macro(self, i);

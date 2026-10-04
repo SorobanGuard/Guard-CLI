@@ -44,7 +44,9 @@ pub struct UnprotectedAdminCheck {
 
 impl UnprotectedAdminCheck {
     pub fn new() -> Self {
-        Self { extra_names: Vec::new() }
+        Self {
+            extra_names: Vec::new(),
+        }
     }
 
     /// Extend the built-in `SENSITIVE_NAMES` list with project-specific names.
@@ -230,7 +232,10 @@ fn expr_references_any(expr: &syn::Expr, names: &std::collections::HashSet<Strin
             visit::visit_expr_path(self, node);
         }
     }
-    let mut v = RefVisitor { names, found: false };
+    let mut v = RefVisitor {
+        names,
+        found: false,
+    };
     visit::visit_expr(&mut v, expr);
     v.found
 }

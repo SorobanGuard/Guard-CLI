@@ -1,5 +1,6 @@
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
+use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{FnArg, Pat};

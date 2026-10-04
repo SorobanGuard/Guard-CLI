@@ -164,10 +164,12 @@ fn find_candidate_keys(line: &str) -> Vec<&str> {
             let boundary_before =
                 i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
             let end = i + KEY_LEN;
-            if boundary_before && end <= bytes.len() && bytes[i..end].iter().all(|&b| is_strkey_char(b))
+            if boundary_before
+                && end <= bytes.len()
+                && bytes[i..end].iter().all(|&b| is_strkey_char(b))
             {
-                let boundary_after =
-                    end == bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+                let boundary_after = end == bytes.len()
+                    || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
                 if boundary_after {
                     out.push(&line[i..end]);
                     i = end;

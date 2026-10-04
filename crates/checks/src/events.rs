@@ -1,4 +1,3 @@
-
 //! Detection of state-changing functions (storage writes) without event emission.
 
 use crate::util::{

@@ -43,7 +43,9 @@ fn meta_mentions_test(meta: &syn::Meta) -> bool {
     match meta {
         syn::Meta::Path(path) => path.is_ident("test"),
         syn::Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => list
-            .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
             .map(|metas| metas.iter().any(meta_mentions_test))
             .unwrap_or(false),
         _ => false,
@@ -122,7 +124,8 @@ mod tests {
     }
 
     #[test]
-    fn excludes_contractimpl_functions_inside_cfg_all_test_not_wasm32_module() -> Result<(), syn::Error> {
+    fn excludes_contractimpl_functions_inside_cfg_all_test_not_wasm32_module(
+    ) -> Result<(), syn::Error> {
         let file = parse_file(
             r#"
 #[contractimpl]
@@ -153,7 +156,8 @@ mod native {
     }
 
     #[test]
-    fn excludes_contractimpl_functions_inside_cfg_any_test_doctest_module() -> Result<(), syn::Error> {
+    fn excludes_contractimpl_functions_inside_cfg_any_test_doctest_module() -> Result<(), syn::Error>
+    {
         let file = parse_file(
             r#"
 #[contractimpl]
@@ -230,7 +234,8 @@ mod integration {
         // pattern is *used* (a `let` binding, here), not to `Pat` parsing in
         // general — so this needs a real `let` statement, matching how
         // `pat_ident_name` actually receives its input (`local.pat`).
-        let syn::Stmt::Local(local) = syn::parse_str::<syn::Stmt>("let admin: Address = x;")? else {
+        let syn::Stmt::Local(local) = syn::parse_str::<syn::Stmt>("let admin: Address = x;")?
+        else {
             panic!("expected a let-binding statement");
         };
         assert_eq!(pat_ident_name(&local.pat).as_deref(), Some("admin"));
@@ -355,7 +360,10 @@ pub fn type_is_address(ty: &Type) -> bool {
     let Type::Path(tp) = ty else {
         return false;
     };
-    tp.path.segments.last().is_some_and(|s| s.ident == "Address")
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "Address")
 }
 
 /// The bound name of a (possibly type-ascribed) pattern, e.g. `admin` from
@@ -396,10 +404,8 @@ fn collect_contractimpl_fns<'a>(
     for item in items {
         match item {
             Item::Mod(m) => {
-                let is_test = in_test_mod
-                    || is_cfg_test(&m.attrs)
-                    || m.ident == "tests"
-                    || m.ident == "test";
+                let is_test =
+                    in_test_mod || is_cfg_test(&m.attrs) || m.ident == "tests" || m.ident == "test";
                 if let Some((_, nested)) = &m.content {
                     collect_contractimpl_fns(nested, is_test, out);
                 }
@@ -424,10 +430,8 @@ fn collect_contractimpl_fns_with_type<'a>(
     for item in items {
         match item {
             Item::Mod(m) => {
-                let is_test = in_test_mod
-                    || is_cfg_test(&m.attrs)
-                    || m.ident == "tests"
-                    || m.ident == "test";
+                let is_test =
+                    in_test_mod || is_cfg_test(&m.attrs) || m.ident == "tests" || m.ident == "test";
                 if let Some((_, nested)) = &m.content {
                     collect_contractimpl_fns_with_type(nested, is_test, out);
                 }

@@ -28,8 +28,9 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
         "{base}-vulnerable did not produce {expected_check}; findings: {vulnerable:#?}"
     );
 
-    let (safe, _, _, safe_panics) = scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
-        .unwrap_or_else(|error| panic!("failed to scan {base}-safe: {error}"));
+    let (safe, _, _, safe_panics) =
+        scan_directory(&fixture_path(&format!("{base}-safe")), &[], &[])
+            .unwrap_or_else(|error| panic!("failed to scan {base}-safe: {error}"));
     assert!(
         safe_panics.is_empty(),
         "no check should panic on {base}-safe; got: {safe_panics:#?}"
@@ -126,18 +127,21 @@ fn upgrade_vulnerable_still_triggers_check() {
 #[test]
 fn cli_scan_path_does_not_emit_duplicate_findings() {
     let checks = default_checks_with_config(&[], &[]);
-    let (results, _, _, _) = scan_directory_with_checks(
-        &fixture_path("reentrancy-vulnerable"),
-        &[],
-        &[],
-        &checks,
-    )
-    .expect("failed to scan reentrancy-vulnerable");
+    let (results, _, _, _) =
+        scan_directory_with_checks(&fixture_path("reentrancy-vulnerable"), &[], &[], &checks)
+            .expect("failed to scan reentrancy-vulnerable");
 
-    let findings: Vec<_> = results.into_iter().flat_map(|result| result.findings).collect();
+    let findings: Vec<_> = results
+        .into_iter()
+        .flat_map(|result| result.findings)
+        .collect();
     let mut keys = std::collections::HashSet::new();
     for finding in findings {
-        let key = (finding.file_path.clone(), finding.line, finding.check_name.clone());
+        let key = (
+            finding.file_path.clone(),
+            finding.line,
+            finding.check_name.clone(),
+        );
         assert!(
             keys.insert(key),
             "CLI scan emitted duplicate finding: {finding:?}"
@@ -272,8 +276,8 @@ fn large_loop_fixtures() {
 #[test]
 fn ttl_mixed_key_scenario_produces_finding() {
     let path = fixture_path("ttl-vulnerable");
-    let (findings, _, _, _) = scan_directory(&path, &[], &[])
-        .expect("failed to scan ttl-vulnerable");
+    let (findings, _, _, _) =
+        scan_directory(&path, &[], &[]).expect("failed to scan ttl-vulnerable");
 
     // The `update` function writes KEY and KEY2 but only extends TTL for KEY2.
     // There must be at least one finding for KEY's missing extension in `update`.
@@ -301,7 +305,10 @@ fn config_extra_sensitive_names_affect_admin_check() {
     let root = std::env::temp_dir().join(format!(
         "soroban-guard-cfg-test-{}-{}",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(root.join("src")).unwrap();
 
@@ -373,7 +380,10 @@ fn config_scan_path_as_fallback() {
     let root = std::env::temp_dir().join(format!(
         "soroban-guard-cfg-path-test-{}-{}",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(root.join("src")).unwrap();
 
@@ -417,9 +427,7 @@ path = "src"
 
     let (findings, _, _, _) = scan_directory(&config_root, &[], &[]).unwrap();
     assert!(
-        findings
-            .iter()
-            .any(|f| f.check_name == "unprotected-admin"),
+        findings.iter().any(|f| f.check_name == "unprotected-admin"),
         "Should find unprotected-admin check using path from config"
     );
 

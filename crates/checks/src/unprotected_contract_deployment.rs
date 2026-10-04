@@ -22,8 +22,7 @@ impl Check for UnprotectedContractDeploymentCheck {
             if matches!(method.vis, syn::Visibility::Public(_)) {
                 let (has_deployer, line) = has_deployer_call(&method.block);
                 if has_deployer {
-                    let env_name =
-                        env_param_name(&method.sig).unwrap_or_else(|| "env".to_string());
+                    let env_name = env_param_name(&method.sig).unwrap_or_else(|| "env".to_string());
                     let address_names = util::address_param_names(&method.sig);
                     let auth_line = first_valid_auth_line(method, &env_name, &address_names);
 
@@ -117,7 +116,9 @@ impl<'ast> Visit<'ast> for AuthScanner {
                     && receiver_chain_contains(&init.expr, "get")
                 {
                     if let Some(var_name) = pat_ident_name(&local.pat) {
-                        if var_name.to_lowercase().contains("admin") || var_name.to_lowercase().contains("authority") {
+                        if var_name.to_lowercase().contains("admin")
+                            || var_name.to_lowercase().contains("authority")
+                        {
                             self.admin_vars.insert(var_name);
                         }
                     }

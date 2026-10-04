@@ -306,7 +306,11 @@ impl Token {
 }
 "#;
         let lines = finding_lines(src);
-        assert_eq!(lines.len(), 1, "only the second (unguarded) transfer should be flagged; got lines: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the second (unguarded) transfer should be flagged; got lines: {lines:?}"
+        );
     }
 
     /// Both transfers unguarded → two findings.
@@ -323,7 +327,11 @@ impl Token {
 }
 "#;
         let lines = finding_lines(src);
-        assert_eq!(lines.len(), 2, "both unguarded transfers should be flagged; got lines: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "both unguarded transfers should be flagged; got lines: {lines:?}"
+        );
     }
 
     /// #403 false positive: a non-token `transfer` method on an unrelated type.
@@ -399,9 +407,7 @@ impl C {
 
     #[test]
     fn collects_a_grouped_alias() -> Result<(), syn::Error> {
-        let file = syn::parse_file(
-            "use soroban_sdk::token::{Client as C, StellarAssetClient};",
-        )?;
+        let file = syn::parse_file("use soroban_sdk::token::{Client as C, StellarAssetClient};")?;
         let aliases = collect_token_client_aliases(&file);
         // `Client as C` is aliased and collected; `StellarAssetClient` has no
         // rename at all, so it contributes nothing (it's a `Name`, not a

@@ -83,7 +83,10 @@ impl<'ast> Visit<'ast> for AmountGuardVisitor {
                 if ident == "amount"
                     && matches!(
                         node.op,
-                        syn::BinOp::Gt(_) | syn::BinOp::Ge(_) | syn::BinOp::Lt(_) | syn::BinOp::Le(_)
+                        syn::BinOp::Gt(_)
+                            | syn::BinOp::Ge(_)
+                            | syn::BinOp::Lt(_)
+                            | syn::BinOp::Le(_)
                     )
                 {
                     self.found_guard = true;
