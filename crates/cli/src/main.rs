@@ -70,8 +70,6 @@ enum Commands {
         /// Watch for .rs file changes and re-run the scan automatically
         #[arg(long, short = 'w')]
         watch: bool,
-        /// Do not clear the terminal between watch-mode scans
-        #[arg(long, hide = true)]
         /// Don't clear the terminal between watch-mode re-scans
         #[arg(long)]
         no_clear: bool,
