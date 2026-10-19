@@ -1,7 +1,7 @@
 //! Privileged-style entrypoints without any `require_auth` / `require_auth_for_args` call.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, is_admin_var_name, pat_ident_name,
+    contractimpl_functions_excluding_test, pat_ident_name,
     receiver_chain_contains, receiver_chain_contains_storage,
 };
 use crate::{Check, Finding, Severity};
@@ -180,9 +180,7 @@ impl<'ast> Visit<'ast> for AuthGateScan {
                     && receiver_chain_contains(&init.expr, "get")
                 {
                     if let Some(var_name) = pat_ident_name(&local.pat) {
-                        if is_admin_var_name(&var_name) {
-                            self.storage_read_vars.insert(var_name);
-                        }
+                        self.storage_read_vars.insert(var_name);
                     }
                 }
             }
@@ -201,7 +199,15 @@ impl<'ast> Visit<'ast> for AuthGateScan {
                 .chain(self.address_names.clone())
                 .collect();
             let name_set: std::collections::HashSet<String> = all_names.iter().cloned().collect();
-            if expr_references_any(&i.cond, &name_set) {
+            // The comparison only gates the rest of the body when one of its
+            // branches diverges (`return` / `panic!` / auth call), e.g.
+            // `if caller != admin { return; }`; a no-op `if` is not a gate.
+            let branch_diverges = block_diverges(&i.then_branch)
+                || i
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, branch)| expr_diverges(branch));
+            if branch_diverges && expr_references_any(&i.cond, &name_set) {
                 self.storage_read_and_conditional = true;
             }
         }
