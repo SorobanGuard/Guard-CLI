@@ -1,4 +1,4 @@
-use soroban_guard_cli::config;
+use soroban_guard_cli::{config, suggest::format_unknown_check_error};
 
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -392,16 +392,12 @@ fn main() {
             // Validate disabled names against known checks.
             let known_checks = default_checks();
             {
-                let known_names: HashSet<&str> = known_checks.iter().map(|c| c.name()).collect();
+                let known_names_vec: Vec<&str> = known_checks.iter().map(|c| c.name()).collect();
+                let known_names: HashSet<&str> = known_names_vec.iter().copied().collect();
                 for name in &all_disabled {
                     if !known_names.contains(name.as_str()) {
-                        emit_setup_error(
-                            &format!(
-                                "unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
-                                name
-                            ),
-                            json,
-                        );
+                        let err_msg = format_unknown_check_error(name, &known_names_vec);
+                        emit_setup_error(&err_msg, json);
                     }
                 }
             }
@@ -604,12 +600,10 @@ fn main() {
         }
         Commands::Explain { check_name } => {
             let known = default_checks();
-            if !known.iter().any(|c| c.name() == check_name) {
-                eprintln!(
-                    "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
-                    "error:".red().bold(),
-                    check_name
-                );
+            let known_names_vec: Vec<&str> = known.iter().map(|c| c.name()).collect();
+            if !known_names_vec.contains(&check_name.as_str()) {
+                let err_msg = format_unknown_check_error(&check_name, &known_names_vec);
+                eprintln!("{} {}", "error:".red().bold(), err_msg);
                 std::process::exit(2);
             }
             let (severity, summary) = describe_check(&check_name);
