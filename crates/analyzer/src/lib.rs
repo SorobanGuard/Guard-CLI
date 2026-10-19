@@ -406,8 +406,6 @@ pub fn is_ignored_path(path: &Path) -> bool {
         .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
 }
 
-/// The path relative to `root` shown in findings: the bare file name when `root`
-
 /// Path used to sort a [`ScanError`] for deterministic multi-error reporting (#629).
 fn scan_error_path(err: &ScanError) -> PathBuf {
     match err {
@@ -421,6 +419,27 @@ fn scan_error_path(err: &ScanError) -> PathBuf {
             PathBuf::new()
         }
     }
+}
+
+/// Sort the `check_panics` a scan returns by file path, then check name (issue #724).
+///
+/// They are gathered in the order files were visited, which follows the
+/// filesystem's readdir order and is not stable across runs or machines. Findings
+/// were already sorted; this gives the degraded-scan report the same guarantee
+/// #629 gave the aborting `ScanError::Multiple` path. The sort is stable, so two
+/// panics with the same path and check keep their relative order.
+fn sort_check_panics(panics: &mut [ScanError]) {
+    fn check_name(err: &ScanError) -> &str {
+        match err {
+            ScanError::CheckPanic { check, .. } => check,
+            _ => "",
+        }
+    }
+    panics.sort_by(|a, b| {
+        scan_error_path(a)
+            .cmp(&scan_error_path(b))
+            .then_with(|| check_name(a).cmp(check_name(b)))
+    });
 }
 
 /// Collect the per-file results of a parallel scan. When every file succeeded,
@@ -683,7 +702,8 @@ pub fn scan_directory(
     .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
-    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let mut check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    sort_check_panics(&mut check_panics);
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -728,10 +748,11 @@ pub fn scan_directory_with_checks(
     let mut results: Vec<FileScanResult> = per_file.iter().map(|(r, _)| r.clone()).collect();
     results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
-    let check_panics: Vec<ScanError> = per_file
+    let mut check_panics: Vec<ScanError> = per_file
         .into_iter()
         .flat_map(|(_, panics)| panics)
         .collect();
+    sort_check_panics(&mut check_panics);
 
     Ok((results, files_scanned, files_skipped, check_panics))
 }
@@ -800,7 +821,8 @@ pub fn scan_files(
     .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
-    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let mut check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    sort_check_panics(&mut check_panics);
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -1548,6 +1570,98 @@ mod tests {
 
         let empty = CheckPanicReport::from_errors(std::iter::empty()).unwrap();
         assert!(!empty.is_degraded());
+    }
+
+    /// A second panicking check, so one file yields two panics to order.
+    struct OtherPanickingCheck;
+    impl soroban_guard_checks::Check for OtherPanickingCheck {
+        fn name(&self) -> &str {
+            "another-panic-check"
+        }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            panic!("boom from another-panic-check");
+        }
+    }
+
+    fn panic_order(panics: &[ScanError]) -> Vec<(String, String)> {
+        panics
+            .iter()
+            .map(|e| match e {
+                ScanError::CheckPanic { check, path, .. } => (
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    check.clone(),
+                ),
+                other => panic!("expected CheckPanic, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Issue #724: check_panics are sorted by path, then check name.
+    #[test]
+    fn sort_check_panics_orders_by_path_then_check() {
+        let panic = |path: &str, check: &str| ScanError::CheckPanic {
+            check: check.to_string(),
+            path: PathBuf::from(path),
+            message: String::new(),
+        };
+        let mut panics = vec![
+            panic("src/z.rs", "b-check"),
+            panic("src/a.rs", "b-check"),
+            panic("src/z.rs", "a-check"),
+            panic("src/a.rs", "a-check"),
+        ];
+        sort_check_panics(&mut panics);
+        assert_eq!(
+            panic_order(&panics),
+            vec![
+                ("a.rs".into(), "a-check".into()),
+                ("a.rs".into(), "b-check".into()),
+                ("z.rs".into(), "a-check".into()),
+                ("z.rs".into(), "b-check".into()),
+            ]
+        );
+    }
+
+    /// Issue #724: a scan returns its check_panics in that order, whatever order
+    /// the files were visited in. (scan_directory and scan_files only run the
+    /// default checks, which can't be made to panic here; they share the same
+    /// sort_check_panics call.)
+    #[test]
+    fn scan_returns_sorted_check_panics() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-panic-order-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        // Created out of name order so creation order can't mask a missing sort.
+        let names = ["src/m.rs", "src/nested/b.rs", "src/c.rs", "src/a.rs", "src/z.rs"];
+        for name in names {
+            fs::write(root.join(name), "pub fn f() {}").unwrap();
+        }
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(PanickingCheck), Box::new(OtherPanickingCheck)];
+
+        let (_, _, _, from_dir) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let mut expected: Vec<ScanError> = from_dir
+            .iter()
+            .map(|e| match e {
+                ScanError::CheckPanic { check, path, message } => ScanError::CheckPanic {
+                    check: check.clone(),
+                    path: path.clone(),
+                    message: message.clone(),
+                },
+                other => panic!("expected CheckPanic, got {other:?}"),
+            })
+            .collect();
+        sort_check_panics(&mut expected);
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(from_dir.len(), names.len() * 2);
+        assert_eq!(panic_order(&from_dir), panic_order(&expected));
     }
 }
 
