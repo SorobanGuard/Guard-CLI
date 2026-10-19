@@ -1638,7 +1638,13 @@ mod tests {
         ));
         fs::create_dir_all(root.join("src/nested")).unwrap();
         // Created out of name order so creation order can't mask a missing sort.
-        let names = ["src/m.rs", "src/nested/b.rs", "src/c.rs", "src/a.rs", "src/z.rs"];
+        let names = [
+            "src/m.rs",
+            "src/nested/b.rs",
+            "src/c.rs",
+            "src/a.rs",
+            "src/z.rs",
+        ];
         for name in names {
             fs::write(root.join(name), "pub fn f() {}").unwrap();
         }
@@ -1649,7 +1655,11 @@ mod tests {
         let mut expected: Vec<ScanError> = from_dir
             .iter()
             .map(|e| match e {
-                ScanError::CheckPanic { check, path, message } => ScanError::CheckPanic {
+                ScanError::CheckPanic {
+                    check,
+                    path,
+                    message,
+                } => ScanError::CheckPanic {
                     check: check.clone(),
                     path: path.clone(),
                     message: message.clone(),
@@ -1946,9 +1956,18 @@ impl B {
             rule_url: None,
             suggestion: None,
         };
-        assert!(is_suppressed(&finding(9, "transfer"), &suppressions, &index), "A::transfer is suppressed");
-        assert!(!is_suppressed(&finding(15, "transfer"), &suppressions, &index), "B::transfer is not");
-        assert!(!is_suppressed(&finding(2, ""), &suppressions, &index), "outside every method");
+        assert!(
+            is_suppressed(&finding(9, "transfer"), &suppressions, &index),
+            "A::transfer is suppressed"
+        );
+        assert!(
+            !is_suppressed(&finding(15, "transfer"), &suppressions, &index),
+            "B::transfer is not"
+        );
+        assert!(
+            !is_suppressed(&finding(2, ""), &suppressions, &index),
+            "outside every method"
+        );
     }
 
     /// End-to-end regression test for #533: a `// soroban-guard: allow(unchecked-divisor)`

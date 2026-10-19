@@ -1,4 +1,3 @@
-
 //! Detection of state-changing functions (storage writes) without event emission.
 
 use crate::util::{
@@ -210,7 +209,11 @@ impl Contract {{
 "#
             );
             let file = parse_file(&src).unwrap();
-            assert_eq!(MissingEventEmissionCheck.run(&file, &src).len(), 1, "{call}");
+            assert_eq!(
+                MissingEventEmissionCheck.run(&file, &src).len(),
+                1,
+                "{call}"
+            );
         }
     }
 }
