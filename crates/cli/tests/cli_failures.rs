@@ -109,3 +109,18 @@ fn no_config_flag_disables_discovery() {
     assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn missing_scan_argument_without_config_exits_two() {
+    let root = temporary_directory("no-path-no-config");
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .arg("scan")
+        .current_dir(&root)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("no scan path provided and none found in soroban-guard.toml"));
+    std::fs::remove_dir_all(root).unwrap();
+}

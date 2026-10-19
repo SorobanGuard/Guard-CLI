@@ -312,6 +312,21 @@ fn suppress_redundant_division_finding(findings: &mut Vec<Finding>) {
 
 /// Canonicalize a scan root, naming the path in the error instead of the bare
 /// `io::Error` that `Path::canonicalize` alone would surface (issue #628).
+/// Label used for findings: the file name when `root` is a file, otherwise
+/// `path` relative to `root`.
+fn file_label(path: &Path, root: &Path) -> String {
+    if root.is_file() {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    } else {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
+}
+
 fn canonicalize_root(root: &Path) -> Result<PathBuf, ScanError> {
     root.canonicalize().map_err(|source| ScanError::ScanRoot {
         path: root.to_path_buf(),
@@ -714,6 +729,24 @@ pub fn scan_files(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_label_uses_file_name_for_file_root() {
+        let dir = std::env::temp_dir().join(format!("sg-file-label-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lib.rs");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(super::file_label(&file, &file), "lib.rs");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_label_strips_directory_root() {
+        let dir = std::path::Path::new("/nonexistent-sg-root");
+        let file = dir.join("src").join("lib.rs");
+        let label = super::file_label(&file, dir);
+        assert_eq!(std::path::Path::new(&label), std::path::Path::new("src/lib.rs"));
+    }
+
     use super::*;
     use std::fs;
     use std::path::PathBuf;

@@ -320,15 +320,6 @@ fn main() {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
             }
-            // Try to load soroban-guard.toml from current directory to get default path.
-            let config_for_default = match config::load(&PathBuf::from(".")) {
-                Ok((c, _)) => c.unwrap_or_default(),
-                Err(e) => {
-                    eprintln!("{} {}", "error:".red().bold(), e);
-                    std::process::exit(2);
-                }
-            };
-
             // Resolve scan path: CLI argument takes precedence, then config, then error.
             // The current-directory config is only needed as a fallback for the scan
             // path itself, so it's only loaded when no path argument was given -
@@ -339,7 +330,7 @@ fn main() {
             } else {
                 // Try to load soroban-guard.toml from current directory to get default path.
                 let config_for_default = match config::load(&PathBuf::from(".")) {
-                    Ok(c) => c.unwrap_or_default(),
+                    Ok((c, _)) => c.unwrap_or_default(),
                     Err(e) => {
                         eprintln!("{} {}", "error:".red().bold(), e);
                         std::process::exit(2);
