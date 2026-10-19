@@ -2,8 +2,7 @@
 //! Detection of state-changing functions (storage writes) without event emission.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_events,
-    receiver_chain_contains_storage,
+    contractimpl_functions_excluding_test, is_storage_mutation_call, receiver_chain_contains_events,
 };
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
@@ -55,16 +54,9 @@ impl Check for MissingEventEmissionCheck {
     }
 }
 
-fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    if !matches!(
-        name.as_str(),
-        "set" | "remove" | "extend_ttl" | "bump" | "append"
-    ) {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
-}
+// Storage writes use the shared `util::is_storage_mutation_call` (issue #731), which
+// counts `set`/`remove`/`append` only: extending a TTL doesn't change any stored value,
+// so it isn't a state change an indexer needs an event for (same reasoning as #401).
 
 fn is_event_publish_call(m: &ExprMethodCall) -> bool {
     m.method == "publish" && receiver_chain_contains_events(&m.receiver)
@@ -151,5 +143,74 @@ impl Contract {
         let file = parse_file(src).unwrap();
         let findings = MissingEventEmissionCheck.run(&file, src);
         assert!(findings.is_empty());
+    }
+
+    /// Issue #731: a TTL-only function changes no stored value and must not be
+    /// reported, matching util::is_storage_mutation_call (#401).
+    #[test]
+    fn ttl_only_function_is_not_flagged() {
+        let src = r#"
+use soroban_sdk::{contractimpl, Symbol, Env};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn keep_alive(env: Env) {
+        let key = Symbol::new(&env, "bal");
+        env.storage().persistent().extend_ttl(&key, 100, 1000);
+        env.storage().instance().bump(100, 1000);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        assert!(MissingEventEmissionCheck.run(&file, src).is_empty());
+    }
+
+    /// The finding for a function that extends a TTL *and* writes points at the
+    /// write, not the TTL call that comes first.
+    #[test]
+    fn ttl_before_write_reports_the_write_line() {
+        let src = r#"
+use soroban_sdk::{contractimpl, Symbol, Env};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn update(env: Env, amount: i128) {
+        let key = Symbol::new(&env, "bal");
+        env.storage().persistent().extend_ttl(&key, 100, 1000);
+        env.storage().persistent().set(&key, &amount);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = MissingEventEmissionCheck.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 11);
+    }
+
+    #[test]
+    fn remove_and_append_still_count_as_writes() {
+        for call in ["remove(&key)", "append(&key)"] {
+            let src = format!(
+                r#"
+use soroban_sdk::{{contractimpl, Symbol, Env}};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {{
+    pub fn change(env: Env) {{
+        let key = Symbol::new(&env, "bal");
+        env.storage().persistent().{call};
+    }}
+}}
+"#
+            );
+            let file = parse_file(&src).unwrap();
+            assert_eq!(MissingEventEmissionCheck.run(&file, &src).len(), 1, "{call}");
+        }
     }
 }
