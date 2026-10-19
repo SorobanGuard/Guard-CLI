@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use soroban_guard_checks::util::contractimpl_functions_with_type_excluding_test;
 use soroban_guard_checks::{default_checks, Check, Finding};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -258,23 +258,57 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
     suppressions
 }
 
-fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnSpan]) -> bool {
+/// Line → the `FnSpan`s covering it, built once per file (issue #723).
+///
+/// `is_suppressed` runs for every finding of every check, and used to scan every
+/// span each time. Spans never change within a file, so they are indexed up front
+/// and a lookup only visits the spans that actually contain the finding's line —
+/// almost always exactly one. Indices keep the spans' original order, so the
+/// first match is the same span the linear scan used to pick.
+struct FnSpanIndex<'a> {
+    spans: &'a [FnSpan],
+    by_line: HashMap<usize, Vec<usize>>,
+}
+
+impl<'a> FnSpanIndex<'a> {
+    fn new(spans: &'a [FnSpan]) -> Self {
+        let mut by_line: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, span) in spans.iter().enumerate() {
+            for line in span.start_line..=span.end_line {
+                by_line.entry(line).or_default().push(i);
+            }
+        }
+        FnSpanIndex { spans, by_line }
+    }
+
+    /// Spans whose `start_line..=end_line` contains `line`, in original order.
+    fn containing(&self, line: usize) -> impl Iterator<Item = &'a FnSpan> + '_ {
+        self.by_line
+            .get(&line)
+            .into_iter()
+            .flatten()
+            .map(move |&i| &self.spans[i])
+    }
+}
+
+fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &FnSpanIndex) -> bool {
     if suppressions
         .line_checks
         .contains(&(finding.line, finding.check_name.clone()))
     {
         return true;
     }
+    if suppressions.function_checks.is_empty() {
+        return false;
+    }
     let impl_type = fn_spans
-        .iter()
+        .containing(finding.line)
         .find(|s| {
             // When a check leaves function_name empty (e.g. unchecked-divisor,
             // symbol-key-collision, mutable-global-state), fall back to line-range
             // containment so a function-scoped suppression above the enclosing method
             // still silences the finding.
-            (finding.function_name.is_empty() || s.function_name == finding.function_name)
-                && s.start_line <= finding.line
-                && finding.line <= s.end_line
+            finding.function_name.is_empty() || s.function_name == finding.function_name
         })
         .map(|s| s.impl_type.clone())
         .unwrap_or_default();
@@ -284,12 +318,8 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
     // function_checks key matches what parse_suppressions inserted.
     let lookup_fn_name = if finding.function_name.is_empty() {
         fn_spans
-            .iter()
-            .find(|s| {
-                s.impl_type == impl_type
-                    && s.start_line <= finding.line
-                    && finding.line <= s.end_line
-            })
+            .containing(finding.line)
+            .find(|s| s.impl_type == impl_type)
             .map(|s| s.function_name.as_str())
             .unwrap_or("")
     } else {
@@ -572,6 +602,7 @@ fn run_checks_for_file(
     let file_label = file_label(path, root);
     let fn_spans = build_fn_spans(&syn_file);
     let suppressions = parse_suppressions(&content, &fn_spans);
+    let span_index = FnSpanIndex::new(&fn_spans);
 
     let mut findings: Vec<Finding> = Vec::new();
     let mut check_panics: Vec<ScanError> = Vec::new();
@@ -584,7 +615,7 @@ fn run_checks_for_file(
                 }
                 findings.extend(
                     hits.into_iter()
-                        .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans)),
+                        .filter(|finding| !is_suppressed(finding, &suppressions, &span_index)),
                 );
             }
             Err(payload) => {
@@ -1716,9 +1747,94 @@ impl C {
             suggestion: None,
         };
         assert!(
-            is_suppressed(&finding, &suppressions, &fn_spans),
+            is_suppressed(&finding, &suppressions, &FnSpanIndex::new(&fn_spans)),
             "function-scoped suppression should silence finding with empty function_name"
         );
+    }
+
+    /// Issue #723: the per-file span index returns exactly the spans the old
+    /// linear scan matched, in the same order, for every line of the file.
+    #[test]
+    fn fn_span_index_matches_linear_containment() {
+        let src = "\
+#[contract]
+pub struct A;
+#[contract]
+pub struct B;
+#[contractimpl]
+impl A {
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+    pub fn mint(env: Env) {
+        let _ = env;
+    }
+}
+#[contractimpl]
+impl B {
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+}
+";
+        let file = syn::parse_file(src).expect("fixture should parse");
+        let fn_spans = build_fn_spans(&file);
+        assert_eq!(fn_spans.len(), 3);
+        let index = FnSpanIndex::new(&fn_spans);
+        for line in 0..=src.lines().count() + 1 {
+            let linear: Vec<(&str, &str)> = fn_spans
+                .iter()
+                .filter(|s| s.start_line <= line && line <= s.end_line)
+                .map(|s| (s.impl_type.as_str(), s.function_name.as_str()))
+                .collect();
+            let indexed: Vec<(&str, &str)> = index
+                .containing(line)
+                .map(|s| (s.impl_type.as_str(), s.function_name.as_str()))
+                .collect();
+            assert_eq!(indexed, linear, "line {line}");
+        }
+    }
+
+    /// Issue #723: indexing must keep same-named methods on different impl types
+    /// apart, and leave findings outside every method unsuppressed.
+    #[test]
+    fn indexed_suppression_keeps_impl_types_apart() {
+        let src = "\
+#[contract]
+pub struct A;
+#[contract]
+pub struct B;
+#[contractimpl]
+impl A {
+    // soroban-guard: allow(missing-require-auth)
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+}
+#[contractimpl]
+impl B {
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+}
+";
+        let file = syn::parse_file(src).expect("fixture should parse");
+        let fn_spans = build_fn_spans(&file);
+        let suppressions = parse_suppressions(src, &fn_spans);
+        let index = FnSpanIndex::new(&fn_spans);
+        let finding = |line: usize, function_name: &str| Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: soroban_guard_checks::Severity::High,
+            file_path: String::new(),
+            line,
+            function_name: function_name.to_string(),
+            description: String::new(),
+            rule_url: None,
+            suggestion: None,
+        };
+        assert!(is_suppressed(&finding(9, "transfer"), &suppressions, &index), "A::transfer is suppressed");
+        assert!(!is_suppressed(&finding(15, "transfer"), &suppressions, &index), "B::transfer is not");
+        assert!(!is_suppressed(&finding(2, ""), &suppressions, &index), "outside every method");
     }
 
     /// End-to-end regression test for #533: a `// soroban-guard: allow(unchecked-divisor)`
