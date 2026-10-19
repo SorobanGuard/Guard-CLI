@@ -392,12 +392,14 @@ fn main() {
             // Validate disabled names against known checks.
             let known_checks = default_checks();
             {
-                let known_names: HashSet<&str> = known_checks.iter().map(|c| c.name()).collect();
+                let known_names: Vec<&str> = known_checks.iter().map(|c| c.name()).collect();
+                let known_set: HashSet<&str> = known_names.iter().copied().collect();
                 for name in &all_disabled {
-                    if !known_names.contains(name.as_str()) {
+                    if !known_set.contains(name.as_str()) {
+                        let hint = soroban_guard_cli::suggest::format_did_you_mean(name, &known_names);
                         emit_setup_error(
                             &format!(
-                                "unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+                                "unknown check `{}`.{hint} Run `soroban-guard list-checks` to see available checks.",
                                 name
                             ),
                             json,
@@ -605,8 +607,10 @@ fn main() {
         Commands::Explain { check_name } => {
             let known = default_checks();
             if !known.iter().any(|c| c.name() == check_name) {
+                let known_names: Vec<&str> = known.iter().map(|c| c.name()).collect();
+                let hint = soroban_guard_cli::suggest::format_did_you_mean(&check_name, &known_names);
                 eprintln!(
-                    "{} unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+                    "{} unknown check `{}`.{hint} Run `soroban-guard list-checks` to see available checks.",
                     "error:".red().bold(),
                     check_name
                 );
