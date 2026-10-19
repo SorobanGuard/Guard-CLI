@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use soroban_guard_checks::util::contractimpl_functions_with_type_excluding_test;
 use soroban_guard_checks::{default_checks, Check, Finding};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -258,23 +258,57 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
     suppressions
 }
 
-fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnSpan]) -> bool {
+/// Line → the `FnSpan`s covering it, built once per file (issue #723).
+///
+/// `is_suppressed` runs for every finding of every check, and used to scan every
+/// span each time. Spans never change within a file, so they are indexed up front
+/// and a lookup only visits the spans that actually contain the finding's line —
+/// almost always exactly one. Indices keep the spans' original order, so the
+/// first match is the same span the linear scan used to pick.
+struct FnSpanIndex<'a> {
+    spans: &'a [FnSpan],
+    by_line: HashMap<usize, Vec<usize>>,
+}
+
+impl<'a> FnSpanIndex<'a> {
+    fn new(spans: &'a [FnSpan]) -> Self {
+        let mut by_line: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, span) in spans.iter().enumerate() {
+            for line in span.start_line..=span.end_line {
+                by_line.entry(line).or_default().push(i);
+            }
+        }
+        FnSpanIndex { spans, by_line }
+    }
+
+    /// Spans whose `start_line..=end_line` contains `line`, in original order.
+    fn containing(&self, line: usize) -> impl Iterator<Item = &'a FnSpan> + '_ {
+        self.by_line
+            .get(&line)
+            .into_iter()
+            .flatten()
+            .map(move |&i| &self.spans[i])
+    }
+}
+
+fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &FnSpanIndex) -> bool {
     if suppressions
         .line_checks
         .contains(&(finding.line, finding.check_name.clone()))
     {
         return true;
     }
+    if suppressions.function_checks.is_empty() {
+        return false;
+    }
     let impl_type = fn_spans
-        .iter()
+        .containing(finding.line)
         .find(|s| {
             // When a check leaves function_name empty (e.g. unchecked-divisor,
             // symbol-key-collision, mutable-global-state), fall back to line-range
             // containment so a function-scoped suppression above the enclosing method
             // still silences the finding.
-            (finding.function_name.is_empty() || s.function_name == finding.function_name)
-                && s.start_line <= finding.line
-                && finding.line <= s.end_line
+            finding.function_name.is_empty() || s.function_name == finding.function_name
         })
         .map(|s| s.impl_type.clone())
         .unwrap_or_default();
@@ -284,12 +318,8 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
     // function_checks key matches what parse_suppressions inserted.
     let lookup_fn_name = if finding.function_name.is_empty() {
         fn_spans
-            .iter()
-            .find(|s| {
-                s.impl_type == impl_type
-                    && s.start_line <= finding.line
-                    && finding.line <= s.end_line
-            })
+            .containing(finding.line)
+            .find(|s| s.impl_type == impl_type)
             .map(|s| s.function_name.as_str())
             .unwrap_or("")
     } else {
@@ -303,20 +333,23 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
     ))
 }
 
+/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
+fn path_to_report_string(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 /// The path relative to `root` shown in findings: the bare file name when `root`
 /// itself is a single file, otherwise the path stripped of the `root` prefix.
 /// Shared by every scan entry point so the copies of this logic can't drift (issue #630).
 fn file_label(path: &Path, root: &Path) -> String {
     if root.is_file() {
         path.file_name()
+            .map(Path::new)
+            .map(path_to_report_string)
             .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
     } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
+        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
     }
 }
 
@@ -373,8 +406,6 @@ pub fn is_ignored_path(path: &Path) -> bool {
         .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
 }
 
-/// The path relative to `root` shown in findings: the bare file name when `root`
-
 /// Path used to sort a [`ScanError`] for deterministic multi-error reporting (#629).
 fn scan_error_path(err: &ScanError) -> PathBuf {
     match err {
@@ -388,6 +419,27 @@ fn scan_error_path(err: &ScanError) -> PathBuf {
             PathBuf::new()
         }
     }
+}
+
+/// Sort the `check_panics` a scan returns by file path, then check name (issue #724).
+///
+/// They are gathered in the order files were visited, which follows the
+/// filesystem's readdir order and is not stable across runs or machines. Findings
+/// were already sorted; this gives the degraded-scan report the same guarantee
+/// #629 gave the aborting `ScanError::Multiple` path. The sort is stable, so two
+/// panics with the same path and check keep their relative order.
+fn sort_check_panics(panics: &mut [ScanError]) {
+    fn check_name(err: &ScanError) -> &str {
+        match err {
+            ScanError::CheckPanic { check, .. } => check,
+            _ => "",
+        }
+    }
+    panics.sort_by(|a, b| {
+        scan_error_path(a)
+            .cmp(&scan_error_path(b))
+            .then_with(|| check_name(a).cmp(check_name(b)))
+    });
 }
 
 /// Collect the per-file results of a parallel scan. When every file succeeded,
@@ -569,6 +621,7 @@ fn run_checks_for_file(
     let file_label = file_label(path, root);
     let fn_spans = build_fn_spans(&syn_file);
     let suppressions = parse_suppressions(&content, &fn_spans);
+    let span_index = FnSpanIndex::new(&fn_spans);
 
     let mut findings: Vec<Finding> = Vec::new();
     let mut check_panics: Vec<ScanError> = Vec::new();
@@ -581,7 +634,7 @@ fn run_checks_for_file(
                 }
                 findings.extend(
                     hits.into_iter()
-                        .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans)),
+                        .filter(|finding| !is_suppressed(finding, &suppressions, &span_index)),
                 );
             }
             Err(payload) => {
@@ -649,7 +702,8 @@ pub fn scan_directory(
     .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
-    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let mut check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    sort_check_panics(&mut check_panics);
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -694,50 +748,13 @@ pub fn scan_directory_with_checks(
     let mut results: Vec<FileScanResult> = per_file.iter().map(|(r, _)| r.clone()).collect();
     results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
-    let check_panics: Vec<ScanError> = per_file
+    let mut check_panics: Vec<ScanError> = per_file
         .into_iter()
         .flat_map(|(_, panics)| panics)
         .collect();
+    sort_check_panics(&mut check_panics);
 
     Ok((results, files_scanned, files_skipped, check_panics))
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
 }
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
@@ -804,7 +821,8 @@ pub fn scan_files(
     .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
-    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let mut check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    sort_check_panics(&mut check_panics);
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -1553,6 +1571,108 @@ mod tests {
         let empty = CheckPanicReport::from_errors(std::iter::empty()).unwrap();
         assert!(!empty.is_degraded());
     }
+
+    /// A second panicking check, so one file yields two panics to order.
+    struct OtherPanickingCheck;
+    impl soroban_guard_checks::Check for OtherPanickingCheck {
+        fn name(&self) -> &str {
+            "another-panic-check"
+        }
+        fn run(&self, _file: &syn::File, _src: &str) -> Vec<Finding> {
+            panic!("boom from another-panic-check");
+        }
+    }
+
+    fn panic_order(panics: &[ScanError]) -> Vec<(String, String)> {
+        panics
+            .iter()
+            .map(|e| match e {
+                ScanError::CheckPanic { check, path, .. } => (
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    check.clone(),
+                ),
+                other => panic!("expected CheckPanic, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Issue #724: check_panics are sorted by path, then check name.
+    #[test]
+    fn sort_check_panics_orders_by_path_then_check() {
+        let panic = |path: &str, check: &str| ScanError::CheckPanic {
+            check: check.to_string(),
+            path: PathBuf::from(path),
+            message: String::new(),
+        };
+        let mut panics = vec![
+            panic("src/z.rs", "b-check"),
+            panic("src/a.rs", "b-check"),
+            panic("src/z.rs", "a-check"),
+            panic("src/a.rs", "a-check"),
+        ];
+        sort_check_panics(&mut panics);
+        assert_eq!(
+            panic_order(&panics),
+            vec![
+                ("a.rs".into(), "a-check".into()),
+                ("a.rs".into(), "b-check".into()),
+                ("z.rs".into(), "a-check".into()),
+                ("z.rs".into(), "b-check".into()),
+            ]
+        );
+    }
+
+    /// Issue #724: a scan returns its check_panics in that order, whatever order
+    /// the files were visited in. (scan_directory and scan_files only run the
+    /// default checks, which can't be made to panic here; they share the same
+    /// sort_check_panics call.)
+    #[test]
+    fn scan_returns_sorted_check_panics() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-panic-order-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        // Created out of name order so creation order can't mask a missing sort.
+        let names = [
+            "src/m.rs",
+            "src/nested/b.rs",
+            "src/c.rs",
+            "src/a.rs",
+            "src/z.rs",
+        ];
+        for name in names {
+            fs::write(root.join(name), "pub fn f() {}").unwrap();
+        }
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> =
+            vec![Box::new(PanickingCheck), Box::new(OtherPanickingCheck)];
+
+        let (_, _, _, from_dir) = scan_directory_with_checks(&root, &[], &[], &checks).unwrap();
+        let mut expected: Vec<ScanError> = from_dir
+            .iter()
+            .map(|e| match e {
+                ScanError::CheckPanic {
+                    check,
+                    path,
+                    message,
+                } => ScanError::CheckPanic {
+                    check: check.clone(),
+                    path: path.clone(),
+                    message: message.clone(),
+                },
+                other => panic!("expected CheckPanic, got {other:?}"),
+            })
+            .collect();
+        sort_check_panics(&mut expected);
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(from_dir.len(), names.len() * 2);
+        assert_eq!(panic_order(&from_dir), panic_order(&expected));
+    }
 }
 
 #[cfg(test)]
@@ -1751,8 +1871,102 @@ impl C {
             suggestion: None,
         };
         assert!(
-            is_suppressed(&finding, &suppressions, &fn_spans),
+            is_suppressed(&finding, &suppressions, &FnSpanIndex::new(&fn_spans)),
             "function-scoped suppression should silence finding with empty function_name"
+        );
+    }
+
+    /// Issue #723: the per-file span index returns exactly the spans the old
+    /// linear scan matched, in the same order, for every line of the file.
+    #[test]
+    fn fn_span_index_matches_linear_containment() {
+        let src = "\
+#[contract]
+pub struct A;
+#[contract]
+pub struct B;
+#[contractimpl]
+impl A {
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+    pub fn mint(env: Env) {
+        let _ = env;
+    }
+}
+#[contractimpl]
+impl B {
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+}
+";
+        let file = syn::parse_file(src).expect("fixture should parse");
+        let fn_spans = build_fn_spans(&file);
+        assert_eq!(fn_spans.len(), 3);
+        let index = FnSpanIndex::new(&fn_spans);
+        for line in 0..=src.lines().count() + 1 {
+            let linear: Vec<(&str, &str)> = fn_spans
+                .iter()
+                .filter(|s| s.start_line <= line && line <= s.end_line)
+                .map(|s| (s.impl_type.as_str(), s.function_name.as_str()))
+                .collect();
+            let indexed: Vec<(&str, &str)> = index
+                .containing(line)
+                .map(|s| (s.impl_type.as_str(), s.function_name.as_str()))
+                .collect();
+            assert_eq!(indexed, linear, "line {line}");
+        }
+    }
+
+    /// Issue #723: indexing must keep same-named methods on different impl types
+    /// apart, and leave findings outside every method unsuppressed.
+    #[test]
+    fn indexed_suppression_keeps_impl_types_apart() {
+        let src = "\
+#[contract]
+pub struct A;
+#[contract]
+pub struct B;
+#[contractimpl]
+impl A {
+    // soroban-guard: allow(missing-require-auth)
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+}
+#[contractimpl]
+impl B {
+    pub fn transfer(env: Env) {
+        let _ = env;
+    }
+}
+";
+        let file = syn::parse_file(src).expect("fixture should parse");
+        let fn_spans = build_fn_spans(&file);
+        let suppressions = parse_suppressions(src, &fn_spans);
+        let index = FnSpanIndex::new(&fn_spans);
+        let finding = |line: usize, function_name: &str| Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: soroban_guard_checks::Severity::High,
+            file_path: String::new(),
+            line,
+            function_name: function_name.to_string(),
+            description: String::new(),
+            rule_url: None,
+            suggestion: None,
+        };
+        assert!(
+            is_suppressed(&finding(9, "transfer"), &suppressions, &index),
+            "A::transfer is suppressed"
+        );
+        assert!(
+            !is_suppressed(&finding(15, "transfer"), &suppressions, &index),
+            "B::transfer is not"
+        );
+        assert!(
+            !is_suppressed(&finding(2, ""), &suppressions, &index),
+            "outside every method"
         );
     }
 
