@@ -345,7 +345,7 @@ stellar contract deploy \
 | `crates/analyzer` | Walk `.rs` files, parse with `syn`, run checks |
 | `crates/checks` | `Check` trait + individual detectors |
 
-See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--json` output schema, `docs/integrations.md` for pre-commit / CI / editor snippets, `docs/configuration.md` for the `soroban-guard.toml` project config file, and `CONTRIBUTING.md` to add a check.
+See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--json` output schema, `docs/integrations.md` for pre-commit / CI / editor snippets, `docs/configuration.md` for the `soroban-guard.toml` project config file, `docs/troubleshooting.md` for FAQs and troubleshooting common issues, and `CONTRIBUTING.md` to add a check.
 
 ---
 
