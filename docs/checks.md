@@ -804,3 +804,16 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+## `timestamp-equality-comparison` (Medium)
+
+**What it detects**
+
+An exact `==` or `!=` comparison where one side is `env.ledger().timestamp()` or
+`.sequence()`, or a local bound directly from one of them. Ledger time and sequence
+advance in jumps, so the branch may never run, or may run one ledger early or late.
+
+**Limitations**
+
+Only direct comparisons and single locals are matched. Values passed through other
+functions are not tracked.

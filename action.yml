@@ -1,0 +1,65 @@
+name: "Soroban Guard"
+description: "Run the soroban-guard static analyzer on a Soroban contract directory."
+author: "SorobanGuard"
+
+inputs:
+  path:
+    description: "Directory to scan."
+    required: false
+    default: "."
+  fail-on:
+    description: "Lowest severity that fails the step: high, medium or low."
+    required: false
+    default: "high"
+  format:
+    description: "Output format: sarif, json or markdown."
+    required: false
+    default: "sarif"
+  upload-sarif:
+    description: "Upload SARIF results to GitHub code scanning (applies when format is sarif)."
+    required: false
+    default: "true"
+
+outputs:
+  findings-count:
+    description: "Number of findings reported by the scan."
+    value: ${{ steps.scan.outputs.findings-count }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install soroban-guard
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v soroban-guard >/dev/null 2>&1; then
+          exit 0
+        fi
+        cargo install --locked --git https://github.com/SorobanGuard/Guard-CLI soroban-guard-cli
+
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+        SCAN_FORMAT: ${{ inputs.format }}
+        SCAN_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set -uo pipefail
+        case "$SCAN_FORMAT" in
+          sarif) flag="--sarif"; report="soroban-guard.sarif" ;;
+          json) flag="--json"; report="soroban-guard-report.json" ;;
+          markdown) flag="--markdown"; report="soroban-guard-report.md" ;;
+          *) echo "::error::Unknown format $SCAN_FORMAT"; exit 2 ;;
+        esac
+        soroban-guard scan "$SCAN_PATH" "$flag" --output "$report" --fail-on "$SCAN_FAIL_ON"
+        status=$?
+        count="$(soroban-guard scan "$SCAN_PATH" --json 2>/dev/null | grep -o '"check_name"' | wc -l | tr -d ' ')"
+        echo "findings-count=${count:-0}" >> "$GITHUB_OUTPUT"
+        exit $status
+
+    - name: Upload SARIF
+      if: ${{ inputs.upload-sarif == 'true' && inputs.format == 'sarif' && always() }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: soroban-guard.sarif

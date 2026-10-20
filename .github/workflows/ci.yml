@@ -35,6 +35,22 @@ jobs:
       - name: Build
         run: cargo build --workspace --release
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items
+
   msrv:
     name: MSRV (1.74)
     runs-on: ubuntu-latest
