@@ -14,8 +14,35 @@ Add `target/release/soroban-guard` to your `PATH`, or replace `soroban-guard` in
 
 ## Pre-commit hook
 
+You can integrate Soroban Guard into your commit workflow either using the [pre-commit](https://pre-commit.com/) framework or with a standalone Git hook script.
+
+### Option 1: Using the `pre-commit` framework (Recommended)
+
+Add Soroban Guard to your project's `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/SorobanGuard/Guard-CLI
+    rev: main  # or pin to a specific release tag
+    hooks:
+      - id: soroban-guard
+```
+
+> **Note on `--fail-on`:** By default, the hook blocks commits on **High** severity findings (exit code 1).
+> To treat **Medium** or **Low** findings as blocking as well, provide the `--fail-on` flag in `args`:
+>
+> ```yaml
+>     hooks:
+>       - id: soroban-guard
+>         args: ["--fail-on", "medium"]
+> ```
+
+Because the hook uses `language: system`, ensure `soroban-guard` is installed on your `PATH` (e.g. via `cargo install soroban-guard-cli` or `cargo build --release`).
+
+### Option 2: Standalone Git hook script
+
 Blocks a commit whenever any **High** finding is present. Drop the snippet into
-`.git/hooks/pre-commit` and make it executable.
+`.git/hooks/pre-commit` and make it executable:
 
 ```bash
 #!/usr/bin/env bash
@@ -54,6 +81,8 @@ chmod +x .git/hooks/pre-commit
 > **Tip:** commit this file as `scripts/pre-commit` and document the one-time
 > `cp scripts/pre-commit .git/hooks/pre-commit` step in your `CONTRIBUTING.md` so
 > every contributor installs it.
+>
+> To change the severity threshold in the standalone script, append `--fail-on medium` or `--fail-on low` to the `soroban-guard scan .` command.
 
 ---
 

@@ -1,0 +1,7 @@
+- id: soroban-guard
+  name: soroban-guard
+  description: Static analysis engine for Soroban smart contracts
+  entry: soroban-guard scan .
+  language: system
+  pass_filenames: false
+  types: [rust]
