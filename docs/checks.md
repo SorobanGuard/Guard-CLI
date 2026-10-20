@@ -818,3 +818,17 @@ read guarded by `.has(&key)` in the same function is not flagged.
 
 Keys are matched by name, so a state key with an unusual name is not flagged. Severity is
 fixed at Low, even when the value feeds arithmetic.
+
+## `approve-max-amount` (Medium)
+
+**What it detects**
+
+A token `approve(from, spender, amount, expiration_ledger)` call whose `amount` is an integer
+`MAX` constant, such as `i128::MAX` or `u64::MAX`. An unlimited allowance lets a compromised
+spender move the entire balance. This check is separate from `allowance-expiration-unchecked`,
+which looks at the expiration argument.
+
+**Limitations**
+
+Only a bare `MAX` path is matched. Expressions such as `MAX - 1` are not flagged. Calls with
+a different argument count are not checked.
