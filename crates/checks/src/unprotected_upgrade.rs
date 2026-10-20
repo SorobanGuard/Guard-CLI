@@ -50,6 +50,9 @@ impl Check for UnprotectedUpgradeCheck {
                                 .to_string(),
                         ),
                         suggestion: Some("Add env.require_auth() at the start".to_string()),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

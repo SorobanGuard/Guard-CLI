@@ -53,6 +53,9 @@ impl Check for HardcodedAddressCheck {
                         "Accept the address as a contract parameter or read it from storage instead of hardcoding."
                             .to_string(),
                     ),
+                column: None,
+                end_line: None,
+                end_column: None,
                 });
             }
         }

@@ -47,6 +47,9 @@ impl Check for ReInitializationRiskCheck {
                      e.g. `require!(!env.storage().instance().has(&key), \"already initialized\");`."
                         .to_string(),
                 ),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         out

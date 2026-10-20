@@ -53,6 +53,9 @@ impl Check for MissingRequireAuthCheck {
                 suggestion: Some(format!(
                     "Add `{env_name}.require_auth();` as the first statement in the function body."
                 )),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         out

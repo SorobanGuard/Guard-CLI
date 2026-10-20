@@ -51,6 +51,9 @@ impl Check for UnprotectedContractDeploymentCheck {
                                 "Add env.require_auth() before deployment operations"
                                     .to_string(),
                             ),
+                        column: None,
+                        end_line: None,
+                        end_column: None,
                         });
                     }
                 }

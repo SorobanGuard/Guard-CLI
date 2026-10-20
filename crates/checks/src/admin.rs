@@ -101,6 +101,9 @@ impl Check for UnprotectedAdminCheck {
                     "Add `env.require_auth();` or verify the caller against a stored admin address."
                         .to_string(),
                 ),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         out

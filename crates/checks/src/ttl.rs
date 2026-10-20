@@ -63,6 +63,9 @@ impl Check for MissingTtlExtensionCheck {
                         "Call `env.storage().persistent().extend_ttl(&key, threshold, extend_to)` after the write."
                             .to_string(),
                     ),
+                column: None,
+                end_line: None,
+                end_column: None,
                 });
             }
         }

@@ -219,6 +219,9 @@ impl Visit<'_> for ArithVisitor<'_> {
                      handle overflow explicitly, or use `saturating_add`/`saturating_sub` \
                      if saturating semantics are acceptable."
                 )),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         visit::visit_expr_binary(self, i);

@@ -69,6 +69,9 @@ impl Check for MissingBalanceCheck {
                              the sender holds sufficient funds."
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
                 prev_transfer = transfer_pos;

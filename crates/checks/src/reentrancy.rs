@@ -47,6 +47,9 @@ impl Check for ReentrancyRiskCheck {
                          pattern), or re-read and re-validate state immediately after \
                          the external call returns."
                     )),
+                column: None,
+                end_line: None,
+                end_column: None,
                 });
             }
         }

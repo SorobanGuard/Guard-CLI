@@ -52,6 +52,9 @@ impl Check for UnprotectedTokenMintCheck {
                             "Add env.require_auth() before the mint/burn operation to restrict it to authorized callers"
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

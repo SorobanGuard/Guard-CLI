@@ -35,6 +35,9 @@ impl Check for LargeLoopCheck {
                         suggestion: Some(
                             "Use bounded iteration or add explicit break conditions".to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

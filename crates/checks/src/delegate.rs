@@ -59,6 +59,9 @@ impl Check for DelegateCallRiskCheck {
                              any storage-derived address in `env.invoke_contract`."
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

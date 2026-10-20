@@ -57,6 +57,9 @@ impl<'ast> Visit<'ast> for TokenAmountVisitor {
                         suggestion: Some(
                             "Validate amount > 0 before transfer call".to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

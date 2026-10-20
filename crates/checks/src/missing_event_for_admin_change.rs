@@ -40,6 +40,9 @@ impl Check for MissingEventForAdminChangeCheck {
                             "Emit an event with env.events().publish() to track admin changes"
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

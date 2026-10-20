@@ -61,6 +61,9 @@ impl<'ast> Visit<'ast> for DivisorExprVisitor<'ast> {
                     suggestion: Some(
                         "Use checked_div or validate divisor > 0 before division".to_string(),
                     ),
+                column: None,
+                end_line: None,
+                end_column: None,
                 });
             }
         }

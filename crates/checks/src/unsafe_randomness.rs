@@ -64,6 +64,9 @@ impl<'ast> Visit<'ast> for RandomnessVisitor {
                 suggestion: Some(
                     "Use oracle services or cryptographic randomness instead".to_string(),
                 ),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         visit::visit_expr_method_call(self, node);

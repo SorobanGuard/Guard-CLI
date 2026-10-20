@@ -50,6 +50,9 @@ impl Check for AuthAfterStorageWriteCheck {
                         suggestion: Some(format!(
                             "Move the `require_auth()` call to the very first line of `{fn_name}`."
                         )),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }
