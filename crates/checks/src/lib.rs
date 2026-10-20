@@ -29,6 +29,7 @@ pub mod unsafe_randomness;
 pub mod vec_growth;
 pub mod xc_input;
 pub mod zero_address;
+pub mod storage_durability_mismatch;
 pub mod unchecked_token_amount;
 pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
@@ -65,6 +66,7 @@ pub use unsafe_randomness::UnsafeRandomnessCheck;
 pub use vec_growth::UnboundedVecGrowthCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
+pub use storage_durability_mismatch::StorageDurabilityMismatchCheck;
 pub use unchecked_token_amount::UncheckedTokenAmountCheck;
 pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
@@ -230,6 +232,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(StorageDurabilityMismatchCheck),
     ]
 }
 

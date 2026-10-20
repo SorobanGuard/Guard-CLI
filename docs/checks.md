@@ -804,3 +804,16 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+## `storage-durability-mismatch` (Medium)
+
+**What it detects**
+
+The same literal or `const` storage key is used under more than one tier
+(`temporary()`, `persistent()`, `instance()`) across a contract's functions. Each
+tier is a separate keyspace, so the two uses hold unrelated entries, and a read
+can return stale or missing data when the temporary entry expires.
+
+**Limitations**
+
+Only literal and uppercase `const` keys are compared. Keys held in local variables are not.
