@@ -690,13 +690,42 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
             })
         })
         .collect();
+    let mut duplicate_counts = std::collections::HashMap::new();
+    for finding in findings {
+        let key = (
+            finding.check_name.clone(),
+            finding.file_path.clone(),
+            finding.function_name.clone(),
+            normalize_sarif_message(&finding.description),
+        );
+        *duplicate_counts.entry(key).or_insert(0usize) += 1;
+    }
+
+    let mut duplicate_ordinals = std::collections::HashMap::new();
     let results = findings
         .iter()
         .map(|finding| {
+            let normalized_message = normalize_sarif_message(&finding.description);
+            let key = (
+                finding.check_name.clone(),
+                finding.file_path.clone(),
+                finding.function_name.clone(),
+                normalized_message,
+            );
+            let duplicate_count = duplicate_counts[&key];
+            let ordinal = duplicate_ordinals.entry(key.clone()).or_insert(0usize);
+            *ordinal += 1;
+            let ordinal = *ordinal;
+            let mut fingerprint = sarif_fingerprint(&key.0, &key.1, &key.2, &key.3);
+            if duplicate_count > 1 {
+                fingerprint.push_str(&format!("-{ordinal}"));
+            }
+
             serde_json::json!({
                 "ruleId": finding.check_name,
                 "level": severity_to_sarif_level(finding.severity),
                 "message": { "text": finding.description },
+                "partialFingerprints": { "soroban-guard/v1": fingerprint },
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": { "uri": finding.file_path },
@@ -729,6 +758,33 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
             "results": results
         }]
     })
+}
+
+fn normalize_sarif_message(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sarif_fingerprint(
+    check_name: &str,
+    file_path: &str,
+    function_name: &str,
+    message: &str,
+) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for part in [check_name, file_path, function_name, message] {
+        for byte in (part.len() as u64)
+            .to_be_bytes()
+            .iter()
+            .chain(part.as_bytes())
+        {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    format!("{hash:016x}")
 }
 
 fn severity_to_sarif_level(severity: Severity) -> &'static str {
@@ -1282,6 +1338,27 @@ mod tests {
             payload["runs"][0]["results"][0]["ruleId"],
             "missing-require-auth"
         );
+        assert_eq!(
+            payload["runs"][0]["results"][0]["partialFingerprints"]["soroban-guard/v1"]
+                .as_str()
+                .map(str::len),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn sarif_fingerprint_is_unchanged_when_finding_moves_lines() {
+        let first = vec![sample_finding("missing-require-auth", Severity::High, 10)];
+        let moved = vec![sample_finding("missing-require-auth", Severity::High, 120)];
+
+        let first_fingerprint = build_sarif(&first, 0)["runs"][0]["results"][0]
+            ["partialFingerprints"]["soroban-guard/v1"]
+            .clone();
+        let moved_fingerprint = build_sarif(&moved, 0)["runs"][0]["results"][0]
+            ["partialFingerprints"]["soroban-guard/v1"]
+            .clone();
+
+        assert_eq!(first_fingerprint, moved_fingerprint);
     }
 
     #[test]

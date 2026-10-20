@@ -28,6 +28,9 @@
           "message": {
             "text": "Method `bump` writes to `env.storage()` but does not call `env.require_auth()`. Callers may mutate contract state without proving they are authorized."
           },
+          "partialFingerprints": {
+            "soroban-guard/v1": "f0f1741f2a6e447f-1"
+          },
           "ruleId": "missing-require-auth"
         },
         {
@@ -47,6 +50,9 @@
           "message": {
             "text": "Method `bump` writes to storage but does not emit an event. Consider using `env.events().publish(…)` to allow off-chain indexers to track contract activity."
           },
+          "partialFingerprints": {
+            "soroban-guard/v1": "0e567d1765867247-1"
+          },
           "ruleId": "missing-event-emission"
         },
         {
@@ -65,6 +71,9 @@
           ],
           "message": {
             "text": "Method `bump` writes to `env.storage()` but does not call `env.require_auth()`. Callers may mutate contract state without proving they are authorized."
+          },
+          "partialFingerprints": {
+            "soroban-guard/v1": "f0f1741f2a6e447f-2"
           },
           "ruleId": "missing-require-auth"
         },
@@ -85,6 +94,9 @@
           "message": {
             "text": "Method `bump` writes to storage but does not emit an event. Consider using `env.events().publish(…)` to allow off-chain indexers to track contract activity."
           },
+          "partialFingerprints": {
+            "soroban-guard/v1": "0e567d1765867247-2"
+          },
           "ruleId": "missing-event-emission"
         },
         {
@@ -104,6 +116,9 @@
           "message": {
             "text": "Method `bump` writes to `env.storage()` but does not call `env.require_auth()`. Callers may mutate contract state without proving they are authorized."
           },
+          "partialFingerprints": {
+            "soroban-guard/v1": "f0f1741f2a6e447f-3"
+          },
           "ruleId": "missing-require-auth"
         },
         {
@@ -122,6 +137,9 @@
           ],
           "message": {
             "text": "Method `bump` writes to storage but does not emit an event. Consider using `env.events().publish(…)` to allow off-chain indexers to track contract activity."
+          },
+          "partialFingerprints": {
+            "soroban-guard/v1": "0e567d1765867247-3"
           },
           "ruleId": "missing-event-emission"
         }
