@@ -24,3 +24,4 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 toml.workspace = true
 notify = "6"
+glob.workspace = true

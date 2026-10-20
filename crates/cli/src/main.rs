@@ -4,13 +4,14 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use soroban_guard_analyzer::{is_ignored_path, scan_directory_with_checks, ScanError};
+use soroban_guard_analyzer::{is_ignored_path, scan_directory_with_checks, scan_source_str, ScanError};
 use soroban_guard_checks::{default_checks, default_checks_with_config, Finding, Severity};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use toml;
 
 #[derive(Parser)]
 #[command(name = "soroban-guard")]
@@ -28,11 +29,12 @@ enum Commands {
     /// Scan a directory tree for vulnerability patterns
     #[command(group(
         ArgGroup::new("output_format")
-            .args(["json", "sarif", "markdown"])
+            .args(["json", "sarif", "markdown", "junit"])
             .multiple(false)
     ))]
     Scan {
-        /// Path to the contract crate or folder containing Rust sources (or use path from soroban-guard.toml)
+        /// Path to the contract crate or folder containing Rust sources, or `-` to read from stdin
+        /// (or use path from soroban-guard.toml)
         path: Option<PathBuf>,
         /// Print findings as JSON (`{ "summary": {...}, "findings": [...] }`)
         #[arg(long)]
@@ -43,7 +45,10 @@ enum Commands {
         /// Print findings as a Markdown table
         #[arg(long)]
         markdown: bool,
-        /// Write output to a file instead of stdout (applies to --json, --sarif, and --markdown)
+        /// Print findings as JUnit XML (one <testsuite> per file, one <testcase> per finding)
+        #[arg(long)]
+        junit: bool,
+        /// Write output to a file instead of stdout (applies to --json, --sarif, --markdown, and --junit)
         #[arg(long, requires = "output_format")]
         output: Option<PathBuf>,
         /// Suppress all output unless a finding meets the --fail-on threshold
@@ -76,6 +81,17 @@ enum Commands {
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
+        /// When path is `-` (stdin), use this name in findings and SARIF output (default: `<stdin>`)
+        #[arg(long, value_name = "NAME")]
+        stdin_filename: Option<String>,
+        /// Only scan workspace member crates that declare a dependency on `soroban-sdk`
+        /// (opt-in; ignores tooling crates, build scripts, and non-contract libraries)
+        #[arg(long)]
+        workspace_aware: bool,
+        /// Do not read `.gitignore` / `.ignore` files when walking the directory tree
+        /// (by default these files are honoured and matching paths are skipped)
+        #[arg(long)]
+        no_ignore: bool,
     },
     /// List the checks that are enabled by default
     ListChecks {
@@ -112,6 +128,7 @@ struct ScanOptions {
     json: bool,
     sarif: bool,
     markdown: bool,
+    junit: bool,
     output: Option<PathBuf>,
     quiet: bool,
     verbose: bool,
@@ -155,6 +172,8 @@ fn run_scan(
                 )
             } else if opts.markdown {
                 Some(Ok(render_markdown(&findings)))
+            } else if opts.junit {
+                Some(Ok(render_junit(&findings, files_scanned)))
             } else {
                 None
             };
@@ -302,6 +321,7 @@ fn main() {
             json,
             sarif,
             markdown,
+            junit,
             output,
             quiet,
             no_color,
@@ -313,10 +333,97 @@ fn main() {
             watch,
             no_clear,
             max_findings,
+            stdin_filename,
+            workspace_aware,
+            no_ignore,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
             }
+            // Check for stdin mode: `soroban-guard scan -`
+            let stdin_mode = path.as_deref() == Some(std::path::Path::new("-"));
+
+            if stdin_mode {
+                // Read source from stdin and scan it directly, bypassing the directory walk.
+                use std::io::Read;
+                let label = stdin_filename
+                    .as_deref()
+                    .unwrap_or("<stdin>")
+                    .to_string();
+                let mut source = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut source) {
+                    emit_setup_error(&format!("failed to read stdin: {e}"), json);
+                }
+                if source.is_empty() {
+                    eprintln!("{} {}", "error:".red().bold(), "read empty stdin (exit 2)");
+                    std::process::exit(2);
+                }
+                // Build the active checks the same way as the directory path.
+                let cfg = config::load(&PathBuf::from("."))
+                    .ok()
+                    .and_then(|(c, _)| c)
+                    .unwrap_or_default();
+                let effective = effective_fail_on(fail_on.as_deref(), cfg.scan.min_severity.as_deref());
+                let fail_threshold = match parse_fail_on(&effective) {
+                    Ok(sev) => sev,
+                    Err(bad) => emit_setup_error(
+                        &format!("unknown --fail-on value `{bad}`. Expected one of: high, medium, low"),
+                        json,
+                    ),
+                };
+                let mut all_disabled: Vec<String> = cfg.checks.disabled.clone();
+                for name in &disable_check {
+                    if !all_disabled.contains(name) {
+                        all_disabled.push(name.clone());
+                    }
+                }
+                let extra_sensitive = &cfg.checks.sensitive_names.extra;
+                let active_checks = default_checks_with_config(&all_disabled, extra_sensitive);
+                match scan_source_str(&source, &label, &active_checks) {
+                    Ok((findings, _check_panics)) => {
+                        let should_fail = findings.iter().any(|f| f.severity <= fail_threshold);
+                        let structured: Option<Result<String, String>> = if json {
+                            Some(json_payload(&findings, 1, 0).map_err(|e| e.to_string()))
+                        } else if sarif {
+                            Some(serde_json::to_string_pretty(&build_sarif(&findings, 0)).map_err(|e| e.to_string()))
+                        } else if markdown {
+                            Some(Ok(render_markdown(&findings)))
+                        } else if junit {
+                            Some(Ok(render_junit(&findings, 1)))
+                        } else {
+                            None
+                        };
+                        if let Some(result) = structured {
+                            match result {
+                                Ok(payload) => {
+                                    if let Some(ref out_path) = output {
+                                        if let Err(e) = write_output(out_path, &payload) {
+                                            eprintln!("{} {}", "error:".red().bold(), e);
+                                            std::process::exit(2);
+                                        }
+                                    } else if should_print_results(quiet, should_fail) {
+                                        println!("{payload}");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("{} {}", "error:".red().bold(), e);
+                                    std::process::exit(2);
+                                }
+                            }
+                        } else if should_print_results(quiet, should_fail) {
+                            let (display, truncated) = truncate(&findings, max_findings);
+                            print_pretty(&findings, display, 1, label.clone(), truncated);
+                        }
+                        if should_fail { std::process::exit(1); }
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("{} {}", "error:".red().bold(), e);
+                        std::process::exit(2);
+                    }
+                }
+            }
+
             // Resolve scan path: CLI argument takes precedence, then config, then error.
             // The current-directory config is only needed as a fallback for the scan
             // path itself, so it's only loaded when no path argument was given -
@@ -412,17 +519,132 @@ fn main() {
             let extra_sensitive = &cfg.checks.sensitive_names.extra;
             let active_checks = default_checks_with_config(&all_disabled, extra_sensitive);
 
+            // #807: honour .gitignore / .ignore unless --no-ignore is passed.
+            // Read patterns from .gitignore and .ignore at the scan root and add
+            // them to the exclude list so the walker skips vendored / generated paths.
+            let mut effective_exclude = exclude.clone();
+            if !no_ignore {
+                for ignore_name in &[".gitignore", ".ignore"] {
+                    let ignore_path = scan_path.join(ignore_name);
+                    if let Ok(contents) = fs::read_to_string(&ignore_path) {
+                        for line in contents.lines() {
+                            let trimmed = line.trim();
+                            // Skip blank lines and comments.
+                            if trimmed.is_empty() || trimmed.starts_with('#') {
+                                continue;
+                            }
+                            // Negated patterns (!) are not supported via globs; skip them.
+                            if trimmed.starts_with('!') {
+                                continue;
+                            }
+                            effective_exclude.push(trimmed.trim_start_matches('/').to_string());
+                        }
+                    }
+                }
+            }
+
+            // #806: --workspace-aware — only scan member crates that depend on soroban-sdk.
+            // Parse [workspace] members from the root Cargo.toml and filter by soroban-sdk
+            // dependency. This is an opt-in mode; without the flag the scanner behaves as before.
+            if workspace_aware {
+                let cargo_toml_path = scan_path.join("Cargo.toml");
+                match fs::read_to_string(&cargo_toml_path) {
+                    Err(e) => {
+                        emit_setup_error(
+                            &format!("--workspace-aware: cannot read {}: {e}", cargo_toml_path.display()),
+                            json,
+                        );
+                    }
+                    Ok(cargo_toml_src) => {
+                        match cargo_toml_src.parse::<toml::Value>() {
+                            Err(e) => {
+                                emit_setup_error(
+                                    &format!("--workspace-aware: cannot parse {}: {e}", cargo_toml_path.display()),
+                                    json,
+                                );
+                            }
+                            Ok(root_toml) => {
+                                // Collect member globs from [workspace.members].
+                                let members: Vec<String> = root_toml
+                                    .get("workspace")
+                                    .and_then(|w| w.get("members"))
+                                    .and_then(|m| m.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+
+                                // Expand member globs relative to the workspace root.
+                                let mut soroban_member_paths: Vec<PathBuf> = Vec::new();
+                                for member_glob in &members {
+                                    let pattern = scan_path.join(member_glob).to_string_lossy().to_string();
+                                    if let Ok(entries) = glob::glob(&pattern) {
+                                        for entry in entries.flatten() {
+                                            if entry.is_dir() {
+                                                let member_cargo = entry.join("Cargo.toml");
+                                                if let Ok(member_src) = fs::read_to_string(&member_cargo) {
+                                                    if member_src.contains("soroban-sdk") {
+                                                        soroban_member_paths.push(entry);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if soroban_member_paths.is_empty() {
+                                    if !quiet {
+                                        eprintln!(
+                                            "note: --workspace-aware found no member crates depending on soroban-sdk; scanning nothing"
+                                        );
+                                    }
+                                    std::process::exit(0);
+                                }
+
+                                // Build exclude patterns for any member directory NOT in the soroban set.
+                                for member_glob in &members {
+                                    if let Ok(entries) = glob::glob(
+                                        &scan_path.join(member_glob).to_string_lossy().to_string()
+                                    ) {
+                                        for entry in entries.flatten() {
+                                            if entry.is_dir()
+                                                && !soroban_member_paths.contains(&entry)
+                                            {
+                                                if let Ok(rel) = entry.strip_prefix(&scan_path) {
+                                                    let pattern = format!("{}/**", rel.display());
+                                                    effective_exclude.push(pattern);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if verbose {
+                                    eprintln!(
+                                        "note: --workspace-aware scanning {} soroban-sdk member crate(s)",
+                                        soroban_member_paths.len()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Build a ScanOptions struct to pass around cleanly.
             let opts = ScanOptions {
                 path: scan_path.clone(),
                 json,
                 sarif,
                 markdown,
+                junit,
                 output: output.clone(),
                 quiet,
                 verbose,
                 fail_threshold,
-                exclude: exclude.clone(),
+                exclude: effective_exclude,
                 includes: include.clone(),
                 max_findings,
             };
@@ -1133,6 +1355,90 @@ fn render_markdown(findings: &[Finding]) -> String {
         low
     ));
     out
+}
+
+/// Render findings as JUnit XML for CI systems that surface test reports
+/// (Jenkins, GitLab CI, CircleCI, Azure DevOps, Buildkite, …).
+///
+/// Structure:
+/// - One `<testsuite>` per scanned file (including files with no findings).
+/// - One `<testcase name="{check}:{function}">` per finding with a
+///   `<failure type="{severity}" message="…"/>` child.
+/// - Clean files produce a single passing `<testcase name="clean"/>`.
+///
+/// `files_scanned` drives the top-level `tests` attribute so the summary
+/// reflects the full scan even when all findings are compressed into suites.
+fn render_junit(findings: &[Finding], files_scanned: usize) -> String {
+    use std::collections::BTreeMap;
+
+    // Group findings by file, preserving stable order.
+    let mut by_file: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
+    for f in findings {
+        by_file.entry(f.file_path.as_str()).or_default().push(f);
+    }
+
+    let total_failures = findings.len();
+    let total_tests = total_failures.max(files_scanned);
+
+    let mut xml = String::new();
+    xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    xml.push('\n');
+    xml.push_str(&format!(
+        r#"<testsuites name="soroban-guard" tests="{total_tests}" failures="{total_failures}">"#
+    ));
+    xml.push('\n');
+
+    for (file, file_findings) in &by_file {
+        let suite_failures = file_findings.len();
+        let suite_tests = suite_failures.max(1);
+        xml.push_str(&format!(
+            r#"  <testsuite name="{}" tests="{suite_tests}" failures="{suite_failures}">"#,
+            xml_escape(file)
+        ));
+        xml.push('\n');
+        for f in file_findings {
+            let case_name = format!("{}:{}", f.check_name, f.function_name);
+            let sev = match f.severity {
+                Severity::High => "HIGH",
+                Severity::Medium => "MEDIUM",
+                Severity::Low => "LOW",
+            };
+            xml.push_str(&format!(
+                r#"    <testcase name="{}" classname="{}">"#,
+                xml_escape(&case_name),
+                xml_escape(file)
+            ));
+            xml.push('\n');
+            let msg = if let Some(ref s) = f.suggestion {
+                format!("{} — {}", f.description, s)
+            } else {
+                f.description.clone()
+            };
+            xml.push_str(&format!(
+                r#"      <failure type="{sev}" message="{}"/>"#,
+                xml_escape(&msg)
+            ));
+            xml.push('\n');
+            xml.push_str("    </testcase>\n");
+        }
+        if file_findings.is_empty() {
+            xml.push_str(r#"    <testcase name="clean"/>"#);
+            xml.push('\n');
+        }
+        xml.push_str("  </testsuite>\n");
+    }
+
+    xml.push_str("</testsuites>\n");
+    xml
+}
+
+/// Escape XML special characters for attribute values and text content.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&apos;")
 }
 
 /// Escape `|` and newlines so interpolated values cannot break the Markdown table.

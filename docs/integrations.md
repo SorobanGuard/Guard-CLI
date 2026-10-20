@@ -194,6 +194,53 @@ args = ["build", "--target", "wasm32-unknown-unknown", "--release"]
 
 ---
 
+## Scanning from stdin (editor and pre-commit integrations)
+
+Editors, language-server wrappers and some pre-commit setups pipe the unsaved buffer
+to a tool. `soroban-guard scan -` reads a single Rust source from stdin so these
+integrations do not need to write temp files.
+
+```bash
+# Pipe the current buffer from the editor:
+cat src/contract.rs | soroban-guard scan - --stdin-filename src/contract.rs --json
+
+# Or a pre-commit hook that pipes the staged version of a file:
+git show :src/contract.rs | soroban-guard scan - --stdin-filename src/contract.rs
+```
+
+### `--stdin-filename <NAME>`
+
+Sets the label used in findings, SARIF output, and suppression handling.
+Defaults to `<stdin>` when omitted.
+
+All output formats (`--json`, `--sarif`, `--markdown`, `--junit`) and `--fail-on` work
+exactly as they do for a normal single-file scan.
+
+Reading **empty** stdin or content that cannot be parsed as valid UTF-8 exits with
+code 2 (scan error).
+
+### VS Code integration
+
+Add a task that pipes the active file to `soroban-guard scan -` using the
+`${file}` variable and the built-in `processExecution` type:
+
+```jsonc
+// .vscode/tasks.json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Soroban Guard: Scan current file (stdin)",
+      "type": "shell",
+      "command": "cat ${file} | soroban-guard scan - --stdin-filename ${relativeFile} --json",
+      "group": "build"
+    }
+  ]
+}
+```
+
+---
+
 ## Exit codes quick reference
 
 | Code | Meaning | Recommended action |
