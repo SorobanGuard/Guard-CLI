@@ -349,6 +349,14 @@ See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--jso
 
 ---
 
+## Support and Security
+
+For help, troubleshooting, or general questions, see [.github/SUPPORT.md](.github/SUPPORT.md).
+For reporting security vulnerabilities in Soroban Guard, refer to our [Security Policy](SECURITY.md).
+
+---
+
 ## License
 
 MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+
