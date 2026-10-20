@@ -52,16 +52,80 @@ Soroban contracts are Rust crates compiled to WASM and deployed to the Stellar n
 
 ## Requirements
 
-- Rust 1.74+ (2021 edition)
-- No Stellar SDK or network connection required — analysis is purely static
+- **Minimum Supported Rust Version (MSRV)**: Rust 1.74+ (2021 edition)
+- No Stellar SDK or active network connection required — analysis is purely static and runs offline
 
-## Build
+---
+
+## Installation
+
+### Via `cargo install`
+
+Install directly from crates.io once published:
 
 ```bash
+cargo install soroban-guard-cli
+```
+
+Or install locally from a cloned checkout:
+
+```bash
+git clone https://github.com/SorobanGuard/Guard-CLI.git
+cd Guard-CLI
+cargo install --path crates/cli
+```
+
+### Build from Source
+
+```bash
+git clone https://github.com/SorobanGuard/Guard-CLI.git
+cd Guard-CLI
 cargo build --release
 ```
 
-The binary is `target/release/soroban-guard` (package `soroban-guard-cli`).
+The compiled binary will be located at `target/release/soroban-guard`. You can copy it to your `PATH`:
+
+```bash
+sudo cp target/release/soroban-guard /usr/local/bin/
+```
+
+### Prebuilt Release Binaries
+
+Pre-compiled release archives for Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel) are available on the [GitHub Releases](https://github.com/SorobanGuard/Guard-CLI/releases) page. Download the appropriate archive for your architecture, unpack it, and place `soroban-guard` in your `PATH`.
+
+---
+
+## Shell Completions
+
+Soroban Guard can generate native command completions for Bash, Zsh, and Fish:
+
+### Bash
+
+```bash
+# User-level installation
+mkdir -p ~/.local/share/bash-completion/completions
+soroban-guard completions bash > ~/.local/share/bash-completion/completions/soroban-guard
+
+# Or system-wide (requires sudo)
+soroban-guard completions bash | sudo tee /etc/bash_completion.d/soroban-guard > /dev/null
+```
+
+### Zsh
+
+```bash
+# Add to your custom zsh functions directory or first fpath entry
+soroban-guard completions zsh > "${fpath[1]}/_soroban-guard"
+
+# Ensure compinit is loaded in your ~/.zshrc:
+# autoload -Uz compinit && compinit
+```
+
+### Fish
+
+```bash
+mkdir -p ~/.config/fish/completions
+soroban-guard completions fish > ~/.config/fish/completions/soroban-guard.fish
+```
 
 ---
 
