@@ -126,6 +126,26 @@ pub fn bootstrap(env: Env) {
 
 Function-level suppressions are scoped to the specific `#[contractimpl]` block the annotation sits above — if two different contract types in the same file both define a same-named method (e.g. two `set_owner`), suppressing one does not suppress the other.
 
+### File-level suppression with `allow-file`
+
+When an entire file contains a pattern that is intentional and reviewed — for example a proxy contract that deliberately reads a callee address from storage — suppress one or more checks for the whole file with an `allow-file` annotation placed at the top of the file (before any `use` statements or `mod` declarations):
+
+```rust
+// soroban-guard: allow-file(delegate-call-risk)
+
+use soroban_sdk::{contract, contractimpl, Env, Address};
+```
+
+Multiple checks can be silenced in a single annotation using a comma-separated list:
+
+```rust
+// soroban-guard: allow-file(delegate-call-risk, missing-event-emission)
+```
+
+`allow-file` suppresses every finding of the listed checks reported anywhere in that file. It does **not** affect other files in the scan. Place it as close to the top of the file as possible so reviewers see it immediately.
+
+Use file-level suppression sparingly — it silences an entire category of findings for the file. Prefer line- or function-level `allow(...)` annotations when only one function or call site is a false positive.
+
 Use suppressions for reviewed false positives only. Prefer fixing the code when the finding identifies a real deployability or security problem.
 
 ---

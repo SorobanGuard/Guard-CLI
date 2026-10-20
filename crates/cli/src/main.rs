@@ -4,7 +4,7 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use soroban_guard_analyzer::{is_ignored_path, scan_directory_with_checks, ScanError};
+use soroban_guard_analyzer::{is_ignored_path, scan_directory_with_checks, ScanError, UnusedSuppression};
 use soroban_guard_checks::{default_checks, default_checks_with_config, Finding, Severity};
 use std::collections::HashSet;
 use std::fs;
@@ -28,7 +28,7 @@ enum Commands {
     /// Scan a directory tree for vulnerability patterns
     #[command(group(
         ArgGroup::new("output_format")
-            .args(["json", "sarif", "markdown"])
+            .args(["json", "sarif", "markdown", "gitlab", "html"])
             .multiple(false)
     ))]
     Scan {
@@ -43,7 +43,13 @@ enum Commands {
         /// Print findings as a Markdown table
         #[arg(long)]
         markdown: bool,
-        /// Write output to a file instead of stdout (applies to --json, --sarif, and --markdown)
+        /// Print findings as a GitLab Code Quality JSON report
+        #[arg(long)]
+        gitlab: bool,
+        /// Print findings as a self-contained HTML report (no external resources)
+        #[arg(long)]
+        html: bool,
+        /// Write output to a file instead of stdout (applies to --json, --sarif, --markdown, --gitlab, and --html)
         #[arg(long, requires = "output_format")]
         output: Option<PathBuf>,
         /// Suppress all output unless a finding meets the --fail-on threshold
@@ -76,6 +82,14 @@ enum Commands {
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
+        /// Print a warning for each `// soroban-guard: allow(...)` annotation that
+        /// did not suppress any finding during this scan
+        #[arg(long)]
+        warn_unused_suppressions: bool,
+        /// Exit with code 1 when any unused `// soroban-guard: allow(...)` annotations
+        /// are found (implies --warn-unused-suppressions)
+        #[arg(long)]
+        deny_unused_suppressions: bool,
     },
     /// List the checks that are enabled by default
     ListChecks {
@@ -112,6 +126,8 @@ struct ScanOptions {
     json: bool,
     sarif: bool,
     markdown: bool,
+    gitlab: bool,
+    html: bool,
     output: Option<PathBuf>,
     quiet: bool,
     verbose: bool,
@@ -119,6 +135,8 @@ struct ScanOptions {
     exclude: Vec<String>,
     includes: Vec<String>,
     max_findings: usize,
+    warn_unused_suppressions: bool,
+    deny_unused_suppressions: bool,
 }
 
 /// Whether scan results should be printed. `--quiet` suppresses output only while the
@@ -137,12 +155,16 @@ fn run_scan(
 ) -> i32 {
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
         Ok((results, files_scanned, files_skipped, _check_panics)) => {
+            let unused_suppressions: Vec<UnusedSuppression> = results
+                .iter()
+                .flat_map(|r| r.unused_suppressions.clone())
+                .collect();
             let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
             let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
 
             // Produce the serialized payload for the selected structured format,
             // then emit it via a single shared write-or-print path (Issue #430).
-            // All three formats use println! (trailing newline) as the convention.
+            // All five formats use println! (trailing newline) as the convention.
             let structured_payload: Option<Result<String, String>> = if opts.json {
                 Some(
                     json_payload(&findings, files_scanned, files_skipped)
@@ -155,6 +177,13 @@ fn run_scan(
                 )
             } else if opts.markdown {
                 Some(Ok(render_markdown(&findings)))
+            } else if opts.gitlab {
+                Some(
+                    serde_json::to_string_pretty(&build_gitlab(&findings))
+                        .map_err(|e| e.to_string()),
+                )
+            } else if opts.html {
+                Some(Ok(render_html(&findings, files_scanned)))
             } else {
                 None
             };
@@ -198,7 +227,23 @@ fn run_scan(
                 }
             }
 
+            // Unused-suppression reporting (--warn-unused-suppressions / --deny-unused-suppressions).
+            let has_unused = !unused_suppressions.is_empty();
+            if (opts.warn_unused_suppressions || opts.deny_unused_suppressions) && has_unused {
+                for u in &unused_suppressions {
+                    eprintln!(
+                        "{} {}:{}: unused suppression `{}`",
+                        "warning:".yellow().bold(),
+                        u.file_path,
+                        u.annotation_line,
+                        u.check_name
+                    );
+                }
+            }
+
             if should_fail {
+                1
+            } else if opts.deny_unused_suppressions && has_unused {
                 1
             } else {
                 0
@@ -302,6 +347,8 @@ fn main() {
             json,
             sarif,
             markdown,
+            gitlab,
+            html,
             output,
             quiet,
             no_color,
@@ -313,6 +360,8 @@ fn main() {
             watch,
             no_clear,
             max_findings,
+            warn_unused_suppressions,
+            deny_unused_suppressions,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
@@ -418,6 +467,8 @@ fn main() {
                 json,
                 sarif,
                 markdown,
+                gitlab,
+                html,
                 output: output.clone(),
                 quiet,
                 verbose,
@@ -425,6 +476,8 @@ fn main() {
                 exclude: exclude.clone(),
                 includes: include.clone(),
                 max_findings,
+                warn_unused_suppressions,
+                deny_unused_suppressions,
             };
 
             // Run the initial scan.
@@ -527,7 +580,7 @@ fn main() {
                             // stdout stays clean for machine consumers.
                             let stdout_is_tty = std::io::stdout().is_terminal();
                             let should_clear =
-                                !no_clear && !json && !sarif && output.is_none() && stdout_is_tty;
+                                !no_clear && !json && !sarif && !gitlab && !html && output.is_none() && stdout_is_tty;
                             if should_clear {
                                 eprint!("\x1B[2J\x1B[1;1H");
                                 let _ = io::stderr().flush();
@@ -1133,6 +1186,169 @@ fn render_markdown(findings: &[Finding]) -> String {
         low
     ));
     out
+}
+
+/// Build a GitLab Code Quality JSON report.
+///
+/// Produces a JSON array whose items each conform to the GitLab
+/// `codequality` artifact format so the merge-request "Code Quality" widget
+/// can display findings. Severity mapping: High→critical, Medium→major,
+/// Low→minor. The `fingerprint` is a stable SHA-256 hash of the check name,
+/// file path, function name and line number so GitLab can track issues
+/// between pipeline runs.
+fn build_gitlab(findings: &[Finding]) -> serde_json::Value {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let items: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            // Build a stable fingerprint: hash the key fields deterministically.
+            let mut h = DefaultHasher::new();
+            f.check_name.hash(&mut h);
+            f.file_path.hash(&mut h);
+            f.function_name.hash(&mut h);
+            f.line.hash(&mut h);
+            let fingerprint = format!("{:016x}", h.finish());
+
+            let severity = match f.severity {
+                Severity::High => "critical",
+                Severity::Medium => "major",
+                Severity::Low => "minor",
+            };
+            serde_json::json!({
+                "description": f.description,
+                "check_name": f.check_name,
+                "fingerprint": fingerprint,
+                "severity": severity,
+                "location": {
+                    "path": f.file_path,
+                    "lines": { "begin": f.line }
+                }
+            })
+        })
+        .collect();
+
+    serde_json::Value::Array(items)
+}
+
+/// Build a self-contained HTML report.
+///
+/// All CSS is inline; no JavaScript or external resources are required.
+/// All dynamic text is HTML-escaped so that `<script>` in function names
+/// or descriptions cannot execute.
+fn render_html(findings: &[Finding], files_scanned: usize) -> String {
+    fn escape_html(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    }
+
+    let (high, medium, low) = severity_counts(findings);
+    let total = findings.len();
+
+    let mut body = String::new();
+
+    // Summary banner.
+    body.push_str(&format!(
+        "<div class=\"summary\"><span class=\"cnt h\">{high} High</span> \
+         <span class=\"cnt m\">{medium} Medium</span> \
+         <span class=\"cnt l\">{low} Low</span> \
+         &mdash; {total} finding(s) across {files_scanned} file(s)</div>\n"
+    ));
+
+    if findings.is_empty() {
+        body.push_str("<p class=\"clean\">No issues found. ✓</p>\n");
+    } else {
+        // Group by file.
+        let mut by_file: std::collections::BTreeMap<&str, Vec<&Finding>> =
+            std::collections::BTreeMap::new();
+        for f in findings {
+            by_file.entry(f.file_path.as_str()).or_default().push(f);
+        }
+        for (file, file_findings) in &by_file {
+            body.push_str(&format!(
+                "<details open><summary class=\"file\">{}</summary>\n<table>\
+                 <thead><tr><th>Line</th><th>Sev</th><th>Check</th>\
+                 <th>Function</th><th>Description</th><th>Suggestion</th></tr></thead><tbody>\n",
+                escape_html(file)
+            ));
+            for f in file_findings {
+                let sev_class = match f.severity {
+                    Severity::High => "sev-h",
+                    Severity::Medium => "sev-m",
+                    Severity::Low => "sev-l",
+                };
+                let sev_label = match f.severity {
+                    Severity::High => "High",
+                    Severity::Medium => "Medium",
+                    Severity::Low => "Low",
+                };
+                let check_cell = if let Some(ref url) = f.rule_url {
+                    format!(
+                        "<a href=\"{}\">{}</a>",
+                        escape_html(url),
+                        escape_html(&f.check_name)
+                    )
+                } else {
+                    escape_html(&f.check_name)
+                };
+                let suggestion = f
+                    .suggestion
+                    .as_deref()
+                    .map(escape_html)
+                    .unwrap_or_default();
+                body.push_str(&format!(
+                    "<tr><td>{}</td><td class=\"{}\">{}</td><td>{}</td>\
+                     <td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    f.line,
+                    sev_class,
+                    sev_label,
+                    check_cell,
+                    escape_html(&f.function_name),
+                    escape_html(&f.description),
+                    suggestion
+                ));
+            }
+            body.push_str("</tbody></table></details>\n");
+        }
+    }
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soroban Guard Report</title>
+<style>
+body{{font-family:system-ui,sans-serif;margin:1rem 2rem;background:#f9fafb;color:#111}}
+h1{{font-size:1.4rem;margin-bottom:0.5rem}}
+.summary{{margin:0.5rem 0 1rem;font-size:1rem}}
+.cnt{{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:600;margin-right:6px}}
+.cnt.h{{background:#fee2e2;color:#991b1b}}
+.cnt.m{{background:#fef3c7;color:#92400e}}
+.cnt.l{{background:#dbeafe;color:#1e40af}}
+.clean{{color:#166534;font-weight:600}}
+.file{{font-family:monospace;font-size:0.95rem;cursor:pointer;padding:4px 0}}
+details{{margin-bottom:1rem;border:1px solid #e5e7eb;border-radius:6px;background:#fff;padding:0.5rem 1rem}}
+table{{border-collapse:collapse;width:100%;font-size:0.875rem;margin-top:0.5rem}}
+th{{background:#f3f4f6;text-align:left;padding:6px 8px;border-bottom:2px solid #e5e7eb}}
+td{{padding:5px 8px;border-bottom:1px solid #f3f4f6;vertical-align:top}}
+.sev-h{{color:#991b1b;font-weight:700}}
+.sev-m{{color:#92400e;font-weight:600}}
+.sev-l{{color:#1e40af}}
+a{{color:#1d4ed8}}
+</style>
+</head>
+<body>
+<h1>Soroban Guard Report</h1>
+{body}
+</body>
+</html>"#
+    )
 }
 
 /// Escape `|` and newlines so interpolated values cannot break the Markdown table.
