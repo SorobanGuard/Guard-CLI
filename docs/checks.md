@@ -831,3 +831,18 @@ reusing one salt lets a factory deploy only once.
 **Limitations**
 
 Only literal salts are flagged. A salt computed at runtime is not checked.
+
+## `ttl-threshold-greater-than-extend-to` (Medium)
+
+**What it detects**
+
+An `extend_ttl` call whose threshold is greater than its extend-to value, for
+example `extend_ttl(&key, 1000, 100)`. The call can only extend an entry that is
+already past the point it would be extended to, so the arguments are usually
+swapped. Keyed calls take `(&key, threshold, extend_to)`. Instance calls take
+`(threshold, extend_to)`.
+
+**Limitations**
+
+Only integer literals and file-level `const` integers are compared. Zero values are
+covered by `extend-ttl-no-op`.
