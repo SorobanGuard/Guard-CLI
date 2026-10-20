@@ -818,3 +818,17 @@ decides which storage key or event topic is used. Literal and `const` symbols ar
 Parameters are matched by name within the same function. Values passed through a local
 built from a parameter are matched only when the local keeps the parameter's name. Guard
 clauses that validate the input are not recognised, so guarded uses are still flagged.
+
+## `extend-ttl-no-op` (Low)
+
+**What it detects**
+
+An `extend_ttl` call whose threshold or extend-to argument is the literal `0`. Such a call
+never extends the entry, but it still satisfies `missing-ttl-extension`, which only checks that
+the call exists. Keyed calls take `(&key, threshold, extend_to)`. Instance calls take
+`(threshold, extend_to)`.
+
+**Limitations**
+
+Only literal zeros are flagged. Zero values held in constants or variables are not.
+Inverted non-zero arguments are covered by `ttl-threshold-greater-than-extend-to`.
