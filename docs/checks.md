@@ -832,3 +832,17 @@ the call exists. Keyed calls take `(&key, threshold, extend_to)`. Instance calls
 
 Only literal zeros are flagged. Zero values held in constants or variables are not.
 Inverted non-zero arguments are covered by `ttl-threshold-greater-than-extend-to`.
+
+## `admin-unrestricted-withdraw` (Low)
+
+**What it detects**
+
+A function whose body mentions an admin and calls `transfer` with an amount read from the
+contract's own balance (`balance(&env.current_contract_address())`), directly or through one
+local. Such a function can empty the contract with one privileged call. This is reported at
+Low severity so a reviewer can decide whether a timelock or a per-call limit is needed.
+
+**Limitations**
+
+"Admin-gated" is a name heuristic: the function body must mention `admin`. Balances read
+through helper functions are not tracked.
