@@ -607,6 +607,66 @@ fn run_checks_for_file(
     Ok((findings, check_panics))
 }
 
+/// Scan a Rust source string directly (e.g. read from stdin) with the given checks.
+///
+/// `label` is the file path shown in findings; pass the value of `--stdin-filename`
+/// (default `<stdin>`). An empty `source` returns immediately with no findings.
+/// Invalid UTF-8 must be screened by the caller before this function is reached.
+///
+/// Returns `(findings, check_panics)`.
+pub fn scan_source_str(
+    source: &str,
+    label: &str,
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<Finding>, Vec<ScanError>), ScanError> {
+    if source.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let syn_file = syn::parse_file(source).map_err(|e| ScanError::Parse {
+        path: PathBuf::from(label),
+        message: e.to_string(),
+    })?;
+    let fn_spans = build_fn_spans(&syn_file);
+    let suppressions = parse_suppressions(source, &fn_spans);
+
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut check_panics: Vec<ScanError> = Vec::new();
+
+    for check in checks {
+        let check_name = check.name().to_string();
+        match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, source))) {
+            Ok(mut hits) => {
+                for f in &mut hits {
+                    f.file_path = label.to_string();
+                }
+                findings.extend(
+                    hits.into_iter()
+                        .filter(|f| !is_suppressed(f, &suppressions, &fn_spans)),
+                );
+            }
+            Err(payload) => {
+                let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    msg.to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "panic payload was not a string".to_string()
+                };
+                check_panics.push(ScanError::CheckPanic {
+                    check: check_name,
+                    path: PathBuf::from(label),
+                    message,
+                });
+            }
+        }
+    }
+
+    findings.sort_by_key(|f| f.line);
+    suppress_redundant_division_finding(&mut findings);
+    dedup_findings(&mut findings);
+    Ok((findings, check_panics))
+}
+
 /// Findings for a single source file.
 #[derive(Debug, Clone)]
 pub struct FileScanResult {
