@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use soroban_guard_checks::util::contractimpl_functions_with_type_excluding_test;
 use soroban_guard_checks::{default_checks, Check, Finding};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -166,12 +166,25 @@ impl CheckPanicReport {
     }
 }
 
+/// An `allow(...)` annotation that never suppressed any finding during the scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnusedSuppression {
+    /// The source file path (relative to the scan root).
+    pub file_path: String,
+    /// Line of the `// soroban-guard: allow(...)` comment itself.
+    pub annotation_line: usize,
+    /// The check name that was listed in the annotation.
+    pub check_name: String,
+}
+
 #[derive(Default)]
 struct Suppressions {
-    line_checks: HashSet<(usize, String)>,
-    /// Keyed on `(impl_type, function_name, check_name)` so a suppression above one
-    /// `#[contractimpl]` method doesn't also silence a same-named method on a different type.
-    function_checks: HashSet<(String, String, String)>,
+    /// (target_line, check_name) → annotation_line
+    line_checks: HashMap<(usize, String), usize>,
+    /// (impl_type, function_name, check_name) → annotation_line
+    function_checks: HashMap<(String, String, String), usize>,
+    /// check_name → annotation_line  (file-wide, from `allow-file(...)`)
+    file_checks: HashMap<String, usize>,
 }
 
 fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
@@ -214,6 +227,36 @@ fn parse_allow_checks(line: &str) -> Option<Vec<String>> {
     (!checks.is_empty()).then_some(checks)
 }
 
+/// Parses `// soroban-guard: allow-file(a, b)` for file-wide suppressions.
+/// Same whitespace flexibility as [`parse_allow_checks`].
+fn parse_allow_file_checks(line: &str) -> Option<Vec<String>> {
+    let rest = line.trim_start().strip_prefix("//")?.trim_start();
+    let rest = rest.strip_prefix("soroban-guard")?.trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix("allow-file(")?;
+    let (inside, _) = rest.split_once(')')?;
+    let checks: Vec<String> = inside
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    (!checks.is_empty()).then_some(checks)
+}
+
+/// Returns the 0-based index of the first line that belongs to a Rust item
+/// (not blank, not a `//` comment, not a `#[` attribute). Everything before
+/// this index is considered the "file header" where `allow-file(...)` is valid.
+fn first_item_line(lines: &[&str]) -> usize {
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if !t.is_empty() && !t.starts_with("//") && !t.starts_with("#[") && !t.starts_with("#![") {
+            return i;
+        }
+    }
+    lines.len()
+}
+
 /// Index of the first line at or after `from` that carries actual code, skipping the
 /// lines rustfmt and normal documentation routinely insert between a suppression
 /// comment and the item it applies to: blank lines, `//` / `///` / `//!` comments, and
@@ -228,8 +271,27 @@ fn next_substantive_line(lines: &[&str], from: usize) -> Option<usize> {
 fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
     let lines: Vec<&str> = source.lines().collect();
     let mut suppressions = Suppressions::default();
+    let header_boundary = first_item_line(&lines);
 
     for (idx, line) in lines.iter().enumerate() {
+        let annotation_line = idx + 1; // 1-based
+
+        // Handle file-wide allow-file annotations.
+        if let Some(checks) = parse_allow_file_checks(line) {
+            if idx < header_boundary {
+                for check in checks {
+                    suppressions.file_checks.entry(check).or_insert(annotation_line);
+                }
+            } else {
+                eprintln!(
+                    "warning: `// soroban-guard: allow-file(...)` on line {} is after the \
+                     first Rust item and will be ignored; move it to the file header",
+                    annotation_line
+                );
+            }
+            continue;
+        }
+
         let Some(checks) = parse_allow_checks(line) else {
             continue;
         };
@@ -242,15 +304,15 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
         // matches comments, string literals, and type positions.
         if let Some(span) = fn_spans.iter().find(|s| s.start_line == target_line_number) {
             for check in checks {
-                suppressions.function_checks.insert((
-                    span.impl_type.clone(),
-                    span.function_name.clone(),
-                    check,
-                ));
+                suppressions.function_checks
+                    .entry((span.impl_type.clone(), span.function_name.clone(), check))
+                    .or_insert(annotation_line);
             }
         } else {
             for check in checks {
-                suppressions.line_checks.insert((target_line_number, check));
+                suppressions.line_checks
+                    .entry((target_line_number, check))
+                    .or_insert(annotation_line);
             }
         }
     }
@@ -259,9 +321,14 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
 }
 
 fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnSpan]) -> bool {
+    // File-level suppression.
+    if suppressions.file_checks.contains_key(&finding.check_name) {
+        return true;
+    }
+
     if suppressions
         .line_checks
-        .contains(&(finding.line, finding.check_name.clone()))
+        .contains_key(&(finding.line, finding.check_name.clone()))
     {
         return true;
     }
@@ -296,11 +363,74 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
         finding.function_name.as_str()
     };
 
-    suppressions.function_checks.contains(&(
+    suppressions.function_checks.contains_key(&(
         impl_type,
         lookup_fn_name.to_string(),
         finding.check_name.clone(),
     ))
+}
+
+/// Compute which suppressions in `suppressions` were never matched by any finding in
+/// `all_findings` (the full, unfiltered set). Returns them as a list of
+/// [`UnusedSuppression`]s for the given `file_path`.
+fn find_unused_suppressions(
+    all_findings: &[Finding],
+    suppressions: &Suppressions,
+    fn_spans: &[FnSpan],
+    file_path: &str,
+) -> Vec<UnusedSuppression> {
+    let mut unused = Vec::new();
+
+    // File-level suppressions: check if any finding has this check_name.
+    for (check_name, &annotation_line) in &suppressions.file_checks {
+        let used = all_findings.iter().any(|f| &f.check_name == check_name);
+        if !used {
+            unused.push(UnusedSuppression {
+                file_path: file_path.to_string(),
+                annotation_line,
+                check_name: check_name.clone(),
+            });
+        }
+    }
+
+    // Line-level suppressions: check if any finding sits on the target line with that check.
+    for ((target_line, check_name), &annotation_line) in &suppressions.line_checks {
+        let used = all_findings
+            .iter()
+            .any(|f| f.line == *target_line && &f.check_name == check_name);
+        if !used {
+            unused.push(UnusedSuppression {
+                file_path: file_path.to_string(),
+                annotation_line,
+                check_name: check_name.clone(),
+            });
+        }
+    }
+
+    // Function-level suppressions: check if any finding is in that function with that check.
+    for ((impl_type, fn_name, check_name), &annotation_line) in &suppressions.function_checks {
+        let fn_range = fn_spans
+            .iter()
+            .find(|s| &s.impl_type == impl_type && &s.function_name == fn_name)
+            .map(|s| (s.start_line, s.end_line));
+        let used = if let Some((start, end)) = fn_range {
+            all_findings.iter().any(|f| {
+                &f.check_name == check_name && f.line >= start && f.line <= end
+            })
+        } else {
+            false
+        };
+        if !used {
+            unused.push(UnusedSuppression {
+                file_path: file_path.to_string(),
+                annotation_line,
+                check_name: check_name.clone(),
+            });
+        }
+    }
+
+    unused.sort_by_key(|u| u.annotation_line);
+    unused
 }
 
 /// The path relative to `root` shown in findings: the bare file name when `root`
@@ -557,7 +687,7 @@ fn run_checks_for_file(
     path: &Path,
     root: &Path,
     checks: &[Box<dyn Check + Send + Sync>],
-) -> Result<(Vec<Finding>, Vec<ScanError>), ScanError> {
+) -> Result<(Vec<Finding>, Vec<UnusedSuppression>, Vec<ScanError>), ScanError> {
     let content = std::fs::read_to_string(path).map_err(|e| ScanError::IoRead {
         path: path.to_path_buf(),
         source: e,
@@ -570,7 +700,7 @@ fn run_checks_for_file(
     let fn_spans = build_fn_spans(&syn_file);
     let suppressions = parse_suppressions(&content, &fn_spans);
 
-    let mut findings: Vec<Finding> = Vec::new();
+    let mut all_raw_findings: Vec<Finding> = Vec::new();
     let mut check_panics: Vec<ScanError> = Vec::new();
     for check in checks {
         let check_name = check.name().to_string();
@@ -579,10 +709,7 @@ fn run_checks_for_file(
                 for finding in &mut hits {
                     finding.file_path.clone_from(&file_label);
                 }
-                findings.extend(
-                    hits.into_iter()
-                        .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans)),
-                );
+                all_raw_findings.extend(hits);
             }
             Err(payload) => {
                 let message = if let Some(msg) = payload.downcast_ref::<&str>() {
@@ -601,10 +728,18 @@ fn run_checks_for_file(
         }
     }
 
+    // Compute unused suppressions before filtering findings.
+    let unused = find_unused_suppressions(&all_raw_findings, &suppressions, &fn_spans, &file_label);
+
+    let mut findings: Vec<Finding> = all_raw_findings
+        .into_iter()
+        .filter(|f| !is_suppressed(f, &suppressions, &fn_spans))
+        .collect();
+
     findings.sort_by_key(|f| f.line);
     suppress_redundant_division_finding(&mut findings);
     dedup_findings(&mut findings);
-    Ok((findings, check_panics))
+    Ok((findings, unused, check_panics))
 }
 
 /// Findings for a single source file.
@@ -612,6 +747,10 @@ fn run_checks_for_file(
 pub struct FileScanResult {
     pub file_path: String,
     pub findings: Vec<Finding>,
+    /// Suppression annotations that never silenced any finding during this scan.
+    /// Only populated when the caller requested unused-suppression tracking
+    /// (always populated by the analyzer; filtering is done by the CLI).
+    pub unused_suppressions: Vec<UnusedSuppression>,
 }
 
 /// Recursively scan `.rs` files under `root` and aggregate findings from every default check.
@@ -639,16 +778,20 @@ pub fn scan_directory(
     let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
     let files_scanned = paths.len();
 
-    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = collect_scan_results(
-        paths
-            .par_iter()
-            .map(|path| run_checks_for_file(path, &root, &checks))
-            .collect(),
-    )?
-    .into_iter()
-    .unzip();
+    let (collected, panics): (Vec<(Vec<Finding>, Vec<UnusedSuppression>)>, Vec<Vec<ScanError>>) =
+        collect_scan_results(
+            paths
+                .par_iter()
+                .map(|path| {
+                    let (findings, unused, panics) = run_checks_for_file(path, &root, &checks)?;
+                    Ok(((findings, unused), panics))
+                })
+                .collect(),
+        )?
+        .into_iter()
+        .unzip();
 
-    let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
+    let mut findings: Vec<Finding> = collected.iter().flat_map(|(f, _)| f.clone()).collect();
     let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
 
     findings.sort_by(|a, b| {
@@ -679,12 +822,13 @@ pub fn scan_directory_with_checks(
     let per_file = paths
         .par_iter()
         .map(|path| {
-            let (findings, check_panics) = run_checks_for_file(path, &root, checks)?;
+            let (findings, unused, check_panics) = run_checks_for_file(path, &root, checks)?;
             let file_label = file_label(path, &root);
             Ok((
                 FileScanResult {
                     file_path: file_label,
                     findings,
+                    unused_suppressions: unused,
                 },
                 check_panics,
             ))
@@ -700,44 +844,6 @@ pub fn scan_directory_with_checks(
         .collect();
 
     Ok((results, files_scanned, files_skipped, check_panics))
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
 }
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
@@ -794,16 +900,20 @@ pub fn scan_files(
     let files_scanned = selected.len();
     let checks = default_checks();
 
-    let (collected, panics): (Vec<Vec<Finding>>, Vec<Vec<ScanError>>) = collect_scan_results(
-        selected
-            .par_iter()
-            .map(|path| run_checks_for_file(path, &root, &checks))
-            .collect(),
-    )?
-    .into_iter()
-    .unzip();
+    let (collected, panics): (Vec<(Vec<Finding>, Vec<UnusedSuppression>)>, Vec<Vec<ScanError>>) =
+        collect_scan_results(
+            selected
+                .par_iter()
+                .map(|path| {
+                    let (findings, unused, panics) = run_checks_for_file(path, &root, &checks)?;
+                    Ok(((findings, unused), panics))
+                })
+                .collect(),
+        )?
+        .into_iter()
+        .unzip();
 
-    let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
+    let mut findings: Vec<Finding> = collected.iter().flat_map(|(f, _)| f.clone()).collect();
     let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
 
     findings.sort_by(|a, b| {
@@ -1612,7 +1722,7 @@ impl C {
 
     fn has_fn_suppression(s: &Suppressions, func: &str, check: &str) -> bool {
         let key = (String::from("C"), func.to_string(), check.to_string());
-        s.function_checks.contains(&key)
+        s.function_checks.contains_key(&key)
     }
 
     #[test]
@@ -1675,7 +1785,7 @@ impl C {
         // line 5 is `let x = 1 + 2;`
         assert!(s
             .line_checks
-            .contains(&(5, "unchecked-arithmetic".to_string())));
+            .contains_key(&(5, "unchecked-arithmetic".to_string())));
         assert!(s.function_checks.is_empty());
     }
 
@@ -1695,7 +1805,7 @@ impl C {
         assert!(s.function_checks.is_empty());
         assert!(s
             .line_checks
-            .contains(&(5, "hardcoded-address".to_string())));
+            .contains_key(&(5, "hardcoded-address".to_string())));
     }
 
     #[test]
@@ -1714,7 +1824,7 @@ impl C {
         assert!(s.function_checks.is_empty());
         assert!(s
             .line_checks
-            .contains(&(5, "unchecked-arithmetic".to_string())));
+            .contains_key(&(5, "unchecked-arithmetic".to_string())));
     }
 
     /// Regression test for #501: a function-scoped suppression above a method

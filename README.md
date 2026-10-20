@@ -104,6 +104,18 @@ Emit a Markdown table (handy for PR comments or docs):
 cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --markdown
 ```
 
+Emit a self-contained HTML report (inline CSS, no external dependencies):
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --html --output report.html
+```
+
+Emit GitLab Code Quality JSON (for the GitLab MR widget):
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --gitlab --output gl-code-quality-report.json
+```
+
 For plain terminal output, disable ANSI colors with:
 
 ```bash

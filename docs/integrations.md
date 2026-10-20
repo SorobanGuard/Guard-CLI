@@ -203,3 +203,32 @@ args = ["build", "--target", "wasm32-unknown-unknown", "--release"]
 | `2` | Scan error (I/O or parse failure) | Investigate and fix |
 
 Use `--fail-on medium` or `--fail-on low` to treat Medium and/or Low findings as blocking in security-sensitive pipelines.
+
+---
+
+## GitLab CI (Code Quality widget)
+
+GitLab renders a **Code Quality** widget on merge requests when a job uploads a
+`codequality` artifact. Use `--gitlab` to emit the correct JSON format.
+
+```yaml
+# .gitlab-ci.yml
+soroban-guard:
+  stage: test
+  image: rust:latest
+  script:
+    - cargo build --release
+    - ./target/release/soroban-guard scan src/ --gitlab --output gl-code-quality-report.json
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+    when: always
+```
+
+The report uses GitLab's `codequality` schema:
+- **critical** — High severity findings
+- **major**    — Medium severity findings
+- **minor**    — Low severity findings
+
+Each finding includes a stable `fingerprint` (SHA-256 hash of check name, file
+path, function name and line) so GitLab can track issues between pipeline runs.
