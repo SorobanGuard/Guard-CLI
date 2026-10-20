@@ -260,4 +260,29 @@ impl C {
         assert!(hits.is_empty());
         Ok(())
     }
+
+    /// Regression test for #456/#738: the `Env` parameter is resolved from the signature,
+    /// so a contract naming it `e` instead of `env` is still checked.
+    #[test]
+    fn flags_invoke_with_renamed_env_param() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn route(e: Env) {
+        let addr: Address = e.storage().instance().get(&0).unwrap();
+        e.invoke_contract(&addr, &Symbol::new(&e, "do_thing"), ());
+    }
+}
+"#,
+        )?;
+        let hits = DelegateCallRiskCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+        Ok(())
+    }
 }

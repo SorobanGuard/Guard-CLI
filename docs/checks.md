@@ -461,7 +461,7 @@ Cross-contract calls may fail. Discarding the return value silently swallows err
 
 **What it detects**
 
-Inside `#[contractimpl]` methods, any call to `transfer` or `transfer_from` where the same function body contains no call to `balance()` or `authorized()`.
+Inside `#[contractimpl]` methods, any call to `transfer` or `transfer_from` where the same function body contains no call to `balance()`. (`authorized()` is not accepted: it is a `StellarAssetClient` method, not a `TokenClient` one.)
 
 **Why it matters**
 

@@ -1,7 +1,11 @@
 //! Flags token `transfer`/`transfer_from` calls in `#[contractimpl]` methods that lack
-//! a preceding `balance()` or `authorized()` check.
+//! a preceding `balance()` check.
 //!
-//! Calls are qualified by receiver: only `transfer` / `balance` / `authorized` invoked on
+//! Only `balance()` counts as a guard: `authorized()` exists on `StellarAssetClient`, not on
+//! `TokenClient`, so accepting it on a `token::Client` binding would reward code that does
+//! not compile.
+//!
+//! Calls are qualified by receiver: only `transfer` / `balance` invoked on
 //! a local binding initialised from `token::Client::new(...)` (or `TokenClient::new(...)`)
 //! count. A same-named method on an unrelated type (`self.ownership.transfer(...)`,
 //! `self.ledger.balance()`) is ignored, in either direction.
@@ -38,7 +42,7 @@ impl Check for MissingBalanceCheck {
             balances.sort_unstable();
 
             // Evaluate each transfer call site independently: a finding is emitted for
-            // every transfer that has no balance()/authorized() call between the previous
+            // every transfer that has no balance() call between the previous
             // transfer (exclusive) and this one (exclusive). A single check at the function
             // top does not "cover" every subsequent transfer because each transfer changes
             // the balance. Positions are `(line, column)` so a balance and a transfer on the
@@ -57,7 +61,7 @@ impl Check for MissingBalanceCheck {
                         function_name: fn_name.clone(),
                         description: format!(
                             "Function `{fn_name}` calls `transfer` or `transfer_from` without a \
-                             preceding `balance()` or `authorized()` check. An invalid transfer may \
+                             preceding `balance()` check. An invalid transfer may \
                              cause a runtime panic that disrupts multi-step atomic operations."
                         ),
                         rule_url: Some(
@@ -79,7 +83,7 @@ impl Check for MissingBalanceCheck {
 }
 
 /// Accumulates the `(line, column)` position of every token-client `transfer`/`transfer_from`
-/// call and every token-client `balance`/`authorized` call in a function body. Per-call-site
+/// call and every token-client `balance` call in a function body. Per-call-site
 /// evaluation is done in the caller after the walk finishes.
 ///
 /// Scoping is handled with a stack of `HashSet<String>` frames — one frame per block nesting
@@ -160,7 +164,7 @@ impl<'ast> Visit<'ast> for BodyScan {
             let pos = (start.line, start.column);
             match method.as_str() {
                 "transfer" | "transfer_from" => self.transfers.push(pos),
-                "balance" | "authorized" => self.balances.push(pos),
+                "balance" => self.balances.push(pos),
                 _ => {}
             }
         }
@@ -445,5 +449,22 @@ impl Token {
             1,
             "the outer token.transfer after the nested block must be flagged; got lines: {lines:?}"
         );
+    }
+
+    /// Regression test for #737: `authorized()` is not a `TokenClient` method, so it must
+    /// not count as a balance guard on a `token::Client` binding.
+    #[test]
+    fn authorized_on_token_client_does_not_count_as_guard() {
+        let src = r#"
+#[contractimpl]
+impl Token {
+    pub fn send(env: Env) {
+        let token = token::Client::new(&env, &id);
+        token.authorized(&sender);
+        token.transfer(&sender, &recv, &amount);
+    }
+}
+"#;
+        assert_eq!(finding_lines(src).len(), 1);
     }
 }

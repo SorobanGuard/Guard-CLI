@@ -278,3 +278,13 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn hardcoded_address_fixtures() {
+    assert_fixture_pair("hardcoded-address", "hardcoded-address");
+}
+
+#[test]
+fn balance_fixtures() {
+    assert_fixture_pair("balance", "missing-balance-check");
+}

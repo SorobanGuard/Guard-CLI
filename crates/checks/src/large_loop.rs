@@ -57,12 +57,32 @@ impl<'ast> Visit<'ast> for LoopFinder {
             Expr::While(_) => {
                 self.loops.push((node.span().start().line, "while".to_string()));
             }
-            Expr::ForLoop(_) => {
-                self.loops.push((node.span().start().line, "for".to_string()));
+            Expr::ForLoop(for_loop) => {
+                if !is_literal_bounded_range(&for_loop.expr) {
+                    self.loops.push((node.span().start().line, "for".to_string()));
+                }
             }
             _ => {}
         }
         visit::visit_expr(self, node);
+    }
+}
+
+/// A `for` loop over a range whose both ends are integer literals (`0..10`, `1..=8`) has a
+/// compile-time iteration count and cannot be driven by caller input.
+fn is_literal_bounded_range(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => is_literal_bounded_range(&p.expr),
+        Expr::Range(range) => {
+            let is_int_lit = |e: &Option<Box<Expr>>| {
+                matches!(
+                    e.as_deref(),
+                    Some(Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(_), .. }))
+                )
+            };
+            is_int_lit(&range.start) && is_int_lit(&range.end)
+        }
+        _ => false,
     }
 }
 
@@ -142,6 +162,45 @@ mod tests {
         let check = LargeLoopCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_for_over_caller_controlled_range() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn process(env: Env, count: u32) {
+        for i in 0..count {
+            env.storage().instance().set(&symbol_short!("x"), &i);
+        }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let findings = LargeLoopCheck.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_for_over_literal_bounded_range() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn process(env: Env) {
+        for i in 0..10u32 {
+            env.storage().instance().set(&symbol_short!("x"), &i);
+        }
+        for j in 1..=4 {
+            let _ = j;
+        }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert!(LargeLoopCheck.run(&file, src).is_empty());
         Ok(())
     }
 }
