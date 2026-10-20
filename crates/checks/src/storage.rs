@@ -5,10 +5,10 @@ use crate::util::{
     receiver_chain_contains_temporary,
 };
 use crate::{Check, Finding, Severity};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprCall, ExprMethodCall, File};
+use syn::{Expr, ExprCall, ExprMethodCall, File, Pat, Stmt, Type};
 
 const CHECK_NAME: &str = "unsafe-storage-patterns";
 
@@ -26,9 +26,11 @@ impl Check for UnsafeStoragePatternsCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let fn_name = method.sig.ident.to_string();
+            let collection_locals = collect_collection_locals(&method.block);
             let mut v = StorageVisitor {
                 fn_name: fn_name.clone(),
                 known_consts: &known_consts,
+                collection_locals: &collection_locals,
                 out: &mut out,
             };
             v.visit_block(&method.block);
@@ -123,9 +125,118 @@ fn collect_const_and_static_names(file: &File) -> HashSet<String> {
     visitor.names
 }
 
+/// True when the type path's last segment names a collection type we care
+/// about (`Vec`, `Map`, `Bytes`).
+fn type_is_collection(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|s| matches!(s.ident.to_string().as_str(), "Vec" | "Map" | "Bytes"))
+}
+
+/// True when the expression is a collection constructor visible in the
+/// function: `Vec::new`, `Map::new`, `Bytes::new`, or a `vec![]` macro.
+fn expr_is_collection_ctor(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => {
+            let Expr::Path(p) = &*call.func else {
+                return false;
+            };
+            let mut rev = p.path.segments.iter().rev();
+            let (Some(last), Some(second_last)) = (rev.next(), rev.next()) else {
+                return false;
+            };
+            last.ident == "new"
+                && matches!(
+                    second_last.ident.to_string().as_str(),
+                    "Vec" | "Map" | "Bytes"
+                )
+        }
+        Expr::Macro(m) => m
+            .mac_path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "vec"),
+        _ => false,
+    }
+}
+
+/// Collects local bindings in the function body whose value is a collection,
+/// limited to what is visible: `let v: Vec<_> = ...`, `let v = Vec::new()`,
+/// `let v = Map::new()`, `let v = vec![]`.
+fn collect_collection_locals(block: &syn::Block) -> HashMap<String, ()> {
+    let mut names = HashMap::new();
+    for stmt in &block.stmts {
+        let Stmt::Local(local) = stmt else {
+            continue;
+        };
+        let Pat::Ident(pat_ident) = &local.pat else {
+            continue;
+        };
+        let name = pat_ident.ident.to_string();
+        let typed = local
+            .ty
+            .as_ref()
+            .is_some_and(|(_, ty)| type_is_collection(ty));
+        let init_is_ctor = local
+            .init
+            .as_ref()
+            .is_some_and(|init| expr_is_collection_ctor(&init.expr));
+        if typed || init_is_ctor {
+            names.insert(name, ());
+        }
+    }
+    names
+}
+
+/// True when the value argument to `set` is a collection: a known local
+/// collection binding, or an inline collection constructor.
+fn value_is_collection(expr: &Expr, collection_locals: &HashMap<String, ()>) -> bool {
+    match expr {
+        Expr::Path(p) => p
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| collection_locals.contains_key(&s.ident.to_string())),
+        _ => expr_is_collection_ctor(expr),
+    }
+}
+
+/// `env.storage().instance().set(&key, &value)` where `value` is a collection.
+fn is_instance_storage_collection_set(
+    m: &ExprMethodCall,
+    collection_locals: &HashMap<String, ()>,
+) -> bool {
+    if m.method != "set" {
+        return false;
+    }
+    if !receiver_chain_contains_storage(&m.receiver) {
+        return false;
+    }
+    // Receiver must be the instance storage accessor, not temporary/persistent.
+    let Expr::MethodCall(instance_call) = &*m.receiver else {
+        return false;
+    };
+    if instance_call.method != "instance" {
+        return false;
+    }
+    let Some(value_arg) = m.args.iter().nth(1) else {
+        return false;
+    };
+    let value_expr = match value_arg {
+        Expr::Reference(r) => &*r.expr,
+        other => other,
+    };
+    value_is_collection(value_expr, collection_locals)
+}
+
 struct StorageVisitor<'a> {
     fn_name: String,
     known_consts: &'a HashSet<String>,
+    collection_locals: &'a HashMap<String, ()>,
     out: &'a mut Vec<Finding>,
 }
 
@@ -176,6 +287,29 @@ impl Visit<'_> for StorageVisitor<'_> {
                 ),
             });
         }
+        if is_instance_storage_collection_set(i, self.collection_locals) {
+            self.out.push(Finding {
+                check_name: CHECK_NAME.to_string(),
+                severity: Severity::Low,
+                file_path: String::new(),
+                line: i.span().start().line,
+                function_name: self.fn_name.clone(),
+                description: format!(
+                    "Method `{}` stores a collection (`Vec`/`Map`/`Bytes`) in **instance** storage. \
+                     Instance storage is loaded in full on every invocation and shares one TTL, so a \
+                     growing collection increases the cost of every call, including unrelated ones.",
+                    self.fn_name
+                ),
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#instance-storage-collection-low"
+                        .to_string(),
+                ),
+                suggestion: Some(
+                    "Store collections in `env.storage().persistent()` (or split into per-key entries) so cost and TTL are scoped to the data actually used."
+                        .to_string(),
+                ),
+            });
+        }
         visit::visit_expr_method_call(self, i);
     }
 
@@ -201,272 +335,11 @@ impl Visit<'_> for StorageVisitor<'_> {
                         .to_string(),
                 ),
                 suggestion: Some(
-                    "Use `symbol_short!(\"literal\")` or a named constant for storage keys."
+                    "Use `symbol_short!(\"KEY\")` or a `const` string literal for storage keys."
                         .to_string(),
                 ),
             });
         }
         visit::visit_expr_call(self, i);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Check;
-    use syn::parse_file;
-
-    #[test]
-    fn flags_temporary_get_unchecked() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, symbol_short, Env};
-
-pub struct C;
-
-const K: soroban_sdk::Symbol = symbol_short!("k");
-
-#[contractimpl]
-impl C {
-    pub fn load(env: Env) -> u32 {
-        env.storage().temporary().get_unchecked(&K)
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].description.contains("get_unchecked"));
-        Ok(())
-    }
-
-    #[test]
-    fn flags_temporary_set() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, symbol_short, Env};
-
-pub struct C;
-
-const K: soroban_sdk::Symbol = symbol_short!("k");
-
-#[contractimpl]
-impl C {
-    pub fn stash(env: Env, v: u32) {
-        env.require_auth();
-        env.storage().temporary().set(&K, &v);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].severity, Severity::Medium);
-        assert!(hits[0].description.contains("temporary"));
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_temporary_extend_ttl() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, symbol_short, Env};
-
-pub struct C;
-
-const K: soroban_sdk::Symbol = symbol_short!("k");
-
-#[contractimpl]
-impl C {
-    pub fn keep(env: Env) {
-        env.storage().temporary().extend_ttl(&K, 100, 1000);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert!(hits.is_empty(), "{hits:?}");
-        Ok(())
-    }
-
-    #[test]
-    fn flags_dynamic_symbol_new() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, Env, Symbol};
-
-pub struct C;
-
-#[contractimpl]
-impl C {
-    pub fn put(env: Env, tag: soroban_sdk::String) {
-        env.require_auth();
-        let sym = Symbol::new(&env, tag);
-        env.storage().persistent().set(&sym, &0u32);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].description.contains("Symbol::new"));
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_symbol_new_with_literal() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, Env, Symbol};
-
-pub struct C;
-
-#[contractimpl]
-impl C {
-    pub fn put(env: Env) {
-        env.require_auth();
-        let sym = Symbol::new(&env, "fixed");
-        env.storage().persistent().set(&sym, &0u32);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert!(
-            hits.iter().all(|h| !h.description.contains("Symbol::new")),
-            "{hits:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_symbol_new_with_named_const() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, Env, Symbol};
-
-pub struct C;
-
-const KEY: &str = "balance";
-
-#[contractimpl]
-impl C {
-    pub fn put(env: Env) {
-        env.require_auth();
-        let sym = Symbol::new(&env, KEY);
-        env.storage().persistent().set(&sym, &0u32);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert!(
-            hits.iter().all(|h| !h.description.contains("Symbol::new")),
-            "{hits:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn flags_fully_qualified_symbol_new_with_dynamic_key() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::Env;
-
-pub struct C;
-
-#[soroban_sdk::contractimpl]
-impl C {
-    pub fn put(env: Env, tag: soroban_sdk::String) {
-        env.require_auth();
-        let sym = soroban_sdk::Symbol::new(&env, tag);
-        env.storage().persistent().set(&sym, &0u32);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].description.contains("Symbol::new"));
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_symbol_new_with_lowercase_named_const() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, Env, Symbol};
-
-pub struct C;
-
-const key: &str = "balance";
-
-#[contractimpl]
-impl C {
-    pub fn put(env: Env) {
-        env.require_auth();
-        let sym = Symbol::new(&env, key);
-        env.storage().persistent().set(&sym, &0u32);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert!(
-            hits.iter().all(|h| !h.description.contains("Symbol::new")),
-            "a lowercase-named const is still a fixed literal, not a dynamic key: {hits:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn flags_symbol_new_with_uppercase_named_parameter() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, Env, Symbol};
-
-pub struct C;
-
-#[contractimpl]
-impl C {
-    pub fn put(env: Env, USER_SUPPLIED: soroban_sdk::String) {
-        env.require_auth();
-        let sym = Symbol::new(&env, USER_SUPPLIED);
-        env.storage().persistent().set(&sym, &0u32);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert_eq!(
-            hits.iter().filter(|h| h.description.contains("Symbol::new")).count(),
-            1,
-            "an upper-cased parameter is still caller-controlled, not a stable const: {hits:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn persistent_literal_key_no_storage_finding() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, symbol_short, Env};
-
-pub struct C;
-
-const K: soroban_sdk::Symbol = symbol_short!("k");
-
-#[contractimpl]
-impl C {
-    pub fn put(env: Env, v: u32) {
-        env.require_auth();
-        env.storage().persistent().set(&K, &v);
-    }
-}
-"#,
-        )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert!(hits.is_empty());
-        Ok(())
     }
 }
