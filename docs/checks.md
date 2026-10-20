@@ -804,3 +804,45 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+## `storage-durability-mismatch` (Medium)
+
+**What it detects**
+
+The same literal or `const` storage key is used under more than one tier
+(`temporary()`, `persistent()`, `instance()`) across a contract's functions. Each
+tier is a separate keyspace, so the two uses hold unrelated entries, and a read
+can return stale or missing data when the temporary entry expires.
+
+**Limitations**
+
+Only literal and uppercase `const` keys are compared. Keys held in local variables are not.
+
+## `predictable-deploy-salt` (Medium)
+
+**What it detects**
+
+A deployer call (`deployer().with_current_contract(salt)` or
+`deployer().with_address(addr, salt)`) whose salt is a literal array, a repeated
+literal such as `[0; 32]`, or `BytesN::from_array` over literals. The deployed
+address is derived from the salt, so a constant salt makes it predictable, and
+reusing one salt lets a factory deploy only once.
+
+**Limitations**
+
+Only literal salts are flagged. A salt computed at runtime is not checked.
+
+## `ttl-threshold-greater-than-extend-to` (Medium)
+
+**What it detects**
+
+An `extend_ttl` call whose threshold is greater than its extend-to value, for
+example `extend_ttl(&key, 1000, 100)`. The call can only extend an entry that is
+already past the point it would be extended to, so the arguments are usually
+swapped. Keyed calls take `(&key, threshold, extend_to)`. Instance calls take
+`(threshold, extend_to)`.
+
+**Limitations**
+
+Only integer literals and file-level `const` integers are compared. Zero values are
+covered by `extend-ttl-no-op`.
