@@ -804,3 +804,17 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+## `dynamic-symbol-from-input` (Medium)
+
+**What it detects**
+
+A `Symbol::new(&env, text)` call where `text` uses a parameter of a public contract
+function. `Symbol::new` traps on over-long or invalid input, and a caller-chosen symbol
+decides which storage key or event topic is used. Literal and `const` symbols are not flagged.
+
+**Limitations**
+
+Parameters are matched by name within the same function. Values passed through a local
+built from a parameter are matched only when the local keeps the parameter's name. Guard
+clauses that validate the input are not recognised, so guarded uses are still flagged.
