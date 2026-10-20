@@ -34,6 +34,7 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod timestamp_access;
 pub mod admin_sweep;
 pub mod extend_ttl_zero;
 pub mod dynamic_symbol;
@@ -73,6 +74,7 @@ pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
 pub use unprotected_token_mint::UnprotectedTokenMintCheck;
 pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use timestamp_access::TimestampAccessControlCheck;
 pub use admin_sweep::AdminSweepCheck;
 pub use extend_ttl_zero::ExtendTtlNoOpCheck;
 pub use dynamic_symbol::DynamicSymbolFromInputCheck;
@@ -239,6 +241,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(DynamicSymbolFromInputCheck),
         Box::new(ExtendTtlNoOpCheck),
         Box::new(AdminSweepCheck),
+        Box::new(TimestampAccessControlCheck),
     ]
 }
 

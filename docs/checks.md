@@ -846,3 +846,17 @@ Low severity so a reviewer can decide whether a timelock or a per-call limit is 
 
 "Admin-gated" is a name heuristic: the function body must mention `admin`. Balances read
 through helper functions are not tracked.
+
+## `timestamp-access-control` (Medium)
+
+**What it detects**
+
+An ordering or equality comparison between `env.ledger().timestamp()` (or `.sequence()`) and
+a value that comes from a public function parameter. When the caller supplies the deadline,
+the caller also chooses the time window, so the time check authorises nothing. Comparisons
+against storage-loaded or constant values are not flagged.
+
+**Limitations**
+
+Only direct `if` and binary comparisons are matched. Comparisons inside `assert!` or
+`require!` macro arguments are not checked.
