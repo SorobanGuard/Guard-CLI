@@ -223,3 +223,10 @@ impl AllFindingsContract {
         env.storage().instance().set(&symbol_short!("payload"), &payload);
     }
 }
+
+// Triggers `duplicate-contracterror-code`: two variants share the same discriminant.
+#[soroban_sdk::contracterror]
+pub enum AllFindingsError {
+    NotFound = 1,
+    AlsoNotFound = 1,
+}

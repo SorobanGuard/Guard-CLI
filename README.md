@@ -67,6 +67,17 @@ The binary is `target/release/soroban-guard` (package `soroban-guard-cli`).
 
 ## Usage
 
+After `cargo install --path crates/cli`, you can invoke the scanner either directly or as a Cargo subcommand:
+
+```bash
+# Direct invocation
+soroban-guard scan ./path/to/contract-crate
+
+# Cargo subcommand (scans the current package root by default)
+cargo soroban-guard scan
+cargo soroban-guard scan ./path/to/contract-crate
+```
+
 Scan a Soroban contract crate before deploying to Stellar:
 
 ```bash

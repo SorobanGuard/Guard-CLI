@@ -804,3 +804,41 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+---
+
+## `overflow-checks-disabled` (High)
+
+**What it detects**
+
+In any `Cargo.toml` belonging to a crate that depends on `soroban-sdk`: a `[profile.release]` (or other profile) section that explicitly sets `overflow-checks = false`, or that configures `opt-level`/`lto` without explicitly enabling `overflow-checks` (informational Low).
+
+**Why it matters**
+
+Soroban contracts compiled without overflow checks will silently wrap on integer overflow instead of trapping. This turns every unchecked arithmetic operation into a potential exploit even when the Rust code looks correct, because the overflow-checks flag governs whether `+`, `-`, `*` trap or wrap in release builds.
+
+**Limitations**
+
+- Only inspects `Cargo.toml` files found within the scan root; workspace-level overrides via `profiles` in the workspace `Cargo.toml` are reported if found under the scan root.
+- Does not track inheritance: if a sub-crate inherits a release profile from a parent workspace that disables overflow checks, the sub-crate's own `Cargo.toml` will not be flagged.
+
+**Fixture:** `test-contracts/overflow-checks-vulnerable/`, `test-contracts/overflow-checks-safe/`
+
+---
+
+## `duplicate-contracterror-code` (Medium)
+
+**What it detects**
+
+For each enum annotated with `#[contracterror]` (or `#[soroban_sdk::contracterror]`), computes the effective discriminant of every variant (explicit `= N`, or previous + 1 starting from 0) and reports any variant whose discriminant collides with an earlier one. Skips `#[cfg(test)]` modules.
+
+**Why it matters**
+
+`#[contracterror]` maps each variant to a `u32` error code returned to callers and off-chain tooling. A copy-paste error or an explicit discriminant that collides with an implicit one makes two different failure modes return the same code, making them indistinguishable to clients.
+
+**Limitations**
+
+- Only evaluates literal integer discriminants and unary negation. Discriminants computed via constant expressions or `const` items are not resolved.
+- Does not track discriminant inheritance from `#[repr(...)]` configurations.
+
+**Fixture:** `test-contracts/contracterror-dup-vulnerable/`, `test-contracts/contracterror-dup-safe/`

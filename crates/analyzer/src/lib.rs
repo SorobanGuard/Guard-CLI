@@ -6,7 +6,7 @@
 use rayon::prelude::*;
 use serde::Serialize;
 use soroban_guard_checks::util::contractimpl_functions_with_type_excluding_test;
-use soroban_guard_checks::{default_checks, Check, Finding};
+use soroban_guard_checks::{default_checks, Check, Finding, Severity};
 use std::collections::HashSet;
 use std::io::BufRead;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -53,8 +53,13 @@ pub enum ScanError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Failed to parse {path}: {message}")]
-    Parse { path: PathBuf, message: String },
+    #[error("Failed to parse {path}:{line}:{column}: {message}")]
+    Parse {
+        path: PathBuf,
+        message: String,
+        line: usize,
+        column: usize,
+    },
     #[error("Check `{check}` panicked on {path}: {message}")]
     CheckPanic {
         check: String,
@@ -562,9 +567,15 @@ fn run_checks_for_file(
         path: path.to_path_buf(),
         source: e,
     })?;
-    let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
-        path: path.to_path_buf(),
-        message: e.to_string(),
+    let syn_file = syn::parse_file(&content).map_err(|e| {
+        let span = e.span();
+        let loc = span.start();
+        ScanError::Parse {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+            line: loc.line,
+            column: loc.column,
+        }
     })?;
     let file_label = file_label(path, root);
     let fn_spans = build_fn_spans(&syn_file);
@@ -624,6 +635,147 @@ pub struct FileScanResult {
 ///
 /// `includes` are glob patterns; when non-empty only files matching at least one pattern are
 /// scanned. When `includes` is empty all `.rs` files (minus excludes and generated-file
+/// Scan a single `Cargo.toml` for the `overflow-checks-disabled` manifest check.
+///
+/// Returns findings for crates that depend on `soroban-sdk` and either
+/// explicitly set `overflow-checks = false` in a release profile, or omit it
+/// entirely from a profile that configures `opt-level` or `lto` (informational Low).
+pub fn scan_cargo_toml_manifest(cargo_toml_path: &Path) -> Vec<Finding> {
+    let content = match std::fs::read_to_string(cargo_toml_path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let doc: toml::Value = match content.parse() {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    // Only flag crates that actually depend on soroban-sdk.
+    let depends_on_soroban = {
+        let has_dep = |table_name: &str| -> bool {
+            doc.get(table_name)
+                .and_then(|t| t.as_table())
+                .map(|t| t.contains_key("soroban-sdk"))
+                .unwrap_or(false)
+        };
+        has_dep("dependencies") || has_dep("dev-dependencies") || has_dep("build-dependencies")
+    };
+    if !depends_on_soroban {
+        return vec![];
+    }
+
+    let file_path = cargo_toml_path
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+
+    let mut findings = Vec::new();
+    let profiles = match doc.get("profile").and_then(|p| p.as_table()) {
+        Some(t) => t,
+        None => return findings,
+    };
+
+    for (profile_name, profile_val) in profiles {
+        let profile_table = match profile_val.as_table() {
+            Some(t) => t,
+            None => continue,
+        };
+        let overflow_val = profile_table.get("overflow-checks");
+        let has_opt_level_or_lto =
+            profile_table.contains_key("opt-level") || profile_table.contains_key("lto");
+
+        // Find the line number of `overflow-checks` key, or the profile header.
+        let key_line = find_toml_key_line(&content, profile_name, "overflow-checks");
+
+        if overflow_val.and_then(|v| v.as_bool()) == Some(false) {
+            // overflow-checks = false — High severity.
+            findings.push(Finding {
+                check_name: "overflow-checks-disabled".to_string(),
+                severity: Severity::High,
+                file_path: file_path.clone(),
+                line: key_line,
+                function_name: String::new(),
+                description: format!(
+                    "`[profile.{profile_name}]` sets `overflow-checks = false`. \
+                     Soroban contracts compiled without overflow checks will wrap \
+                     silently on arithmetic overflow instead of trapping, making \
+                     every unchecked-arithmetic finding exploitable."
+                ),
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#overflow-checks-disabled-high"
+                        .to_string(),
+                ),
+                suggestion: Some(
+                    "Set `overflow-checks = true` in the release profile.".to_string(),
+                ),
+            });
+        } else if overflow_val.is_none() && has_opt_level_or_lto {
+            // overflow-checks absent but profile customised — Low informational.
+            let profile_line = find_toml_profile_line(&content, profile_name);
+            findings.push(Finding {
+                check_name: "overflow-checks-disabled".to_string(),
+                severity: Severity::Low,
+                file_path: file_path.clone(),
+                line: profile_line,
+                function_name: String::new(),
+                description: format!(
+                    "`[profile.{profile_name}]` sets `opt-level` or `lto` but does not \
+                     explicitly set `overflow-checks`. The Rust default for release builds \
+                     is `overflow-checks = false`; Soroban contracts should set it to `true`."
+                ),
+                rule_url: Some(
+                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#overflow-checks-disabled-high"
+                        .to_string(),
+                ),
+                suggestion: Some(
+                    "Add `overflow-checks = true` to the profile.".to_string(),
+                ),
+            });
+        }
+    }
+    findings
+}
+
+/// Walk `root` for `Cargo.toml` files (skipping `target/`) and aggregate
+/// manifest-level findings.
+pub fn scan_manifest_findings(root: &Path) -> Vec<Finding> {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.file_name() != "target")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name() == "Cargo.toml")
+        .flat_map(|e| scan_cargo_toml_manifest(e.path()))
+        .collect()
+}
+
+/// Return the 1-based line number of `key = …` inside `[profile.<profile>]` in
+/// `content`, or 1 when not found.
+fn find_toml_key_line(content: &str, profile: &str, key: &str) -> usize {
+    let section_header = format!("[profile.{profile}]");
+    let mut in_section = false;
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = trimmed == section_header;
+        }
+        if in_section && trimmed.starts_with(key) {
+            return i + 1;
+        }
+    }
+    1
+}
+
+/// Return the 1-based line number of `[profile.<profile>]` in `content`, or 1.
+fn find_toml_profile_line(content: &str, profile: &str) -> usize {
+    let section_header = format!("[profile.{profile}]");
+    for (i, line) in content.lines().enumerate() {
+        if line.trim() == section_header {
+            return i + 1;
+        }
+    }
+    1
+}
+
 /// headers) are scanned.
 ///
 /// Returns `(findings, files_scanned, files_skipped, check_panics)` where `files_skipped`
@@ -650,6 +802,9 @@ pub fn scan_directory(
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
     let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+
+    // Append manifest-level findings (overflow-checks-disabled, etc.).
+    findings.extend(scan_manifest_findings(&root));
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -698,6 +853,15 @@ pub fn scan_directory_with_checks(
         .into_iter()
         .flat_map(|(_, panics)| panics)
         .collect();
+
+    // Append manifest-level findings (overflow-checks-disabled, etc.).
+    let manifest_findings = scan_manifest_findings(&root);
+    if !manifest_findings.is_empty() {
+        results.push(FileScanResult {
+            file_path: "Cargo.toml".to_string(),
+            findings: manifest_findings,
+        });
+    }
 
     Ok((results, files_scanned, files_skipped, check_panics))
 }
@@ -1507,6 +1671,8 @@ mod tests {
         let parse = ScanError::Parse {
             path: PathBuf::from("src/broken.rs"),
             message: "expected `;`".to_string(),
+            line: 1,
+            column: 0,
         };
         let err = CheckPanic::try_from(&parse).unwrap_err();
         assert!(matches!(err, ScanError::Parse { .. }));
@@ -1524,6 +1690,26 @@ mod tests {
                 message: "boom".to_string(),
             }
         );
+    }
+
+    /// Issue #812: ScanError::Parse must include line and column from the syntax error span.
+    #[test]
+    fn parse_error_includes_line_and_column() {
+        let dir = std::env::temp_dir().join(format!("guard_parse_loc_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("broken.rs");
+        // Two valid lines, then a syntax error on line 3.
+        let src = "fn a() {}\nfn b() {}\nfn c( {}\n";
+        fs::write(&path, src).unwrap();
+        let checks: Vec<Box<dyn soroban_guard_checks::Check + Send + Sync>> = vec![];
+        let result = run_checks_for_file(&path, &dir, &checks);
+        fs::remove_dir_all(&dir).unwrap();
+        match result {
+            Err(ScanError::Parse { line, .. }) => {
+                assert!(line >= 3, "expected error on line >= 3, got {line}");
+            }
+            other => panic!("expected ScanError::Parse, got {other:?}"),
+        }
     }
 
     /// Issue #722: a report must not say "not degraded" about an error it can't represent.

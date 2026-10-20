@@ -450,6 +450,7 @@ dependencies = [
  "soroban-guard-checks",
  "syn 2.0.118",
  "thiserror",
+ "toml",
  "walkdir",
 ]
 
@@ -461,6 +462,7 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.118",
+ "walkdir",
 ]
 
 [[package]]

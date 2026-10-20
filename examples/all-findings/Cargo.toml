@@ -9,3 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 soroban-sdk = "22.0.0"
+
+[profile.release]
+# overflow-checks-disabled: intentionally disabled to exercise the manifest check.
+overflow-checks = false
