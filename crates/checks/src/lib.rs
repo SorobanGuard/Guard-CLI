@@ -35,6 +35,7 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod predictable_deploy_salt;
 pub mod util;
 
 pub use admin::UnprotectedAdminCheck;
@@ -72,6 +73,7 @@ pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
 pub use unprotected_token_mint::UnprotectedTokenMintCheck;
 pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use predictable_deploy_salt::PredictableDeploySaltCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -233,6 +235,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
         Box::new(StorageDurabilityMismatchCheck),
+        Box::new(PredictableDeploySaltCheck),
     ]
 }
 

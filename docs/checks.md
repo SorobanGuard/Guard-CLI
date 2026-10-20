@@ -817,3 +817,17 @@ can return stale or missing data when the temporary entry expires.
 **Limitations**
 
 Only literal and uppercase `const` keys are compared. Keys held in local variables are not.
+
+## `predictable-deploy-salt` (Medium)
+
+**What it detects**
+
+A deployer call (`deployer().with_current_contract(salt)` or
+`deployer().with_address(addr, salt)`) whose salt is a literal array, a repeated
+literal such as `[0; 32]`, or `BytesN::from_array` over literals. The deployed
+address is derived from the salt, so a constant salt makes it predictable, and
+reusing one salt lets a factory deploy only once.
+
+**Limitations**
+
+Only literal salts are flagged. A salt computed at runtime is not checked.
