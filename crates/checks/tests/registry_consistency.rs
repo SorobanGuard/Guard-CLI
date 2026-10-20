@@ -45,15 +45,24 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("overflow-checks-disabled", "overflow-checks"),
+    ("duplicate-contracterror-code", "contracterror-dup"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,
 /// each with the reason. Keep this list short and justified.
-const TRIGGERS_ALLOW_LIST: &[(&str, &str)] = &[(
-    "missing-event-emission",
-    "fires on almost every state-mutating method in all-findings (26 findings), so no single \
-     method is dedicated to it",
-)];
+const TRIGGERS_ALLOW_LIST: &[(&str, &str)] = &[
+    (
+        "missing-event-emission",
+        "fires on almost every state-mutating method in all-findings (26 findings), so no single \
+         method is dedicated to it",
+    ),
+    (
+        "overflow-checks-disabled",
+        "manifest-level check: operates on Cargo.toml, not on Rust source files, so it cannot \
+         be triggered by a `// Triggers` comment in examples/all-findings/src/lib.rs",
+    ),
+];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

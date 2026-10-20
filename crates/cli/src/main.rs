@@ -996,6 +996,20 @@ const CHECK_METADATA: &[CheckMeta] = &[
         rule: "Authorization check occurs after a storage write",
         long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
     },
+    CheckMeta {
+        name: "overflow-checks-disabled",
+        severity: "high",
+        short: "Flags Cargo.toml profiles with overflow-checks = false",
+        rule: "Release profile disables overflow checks for a soroban-sdk crate",
+        long: Some("Reports Cargo.toml files for crates that depend on soroban-sdk where a release profile explicitly sets overflow-checks = false, or customises opt-level/lto without enabling overflow checks."),
+    },
+    CheckMeta {
+        name: "duplicate-contracterror-code",
+        severity: "medium",
+        short: "Flags #[contracterror] enum variants that share the same discriminant",
+        rule: "Two contracterror variants have identical discriminant values",
+        long: Some("Reports enums annotated with #[contracterror] where two or more variants share the same effective discriminant, making different error conditions indistinguishable to callers."),
+    },
 ];
 
 fn check_meta(name: &str) -> Option<&'static CheckMeta> {
