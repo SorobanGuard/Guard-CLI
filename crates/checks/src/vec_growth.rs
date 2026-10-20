@@ -112,7 +112,10 @@ impl<'ast> Visit<'ast> for BodyScan {
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
         let method = i.method.to_string();
 
-        if matches!(method.as_str(), "push" | "push_back" | "append") {
+        // `Map::insert` and `Map::set` on a value read from storage grow it the same way `push` does (#821).
+        let grows = matches!(method.as_str(), "push" | "push_back" | "append" | "insert")
+            || (method == "set" && ident_of(&i.receiver).is_some_and(|r| self.get_bindings.contains(&r)));
+        if grows {
             if let Some(recv) = ident_of(&i.receiver).filter(|r| self.get_bindings.contains(r)) {
                 self.grow_line
                     .entry(recv.clone())
