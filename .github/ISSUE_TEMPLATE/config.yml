@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/SorobanGuard/Guard-CLI/discussions
+    about: Ask usage questions, share ideas, or get community help with Soroban Guard.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/SorobanGuard/Guard-CLI/security/advisories/new
+    about: Privately report a security vulnerability in Soroban Guard (see SECURITY.md).
+  - name: Documentation
+    url: https://github.com/SorobanGuard/Guard-CLI/tree/main/docs
+    about: Explore check references, configuration options, and CI integration guides.
