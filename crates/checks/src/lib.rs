@@ -34,10 +34,12 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod deprecated_api;
 pub mod util;
 
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
+pub use deprecated_api::DeprecatedSorobanApiCheck;
 pub use auth::MissingRequireAuthCheck;
 pub use auth_order::AuthAfterStorageWriteCheck;
 pub use balance::MissingBalanceCheck;
@@ -230,6 +232,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(DeprecatedSorobanApiCheck),
     ]
 }
 

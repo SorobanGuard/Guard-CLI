@@ -804,3 +804,22 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+---
+
+## `deprecated-soroban-api` (Low)
+
+**What it detects**
+
+Calls to methods and APIs that have been deprecated in modern versions of the `soroban-sdk`, including `.bump(..)` (replaced by `extend_ttl`), `Symbol::short(..)` (replaced by the `symbol_short!(..)` macro), and `env.events().publish(..)` (where `#[contractevent]` is preferred).
+
+**Why it matters**
+
+Deprecated Soroban SDK functions continue to exist for backwards compatibility but are prone to removal in future protocol upgrades and lack optimizations present in modern SDK counterparts. Migrating to current APIs ensures contract longevity and clearer semantics.
+
+**Limitations**
+
+- Detection is pattern-driven against method calls and macro patterns.
+- Custom wrapper methods named `bump` that are not part of `Storage` may trigger false positives if defined in contract scope.
+
+**Fixture:** tests in `crates/checks/src/deprecated_api.rs`
