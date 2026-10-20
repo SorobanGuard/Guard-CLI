@@ -56,6 +56,9 @@ impl InvokeReturnScan {
                 "Bind the return value and handle or assert it."
                     .to_string(),
             ),
+        column: None,
+        end_line: None,
+        end_column: None,
         });
     }
 }

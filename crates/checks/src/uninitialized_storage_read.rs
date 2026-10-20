@@ -256,6 +256,9 @@ impl Visit<'_> for StorageReadVisitor<'_> {
                              `env.storage().<tier>().has(&key)` before reading."
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

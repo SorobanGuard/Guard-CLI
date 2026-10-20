@@ -132,6 +132,9 @@ impl<'ast> Visit<'ast> for XcInputVisitor<'ast> {
                              expected type/variant before calling `env.storage().*.set(…)`."
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                     break;
                 }

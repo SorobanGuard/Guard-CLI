@@ -49,6 +49,9 @@ impl Check for MissingEventEmissionCheck {
                     "Add `env.events().publish((symbol_short!(\"{fn_name}\"), …), &payload)` \
                      after the storage write so off-chain indexers can track this state change."
                 )),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         out

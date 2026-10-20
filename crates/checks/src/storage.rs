@@ -151,6 +151,9 @@ impl Visit<'_> for StorageVisitor<'_> {
                     "Use `env.storage().temporary().get(&key)` (returns `Option`) and handle the missing case."
                         .to_string(),
                 ),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         if is_temporary_storage_mutation(i) {
@@ -174,6 +177,9 @@ impl Visit<'_> for StorageVisitor<'_> {
                     "Use `env.storage().persistent()` for long-lived state; reserve `temporary()` for scratch data only."
                         .to_string(),
                 ),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         visit::visit_expr_method_call(self, i);
@@ -204,6 +210,9 @@ impl Visit<'_> for StorageVisitor<'_> {
                     "Use `symbol_short!(\"literal\")` or a named constant for storage keys."
                         .to_string(),
                 ),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         visit::visit_expr_call(self, i);

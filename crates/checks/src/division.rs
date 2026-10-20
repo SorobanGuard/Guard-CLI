@@ -73,6 +73,9 @@ impl Visit<'_> for DivVisitor<'_> {
                      direction explicitly (e.g. floor vs. ceiling) with a comment."
                         .to_string(),
                 ),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         visit::visit_expr_binary(self, i);

@@ -34,6 +34,7 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod unvalidated_basis_points;
 pub mod util;
 
 pub use admin::UnprotectedAdminCheck;
@@ -70,6 +71,7 @@ pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
 pub use unprotected_token_mint::UnprotectedTokenMintCheck;
 pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use unvalidated_basis_points::UnvalidatedBasisPointsCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -124,6 +126,16 @@ pub struct Finding {
     /// One-liner fix hint shown in pretty output and included in `--json`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// 1-based column where the issue starts. `None` when the check does not
+    /// have span-level precision (consumers that only read `line` are unaffected).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    /// 1-based line where the issue ends. `None` when only start position is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    /// 1-based column where the issue ends. `None` when only start position is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<usize>,
 }
 
 /// A static analyzer check implemented against a parsed `syn::File`.
@@ -148,6 +160,7 @@ pub trait Check {
 ///         file_path: "src/foo.rs".into(), line: 1,
 ///         function_name: "f".into(), description: "d".into(),
 ///         rule_url: None, suggestion: None,
+///         column: None, end_line: None, end_column: None,
 ///     },
 /// ];
 /// let grouped = group_by_file(&findings);
@@ -176,6 +189,7 @@ pub fn group_by_file<'a>(findings: &'a [Finding]) -> BTreeMap<&'a str, Vec<&'a F
 ///         file_path: "src/lib.rs".into(), line: 1,
 ///         function_name: "f".into(), description: "d".into(),
 ///         rule_url: None, suggestion: None,
+///         column: None, end_line: None, end_column: None,
 ///     },
 /// ];
 /// let grouped = group_by_severity(&findings);
@@ -230,6 +244,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(UnvalidatedBasisPointsCheck),
     ]
 }
 

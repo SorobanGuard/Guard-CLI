@@ -172,6 +172,19 @@ struct Suppressions {
     /// Keyed on `(impl_type, function_name, check_name)` so a suppression above one
     /// `#[contractimpl]` method doesn't also silence a same-named method on a different type.
     function_checks: HashSet<(String, String, String)>,
+    /// Reason text for each suppression, keyed by `check_name` at a given line or function.
+    /// Key format: `"line:<n>:<check>"` or `"fn:<impl_type>:<fn_name>:<check>"`.
+    reasons: std::collections::HashMap<String, String>,
+}
+
+/// A finding that was silenced by a `// soroban-guard: allow(...)` annotation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SuppressedFinding {
+    #[serde(flatten)]
+    pub finding: soroban_guard_checks::Finding,
+    pub suppressed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
@@ -196,22 +209,57 @@ fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
     Ok(false)
 }
 
-/// Parses `// soroban-guard: allow(a, b)`. Whitespace is optional after `//` and on
-/// either side of `:` (`//soroban-guard:allow(x)` and `//  soroban-guard : allow(x)` are
-/// accepted); `///` and `//!` doc comments are not suppressions.
-fn parse_allow_checks(line: &str) -> Option<Vec<String>> {
+/// Parses `// soroban-guard: allow(a, b)` optionally followed by `reason="..."`.
+///
+/// Returns `(checks, reason)` where `reason` is `None` when no `reason="..."` clause
+/// is present. Whitespace is optional throughout; `///` and `//!` are not suppressions.
+///
+/// # Grammar
+/// ```text
+/// suppression = "//" ws? "soroban-guard" ws? ":" ws? "allow(" checks ")" (ws? reason)?
+/// reason      = "reason=" quoted_string
+/// ```
+fn parse_allow_checks(line: &str) -> Option<(Vec<String>, Option<String>)> {
     let rest = line.trim_start().strip_prefix("//")?.trim_start();
     let rest = rest.strip_prefix("soroban-guard")?.trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
     let rest = rest.strip_prefix("allow(")?;
-    let (inside, _) = rest.split_once(')')?;
+    let (inside, after) = rest.split_once(')')?;
     let checks: Vec<String> = inside
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
         .collect();
-    (!checks.is_empty()).then_some(checks)
+    if checks.is_empty() {
+        return None;
+    }
+    // Parse optional `reason="..."` clause after the closing `)`
+    let reason = parse_reason(after.trim_start());
+    Some((checks, reason))
+}
+
+/// Parse an optional `reason="..."` clause, handling basic escaped quotes (`\"`).
+fn parse_reason(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("reason=")?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut result = String::new();
+    let mut chars = rest.chars().peekable();
+    loop {
+        match chars.next() {
+            None | Some('"') => break,
+            Some('\\') => {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    result.push('"');
+                } else {
+                    result.push('\\');
+                }
+            }
+            Some(c) => result.push(c),
+        }
+    }
+    Some(result)
 }
 
 /// Index of the first line at or after `from` that carries actual code, skipping the
@@ -230,7 +278,7 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
     let mut suppressions = Suppressions::default();
 
     for (idx, line) in lines.iter().enumerate() {
-        let Some(checks) = parse_allow_checks(line) else {
+        let Some((checks, reason)) = parse_allow_checks(line) else {
             continue;
         };
         let Some(target_idx) = next_substantive_line(&lines, idx + 1) else {
@@ -241,16 +289,24 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
         // the method starts on - never by scanning the raw text for `"fn "`, which also
         // matches comments, string literals, and type positions.
         if let Some(span) = fn_spans.iter().find(|s| s.start_line == target_line_number) {
-            for check in checks {
+            for check in &checks {
+                let key = format!("fn:{}:{}:{}", span.impl_type, span.function_name, check);
+                if let Some(ref r) = reason {
+                    suppressions.reasons.insert(key, r.clone());
+                }
                 suppressions.function_checks.insert((
                     span.impl_type.clone(),
                     span.function_name.clone(),
-                    check,
+                    check.clone(),
                 ));
             }
         } else {
-            for check in checks {
-                suppressions.line_checks.insert((target_line_number, check));
+            for check in &checks {
+                let key = format!("line:{}:{}", target_line_number, check);
+                if let Some(ref r) = reason {
+                    suppressions.reasons.insert(key, r.clone());
+                }
+                suppressions.line_checks.insert((target_line_number, check.clone()));
             }
         }
     }
@@ -258,20 +314,19 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
     suppressions
 }
 
-fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnSpan]) -> bool {
-    if suppressions
-        .line_checks
-        .contains(&(finding.line, finding.check_name.clone()))
-    {
-        return true;
+/// Returns `Some(reason)` if the finding is suppressed, where `reason` is `None` when
+/// no `reason="..."` clause was present in the suppression comment.
+fn suppression_reason(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnSpan]) -> Option<Option<String>> {
+    let check = &finding.check_name;
+
+    if suppressions.line_checks.contains(&(finding.line, check.clone())) {
+        let key = format!("line:{}:{}", finding.line, check);
+        return Some(suppressions.reasons.get(&key).cloned());
     }
+
     let impl_type = fn_spans
         .iter()
         .find(|s| {
-            // When a check leaves function_name empty (e.g. unchecked-divisor,
-            // symbol-key-collision, mutable-global-state), fall back to line-range
-            // containment so a function-scoped suppression above the enclosing method
-            // still silences the finding.
             (finding.function_name.is_empty() || s.function_name == finding.function_name)
                 && s.start_line <= finding.line
                 && finding.line <= s.end_line
@@ -279,9 +334,6 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
         .map(|s| s.impl_type.clone())
         .unwrap_or_default();
 
-    // When the finding has an empty function_name (some checks intentionally omit it),
-    // look up the suppression using the actual function name from the span so the
-    // function_checks key matches what parse_suppressions inserted.
     let lookup_fn_name = if finding.function_name.is_empty() {
         fn_spans
             .iter()
@@ -296,28 +348,20 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
         finding.function_name.as_str()
     };
 
-    suppressions.function_checks.contains(&(
-        impl_type,
+    if suppressions.function_checks.contains(&(
+        impl_type.clone(),
         lookup_fn_name.to_string(),
-        finding.check_name.clone(),
-    ))
+        check.clone(),
+    )) {
+        let key = format!("fn:{}:{}:{}", impl_type, lookup_fn_name, check);
+        return Some(suppressions.reasons.get(&key).cloned());
+    }
+
+    None
 }
 
-/// The path relative to `root` shown in findings: the bare file name when `root`
-/// itself is a single file, otherwise the path stripped of the `root` prefix.
-/// Shared by every scan entry point so the copies of this logic can't drift (issue #630).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    }
+fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnSpan]) -> bool {
+    suppression_reason(finding, suppressions, fn_spans).is_some()
 }
 
 /// Drop only findings that are identical in everything a reader would use to tell
@@ -558,6 +602,24 @@ fn run_checks_for_file(
     root: &Path,
     checks: &[Box<dyn Check + Send + Sync>],
 ) -> Result<(Vec<Finding>, Vec<ScanError>), ScanError> {
+    let (findings, _, panics) = run_checks_for_file_inner(path, root, checks, false)?;
+    Ok((findings, panics))
+}
+
+fn run_checks_for_file_with_suppressed(
+    path: &Path,
+    root: &Path,
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<Finding>, Vec<SuppressedFinding>, Vec<ScanError>), ScanError> {
+    run_checks_for_file_inner(path, root, checks, true)
+}
+
+fn run_checks_for_file_inner(
+    path: &Path,
+    root: &Path,
+    checks: &[Box<dyn Check + Send + Sync>],
+    collect_suppressed: bool,
+) -> Result<(Vec<Finding>, Vec<SuppressedFinding>, Vec<ScanError>), ScanError> {
     let content = std::fs::read_to_string(path).map_err(|e| ScanError::IoRead {
         path: path.to_path_buf(),
         source: e,
@@ -571,6 +633,7 @@ fn run_checks_for_file(
     let suppressions = parse_suppressions(&content, &fn_spans);
 
     let mut findings: Vec<Finding> = Vec::new();
+    let mut suppressed: Vec<SuppressedFinding> = Vec::new();
     let mut check_panics: Vec<ScanError> = Vec::new();
     for check in checks {
         let check_name = check.name().to_string();
@@ -579,10 +642,19 @@ fn run_checks_for_file(
                 for finding in &mut hits {
                     finding.file_path.clone_from(&file_label);
                 }
-                findings.extend(
-                    hits.into_iter()
-                        .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans)),
-                );
+                for finding in hits {
+                    match suppression_reason(&finding, &suppressions, &fn_spans) {
+                        Some(reason) if collect_suppressed => {
+                            suppressed.push(SuppressedFinding {
+                                finding,
+                                suppressed: true,
+                                reason,
+                            });
+                        }
+                        Some(_) => {} // suppressed but not collecting
+                        None => findings.push(finding),
+                    }
+                }
             }
             Err(payload) => {
                 let message = if let Some(msg) = payload.downcast_ref::<&str>() {
@@ -604,7 +676,7 @@ fn run_checks_for_file(
     findings.sort_by_key(|f| f.line);
     suppress_redundant_division_finding(&mut findings);
     dedup_findings(&mut findings);
-    Ok((findings, check_panics))
+    Ok((findings, suppressed, check_panics))
 }
 
 /// Findings for a single source file.
@@ -702,23 +774,49 @@ pub fn scan_directory_with_checks(
     Ok((results, files_scanned, files_skipped, check_panics))
 }
 
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
+/// Like [`scan_directory_with_checks`] but also collects findings silenced by
+/// `// soroban-guard: allow(...)` annotations, together with their optional reason.
+///
+/// Returns `(results, suppressed, files_scanned, files_skipped, check_panics)`.
+pub fn scan_directory_with_checks_and_suppressed(
+    root: &Path,
+    excludes: &[String],
+    includes: &[String],
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<FileScanResult>, Vec<SuppressedFinding>, usize, usize, Vec<ScanError>), ScanError>
+{
+    let root = canonicalize_root(root)?;
+    let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
+    let files_scanned = paths.len();
 
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
+    let per_file = paths
+        .par_iter()
+        .map(|path| {
+            let (findings, suppressed, check_panics) =
+                run_checks_for_file_with_suppressed(path, &root, checks)?;
+            let file_label = file_label(path, &root);
+            Ok((
+                FileScanResult {
+                    file_path: file_label,
+                    findings,
+                },
+                suppressed,
+                check_panics,
+            ))
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?;
+
+    let mut results: Vec<FileScanResult> = per_file.iter().map(|(r, _, _)| r.clone()).collect();
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
+    let suppressed_all: Vec<SuppressedFinding> =
+        per_file.iter().flat_map(|(_, s, _)| s.clone()).collect();
+    let check_panics: Vec<ScanError> = per_file
+        .into_iter()
+        .flat_map(|(_, _, panics)| panics)
+        .collect();
+
+    Ok((results, suppressed_all, files_scanned, files_skipped, check_panics))
 }
 
 /// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
@@ -814,6 +912,59 @@ pub fn scan_files(
     dedup_findings(&mut findings);
 
     Ok((findings, files_scanned, files_skipped, check_panics))
+}
+
+/// Like [`scan_files`] but runs `checks` instead of [`default_checks`].
+///
+/// Each element of the returned `Vec<FileScanResult>` groups findings by source file.
+/// Returns `(results, files_scanned, files_skipped, check_panics)`.
+pub fn scan_files_with_checks(
+    paths: &[PathBuf],
+    root: &Path,
+    excludes: &[String],
+    includes: &[String],
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<FileScanResult>, usize, usize, Vec<ScanError>), ScanError> {
+    let root = canonicalize_root(root)?;
+    let exclude_patterns = compile_globs(excludes)?;
+    let include_patterns = compile_globs(includes)?;
+
+    let mut selected = Vec::new();
+    let mut files_skipped = 0;
+    for path in paths {
+        if is_ignored_path(path.strip_prefix(&root).unwrap_or(path)) {
+            continue;
+        }
+        let path_canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let label = path_canon.strip_prefix(&root).unwrap_or(&path_canon);
+        match classify_rust_path(&path_canon, label, &exclude_patterns, &include_patterns) {
+            Ok(PathVerdict::Scan) => selected.push(path_canon),
+            Ok(PathVerdict::GeneratedSkip) => files_skipped += 1,
+            Ok(PathVerdict::Reject) => {}
+            Err(e) => warn_skipping_unreadable(&path_canon, e),
+        }
+    }
+
+    let files_scanned = selected.len();
+
+    let per_file = selected
+        .par_iter()
+        .map(|path| {
+            let (findings, check_panics) = run_checks_for_file(path, &root, checks)?;
+            let file_label = file_label(path, &root);
+            Ok((
+                FileScanResult { file_path: file_label, findings },
+                check_panics,
+            ))
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?;
+
+    let mut results: Vec<FileScanResult> = per_file.iter().map(|(r, _)| r.clone()).collect();
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
+    let check_panics: Vec<ScanError> = per_file.into_iter().flat_map(|(_, p)| p).collect();
+
+    Ok((results, files_scanned, files_skipped, check_panics))
 }
 
 #[cfg(test)]
@@ -1449,6 +1600,9 @@ mod tests {
                 description: "ok".into(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             }]
         }
     }
@@ -1561,7 +1715,7 @@ mod suppression_tests {
 
     #[test]
     fn suppression_comment_whitespace_variants_are_accepted() {
-        let expected = Some(vec!["missing-require-auth".to_string()]);
+        let expected = Some((vec!["missing-require-auth".to_string()], None));
         for line in [
             "// soroban-guard: allow(missing-require-auth)",
             "//soroban-guard: allow(missing-require-auth)",
@@ -1749,6 +1903,9 @@ impl C {
             description: "divisor not validated".to_string(),
             rule_url: None,
             suggestion: None,
+            column: None,
+            end_line: None,
+            end_column: None,
         };
         assert!(
             is_suppressed(&finding, &suppressions, &fn_spans),
@@ -1834,6 +1991,9 @@ mod dedup_tests {
                 description: "duplicate".into(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             };
             vec![f.clone(), f]
         }
@@ -1879,6 +2039,9 @@ mod dedup_tests {
                     description: "second".into(),
                     rule_url: None,
                     suggestion: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                 },
                 Finding {
                     check_name: "reversed-check".into(),
@@ -1889,6 +2052,9 @@ mod dedup_tests {
                     description: "first".into(),
                     rule_url: None,
                     suggestion: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                 },
             ]
         }
@@ -1953,6 +2119,9 @@ mod dedup_tests {
                 description: String::new(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             };
             vec![
                 Finding {

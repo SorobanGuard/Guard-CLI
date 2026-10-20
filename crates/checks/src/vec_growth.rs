@@ -68,6 +68,9 @@ impl Check for UnboundedVecGrowthCheck {
                          `require!(vec.len() < MAX_SIZE, \"capacity exceeded\");`."
                             .to_string(),
                     ),
+                column: None,
+                end_line: None,
+                end_column: None,
                 });
             }
         }

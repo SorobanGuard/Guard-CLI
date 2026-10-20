@@ -95,6 +95,9 @@ fn push_finding(out: &mut Vec<Finding>, idx: usize, trimmed: &str) {
             "Remove the `use std::` import or replace with a `no_std`-compatible alternative."
                 .to_string(),
         ),
+    column: None,
+    end_line: None,
+    end_column: None,
     });
 }
 

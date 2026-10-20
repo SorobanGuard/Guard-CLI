@@ -117,6 +117,9 @@ fn emit_findings(symbol_keys: &KeyMap, findings: &mut Vec<Finding>) {
                          `Symbol::new(…, \"{key}\")` usages to a unique key to avoid \
                          accidental storage slot collisions."
                     )),
+                column: None,
+                end_line: None,
+                end_column: None,
                 });
             }
         }

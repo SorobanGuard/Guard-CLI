@@ -43,6 +43,9 @@ impl Check for MutableGlobalStateCheck {
                             "Replace `static mut` with `env.storage().persistent()` or `env.storage().instance()` for on-chain state."
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
                 None

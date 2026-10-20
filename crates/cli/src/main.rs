@@ -12,6 +12,46 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Scan cache (Issue #808)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Compute a cache key for a single file.
+///
+/// Key components: file content + tool version + sorted enabled-check names.
+/// Uses a fast but non-cryptographic hash suitable for a dev-time cache.
+fn cache_key(content: &str, check_names: &[&str]) -> String {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    env!("CARGO_PKG_VERSION").hash(&mut hasher);
+    for name in check_names {
+        name.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Try to read cached findings for a file. Returns `None` on any error
+/// (missing, corrupt, or invalid JSON) — the cache is never fatal.
+fn cache_read(cache_dir: &Path, key: &str) -> Option<Vec<Finding>> {
+    let path = cache_dir.join(format!("{key}.json"));
+    let data = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Write findings to the cache. Silently ignores all errors.
+fn cache_write(cache_dir: &Path, key: &str, findings: &[Finding]) {
+    if let Err(_) = fs::create_dir_all(cache_dir) {
+        return;
+    }
+    let path = cache_dir.join(format!("{key}.json"));
+    if let Ok(data) = serde_json::to_string(findings) {
+        let _ = fs::write(&path, data);
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "soroban-guard")]
 #[command(
@@ -76,6 +116,14 @@ enum Commands {
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
+        /// Include suppressed findings in JSON output (`"suppressed": true, "reason": "..."`),
+        /// and print a count of suppressed findings in the summary
+        #[arg(long)]
+        show_suppressed: bool,
+        /// Use an on-disk cache to skip re-checking files whose content has not changed.
+        /// Cache is stored in DIR (default: `.soroban-guard-cache/`).
+        #[arg(long, value_name = "DIR")]
+        cache: Option<Option<PathBuf>>,
     },
     /// List the checks that are enabled by default
     ListChecks {
@@ -119,6 +167,9 @@ struct ScanOptions {
     exclude: Vec<String>,
     includes: Vec<String>,
     max_findings: usize,
+    show_suppressed: bool,
+    cache_dir: Option<PathBuf>,
+    require_suppression_reason: bool,
 }
 
 /// Whether scan results should be printed. `--quiet` suppresses output only while the
@@ -135,9 +186,45 @@ fn run_scan(
     opts: &ScanOptions,
     active_checks: &[Box<dyn soroban_guard_checks::Check + Send + Sync>],
 ) -> i32 {
-    match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
-        Ok((results, files_scanned, files_skipped, _check_panics)) => {
+    use soroban_guard_analyzer::scan_directory_with_checks_and_suppressed;
+
+    // When a cache directory is configured, use the cached scan path which reads
+    // previously stored results for unchanged files and only re-runs checks on changed ones.
+    if let Some(ref cache_dir) = opts.cache_dir {
+        return run_scan_cached(opts, active_checks, cache_dir);
+    }
+
+    // When --show-suppressed is requested, use the extended scan that also collects
+    // silenced findings. Otherwise fall back to the standard scan.
+    let scan_result = if opts.show_suppressed {
+        scan_directory_with_checks_and_suppressed(
+            &opts.path, &opts.exclude, &opts.includes, active_checks,
+        )
+        .map(|(results, suppressed, scanned, skipped, panics)| {
+            (results, Some(suppressed), scanned, skipped, panics)
+        })
+    } else {
+        scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks)
+            .map(|(results, scanned, skipped, panics)| (results, None, scanned, skipped, panics))
+    };
+
+    match scan_result {
+        Ok((results, suppressed_opt, files_scanned, files_skipped, _check_panics)) => {
             let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
+            // Validate require_suppression_reason: error if any suppressed finding lacks a reason
+            if opts.require_suppression_reason {
+                if let Some(ref suppressed) = suppressed_opt {
+                    let missing: Vec<_> = suppressed.iter().filter(|s| s.reason.is_none()).collect();
+                    if !missing.is_empty() {
+                        eprintln!(
+                            "{} {} suppression(s) lack a reason=\"...\" clause (require_suppression_reason = true)",
+                            "error:".red().bold(),
+                            missing.len()
+                        );
+                        return 2;
+                    }
+                }
+            }
             let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
 
             // Produce the serialized payload for the selected structured format,
@@ -145,8 +232,13 @@ fn run_scan(
             // All three formats use println! (trailing newline) as the convention.
             let structured_payload: Option<Result<String, String>> = if opts.json {
                 Some(
-                    json_payload(&findings, files_scanned, files_skipped)
-                        .map_err(|e| e.to_string()),
+                    json_payload_with_suppressed(
+                        &findings,
+                        suppressed_opt.as_deref(),
+                        files_scanned,
+                        files_skipped,
+                    )
+                    .map_err(|e| e.to_string()),
                 )
             } else if opts.sarif {
                 Some(
@@ -239,6 +331,156 @@ fn run_scan(
     }
 }
 
+/// Scan with an on-disk cache.
+///
+/// Files whose content (plus tool version and enabled-check set) matches a cached
+/// entry are not re-scanned; their findings are read from the cache instead.
+/// Files with no cache entry (or a stale one) are scanned normally and their
+/// results are stored back to the cache.
+///
+/// The cache is a "best effort" optimisation: any error reading or writing entries
+/// is silently ignored.
+fn run_scan_cached(
+    opts: &ScanOptions,
+    active_checks: &[Box<dyn soroban_guard_checks::Check + Send + Sync>],
+    cache_dir: &PathBuf,
+) -> i32 {
+    use soroban_guard_analyzer::scan_files_with_checks;
+    use soroban_guard_cli::cache::ScanCache;
+    use walkdir::WalkDir;
+
+    let cache = ScanCache::new(cache_dir.clone());
+    let check_names: Vec<&str> = active_checks.iter().map(|c| c.name()).collect();
+
+    // Collect all .rs files under the scan path (same logic as scan_directory_with_checks).
+    let root = match opts.path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{} {}: {}", "error:".red().bold(), opts.path.display(), e);
+            return 2;
+        }
+    };
+
+    let mut uncached_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut cached_findings: Vec<Finding> = Vec::new();
+    let mut files_scanned_total = 0usize;
+
+    for entry in WalkDir::new(&root).follow_links(false).into_iter().flatten() {
+        let path = entry.path().to_path_buf();
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if soroban_guard_analyzer::is_ignored_path(&path) {
+            continue;
+        }
+        // Skip files in the cache directory itself.
+        if path.starts_with(cache_dir) {
+            continue;
+        }
+        files_scanned_total += 1;
+        // Read content and compute cache key.
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let key = cache.key(&content, &check_names);
+                if let Some(hits) = cache.get(&key) {
+                    cached_findings.extend(hits);
+                } else {
+                    uncached_paths.push(path);
+                }
+            }
+            Err(_) => uncached_paths.push(path),
+        }
+    }
+
+    // Scan uncached files.
+    let fresh_results = if uncached_paths.is_empty() {
+        Ok((Vec::new(), 0usize, 0usize, Vec::new()))
+    } else {
+        scan_files_with_checks(&uncached_paths, &root, &opts.exclude, &opts.includes, active_checks)
+    };
+
+    match fresh_results {
+        Ok((file_results, _, _, _)) => {
+            // Store fresh results in cache.
+            for result in &file_results {
+                // Re-read to get key (content already read once — harmless double read for cache miss).
+                if let Ok(content) = std::fs::read_to_string(root.join(&result.file_path)) {
+                    let key = cache.key(&content, &check_names);
+                    cache.put(&key, &result.findings);
+                }
+            }
+            let mut findings: Vec<Finding> = file_results
+                .into_iter()
+                .flat_map(|r| r.findings)
+                .chain(cached_findings)
+                .collect();
+            findings.sort_by(|a, b| a.file_path.cmp(&b.file_path).then_with(|| a.line.cmp(&b.line)));
+
+            let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
+
+            if !opts.show_suppressed {
+                let structured_payload: Option<Result<String, String>> = if opts.json {
+                    Some(
+                        json_payload(&findings, files_scanned_total, 0)
+                            .map_err(|e| e.to_string()),
+                    )
+                } else if opts.sarif {
+                    Some(
+                        serde_json::to_string_pretty(&build_sarif(&findings, 0))
+                            .map_err(|e| e.to_string()),
+                    )
+                } else if opts.markdown {
+                    Some(Ok(render_markdown(&findings)))
+                } else {
+                    None
+                };
+
+                if let Some(result) = structured_payload {
+                    match result {
+                        Ok(payload) => {
+                            if let Some(ref out_path) = opts.output {
+                                if let Err(e) = write_output(out_path, &payload) {
+                                    eprintln!("{} {}", "error:".red().bold(), e);
+                                    return 2;
+                                }
+                            } else if should_print_results(opts.quiet, should_fail) {
+                                println!("{payload}");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("{} {}", "error:".red().bold(), e);
+                            return 2;
+                        }
+                    }
+                } else if should_print_results(opts.quiet, should_fail) {
+                    let (display, truncated) = truncate(&findings, opts.max_findings);
+                    print_pretty(
+                        &findings,
+                        display,
+                        files_scanned_total,
+                        opts.path.display().to_string(),
+                        truncated,
+                    );
+                }
+            }
+
+            if opts.verbose {
+                let cached_count = files_scanned_total.saturating_sub(uncached_paths.len());
+                eprintln!("Scanned {} file(s) ({} from cache).", files_scanned_total, cached_count);
+            }
+
+            if should_fail { 1 } else { 0 }
+        }
+        Err(e) => {
+            eprintln!("{} {}", "error:".red().bold(), e);
+            2
+        }
+    }
+}
+
 /// Returns a UTC time string like "23:09:36 UTC" without any external date crate.
 fn chrono_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -313,6 +555,8 @@ fn main() {
             watch,
             no_clear,
             max_findings,
+            show_suppressed,
+            cache,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
@@ -412,6 +656,14 @@ fn main() {
             let extra_sensitive = &cfg.checks.sensitive_names.extra;
             let active_checks = default_checks_with_config(&all_disabled, extra_sensitive);
 
+            // Resolve the cache directory from the `--cache` flag:
+            //   --cache        → default dir (.soroban-guard-cache/ relative to scan path)
+            //   --cache <DIR>  → use the given directory
+            //   (absent)       → no cache
+            let cache_dir: Option<PathBuf> = cache.map(|opt| {
+                opt.unwrap_or_else(|| scan_path.join(".soroban-guard-cache"))
+            });
+
             // Build a ScanOptions struct to pass around cleanly.
             let opts = ScanOptions {
                 path: scan_path.clone(),
@@ -425,6 +677,9 @@ fn main() {
                 exclude: exclude.clone(),
                 includes: include.clone(),
                 max_findings,
+                show_suppressed,
+                cache_dir,
+                require_suppression_reason: cfg.checks.require_suppression_reason,
             };
 
             // Run the initial scan.
@@ -693,6 +948,16 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
     let results = findings
         .iter()
         .map(|finding| {
+            let mut region = serde_json::json!({ "startLine": finding.line });
+            if let Some(col) = finding.column {
+                region["startColumn"] = serde_json::json!(col);
+            }
+            if let Some(el) = finding.end_line {
+                region["endLine"] = serde_json::json!(el);
+            }
+            if let Some(ec) = finding.end_column {
+                region["endColumn"] = serde_json::json!(ec);
+            }
             serde_json::json!({
                 "ruleId": finding.check_name,
                 "level": severity_to_sarif_level(finding.severity),
@@ -700,7 +965,7 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": { "uri": finding.file_path },
-                        "region": { "startLine": finding.line }
+                        "region": region
                     }
                 }]
             })
@@ -1063,24 +1328,45 @@ fn json_payload(
     files_scanned: usize,
     files_skipped: usize,
 ) -> Result<String, serde_json::Error> {
-    let (high, medium, low) = severity_counts(findings);
+    json_payload_with_suppressed(findings, None, files_scanned, files_skipped)
+}
 
-    let envelope = serde_json::json!({
+fn json_payload_with_suppressed(
+    findings: &[Finding],
+    suppressed: Option<&[soroban_guard_analyzer::SuppressedFinding]>,
+    files_scanned: usize,
+    files_skipped: usize,
+) -> Result<String, serde_json::Error> {
+    let (high, medium, low) = severity_counts(findings);
+    let suppressed_count = suppressed.map_or(0, |s| s.len());
+
+    let mut summary = serde_json::json!({
+        "total": findings.len(),
+        "high": high,
+        "medium": medium,
+        "low": low,
+        "files_scanned": files_scanned,
+        "files_skipped": files_skipped
+    });
+    if suppressed_count > 0 {
+        summary["suppressed"] = serde_json::json!(suppressed_count);
+    }
+
+    let mut envelope = serde_json::json!({
         "tool": {
             "name": "soroban-guard",
             "version": env!("CARGO_PKG_VERSION")
         },
         "schema_version": 1,
-        "summary": {
-            "total": findings.len(),
-            "high": high,
-            "medium": medium,
-            "low": low,
-            "files_scanned": files_scanned,
-            "files_skipped": files_skipped
-        },
+        "summary": summary,
         "findings": findings
     });
+
+    if let Some(suppressed_list) = suppressed {
+        if !suppressed_list.is_empty() {
+            envelope["suppressed_findings"] = serde_json::to_value(suppressed_list)?;
+        }
+    }
 
     serde_json::to_string_pretty(&envelope)
 }
@@ -1248,6 +1534,9 @@ mod tests {
             description: "desc".to_string(),
             rule_url: None,
             suggestion: None,
+            column: None,
+            end_line: None,
+            end_column: None,
         }
     }
 
@@ -1262,6 +1551,9 @@ mod tests {
             description: "Missing auth".to_string(),
             rule_url: None,
             suggestion: None,
+            column: None,
+            end_line: None,
+            end_column: None,
         }];
 
         let payload = build_sarif(&findings, 0);
@@ -1297,6 +1589,9 @@ mod tests {
             description: "Missing auth".to_string(),
             rule_url: Some(rule_url.to_string()),
             suggestion: None,
+            column: None,
+            end_line: None,
+            end_column: None,
         }];
 
         let payload: serde_json::Value =
@@ -1316,6 +1611,9 @@ mod tests {
                 description: "Missing auth".to_string(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             },
             Finding {
                 check_name: "unchecked-arithmetic".to_string(),
@@ -1326,6 +1624,9 @@ mod tests {
                 description: "Unchecked arithmetic".to_string(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             },
         ];
 
@@ -1350,6 +1651,9 @@ mod tests {
             description: "Missing auth".to_string(),
             rule_url: None,
             suggestion: None,
+            column: None,
+            end_line: None,
+            end_column: None,
         }];
 
         let payload: serde_json::Value =
@@ -1387,6 +1691,9 @@ mod tests {
             description: "Missing auth".to_string(),
             rule_url: None,
             suggestion: None,
+            column: None,
+            end_line: None,
+            end_column: None,
         }];
 
         let path = std::env::temp_dir().join(format!(
@@ -1423,6 +1730,9 @@ mod tests {
                 description: "Missing require_auth".to_string(),
                 rule_url: Some(rule_url.to_string()),
                 suggestion: Some("Add env.require_auth();".to_string()),
+            column: None,
+            end_line: None,
+            end_column: None,
             },
             Finding {
                 check_name: "unchecked-arithmetic".to_string(),
@@ -1433,6 +1743,9 @@ mod tests {
                 description: "Unchecked arithmetic".to_string(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             },
         ];
 
@@ -1512,6 +1825,9 @@ mod tests {
                 description: "High finding".to_string(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             },
             Finding {
                 check_name: "medium-check".to_string(),
@@ -1522,6 +1838,9 @@ mod tests {
                 description: "Medium finding".to_string(),
                 rule_url: None,
                 suggestion: None,
+                column: None,
+                end_line: None,
+                end_column: None,
             },
         ];
 

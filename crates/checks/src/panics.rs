@@ -85,6 +85,9 @@ impl PanicVisitor<'_> {
                  return type to `Result<T, MyError>` and return `Err(…)` instead."
                     .to_string(),
             ),
+        column: None,
+        end_line: None,
+        end_column: None,
         });
     }
 }

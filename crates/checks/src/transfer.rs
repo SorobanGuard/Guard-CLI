@@ -52,6 +52,9 @@ impl Check for SelfTransferCheck {
                     "Add a guard at the top of `{fn_name}`: \
                      `if from == to {{ return; }}` (or panic) to prevent self-transfers."
                 )),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         out

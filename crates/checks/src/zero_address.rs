@@ -227,6 +227,9 @@ impl Check for MissingZeroAddressCheck {
                      destination.",
                     addr_params.first().map(String::as_str).unwrap_or("addr")
                 )),
+            column: None,
+            end_line: None,
+            end_column: None,
             });
         }
         out

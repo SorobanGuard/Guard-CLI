@@ -40,6 +40,9 @@ impl Check for MissingNonceCheck {
                             "Add nonce or sequence number validation to prevent replay attacks"
                                 .to_string(),
                         ),
+                    column: None,
+                    end_line: None,
+                    end_column: None,
                     });
                 }
             }

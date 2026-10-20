@@ -38,6 +38,9 @@ impl Check for MissingInputLengthBoundCheck {
                             suggestion: Some(
                                 "Validate parameter length with .len() or .is_empty()".to_string(),
                             ),
+                        column: None,
+                        end_line: None,
+                        end_column: None,
                         });
                     }
                 }

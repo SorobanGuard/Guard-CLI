@@ -91,6 +91,9 @@ impl Check for MissingContractAnnotationCheck {
                         "Add `#[contract]` to the `{type_name}` struct definition, or remove \
                          the orphan `#[contractimpl]` block."
                     )),
+                column: None,
+                end_line: None,
+                end_column: None,
                 })
             })
             .collect()

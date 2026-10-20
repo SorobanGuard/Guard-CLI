@@ -34,6 +34,8 @@ pub struct ChecksConfig {
     /// Check names to skip.
     pub disabled: Vec<String>,
     pub sensitive_names: SensitiveNamesConfig,
+    /// When `true`, a suppression comment without `reason="..."` is treated as an error.
+    pub require_suppression_reason: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
