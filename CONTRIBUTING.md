@@ -123,6 +123,10 @@ Drive the visitor with `visit::visit_file(&mut v, &file)` or `v.visit_block(&fun
 
 ## How to add a new check (copy `auth.rs` as a template)
 
+Start with the [New check proposal template](.github/ISSUE_TEMPLATE/new_check.md)
+to share the expected severity, vulnerable and safe snippets, false-positive
+risks, and references before implementing a detector.
+
 Use [`crates/checks/src/auth.rs`](crates/checks/src/auth.rs) as the canonical layout: a `const CHECK_NAME`, a unit struct, `impl Check`, private helpers, and a `#[cfg(test)]` module using `syn::parse_file` with `Result`-returning tests.
 
 ### Step-by-step
