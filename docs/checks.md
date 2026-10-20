@@ -804,3 +804,31 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+## `unwrap-or-default-on-state-read` (Low)
+
+**What it detects**
+
+A storage read of a state-like key (balance, supply, counter, nonce, fee, total, config,
+admin, count) that falls back to a default with `.unwrap_or(..)` or `.unwrap_or_default()`.
+An entry that was never written then reads as zero or a default, without an error. A
+read guarded by `.has(&key)` in the same function is not flagged.
+
+**Limitations**
+
+Keys are matched by name, so a state key with an unusual name is not flagged. Severity is
+fixed at Low, even when the value feeds arithmetic.
+
+## `approve-max-amount` (Medium)
+
+**What it detects**
+
+A token `approve(from, spender, amount, expiration_ledger)` call whose `amount` is an integer
+`MAX` constant, such as `i128::MAX` or `u64::MAX`. An unlimited allowance lets a compromised
+spender move the entire balance. This check is separate from `allowance-expiration-unchecked`,
+which looks at the expiration argument.
+
+**Limitations**
+
+Only a bare `MAX` path is matched. Expressions such as `MAX - 1` are not flagged. Calls with
+a different argument count are not checked.
