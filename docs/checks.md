@@ -804,3 +804,59 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+## `dynamic-symbol-from-input` (Medium)
+
+**What it detects**
+
+A `Symbol::new(&env, text)` call where `text` uses a parameter of a public contract
+function. `Symbol::new` traps on over-long or invalid input, and a caller-chosen symbol
+decides which storage key or event topic is used. Literal and `const` symbols are not flagged.
+
+**Limitations**
+
+Parameters are matched by name within the same function. Values passed through a local
+built from a parameter are matched only when the local keeps the parameter's name. Guard
+clauses that validate the input are not recognised, so guarded uses are still flagged.
+
+## `extend-ttl-no-op` (Low)
+
+**What it detects**
+
+An `extend_ttl` call whose threshold or extend-to argument is the literal `0`. Such a call
+never extends the entry, but it still satisfies `missing-ttl-extension`, which only checks that
+the call exists. Keyed calls take `(&key, threshold, extend_to)`. Instance calls take
+`(threshold, extend_to)`.
+
+**Limitations**
+
+Only literal zeros are flagged. Zero values held in constants or variables are not.
+Inverted non-zero arguments are covered by `ttl-threshold-greater-than-extend-to`.
+
+## `admin-unrestricted-withdraw` (Low)
+
+**What it detects**
+
+A function whose body mentions an admin and calls `transfer` with an amount read from the
+contract's own balance (`balance(&env.current_contract_address())`), directly or through one
+local. Such a function can empty the contract with one privileged call. This is reported at
+Low severity so a reviewer can decide whether a timelock or a per-call limit is needed.
+
+**Limitations**
+
+"Admin-gated" is a name heuristic: the function body must mention `admin`. Balances read
+through helper functions are not tracked.
+
+## `timestamp-access-control` (Medium)
+
+**What it detects**
+
+An ordering or equality comparison between `env.ledger().timestamp()` (or `.sequence()`) and
+a value that comes from a public function parameter. When the caller supplies the deadline,
+the caller also chooses the time window, so the time check authorises nothing. Comparisons
+against storage-loaded or constant values are not flagged.
+
+**Limitations**
+
+Only direct `if` and binary comparisons are matched. Comparisons inside `assert!` or
+`require!` macro arguments are not checked.
