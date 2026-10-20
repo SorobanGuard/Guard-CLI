@@ -45,15 +45,22 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("deprecated-soroban-api", "deprecated-api"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,
 /// each with the reason. Keep this list short and justified.
-const TRIGGERS_ALLOW_LIST: &[(&str, &str)] = &[(
-    "missing-event-emission",
-    "fires on almost every state-mutating method in all-findings (26 findings), so no single \
-     method is dedicated to it",
-)];
+const TRIGGERS_ALLOW_LIST: &[(&str, &str)] = &[
+    (
+        "missing-event-emission",
+        "fires on almost every state-mutating method in all-findings (26 findings), so no single \
+         method is dedicated to it",
+    ),
+    (
+        "deprecated-soroban-api",
+        "SDK deprecation patterns are exercised in dedicated test-contracts/deprecated-api fixture pair",
+    ),
+];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
