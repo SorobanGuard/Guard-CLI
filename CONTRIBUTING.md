@@ -199,3 +199,8 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 - Run `cargo fmt --all` before pushing so CI's `cargo fmt --all -- --check` step passes.
 
 Thank you for contributing.
+
+## Proposing a new check
+
+To propose a detector, open a [New check proposal](https://github.com/SorobanGuard/Guard-CLI/issues/new?template=new_check.md)
+issue. It asks for the severity, vulnerable and safe snippets, and known false-positive risks.
