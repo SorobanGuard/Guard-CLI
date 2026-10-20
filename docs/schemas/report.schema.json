@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/schemas/report.schema.json",
+  "title": "soroban-guard --json report",
+  "description": "Output of `soroban-guard scan --json`. A successful scan returns the report object. A failed run returns the error envelope. The schema version is in `schema_version`; bump it when a field is renamed or removed.",
+  "oneOf": [
+    { "$ref": "#/$defs/report" },
+    { "$ref": "#/$defs/errorEnvelope" }
+  ],
+  "$defs": {
+    "report": {
+      "type": "object",
+      "required": ["tool", "schema_version", "summary", "findings"],
+      "additionalProperties": false,
+      "properties": {
+        "tool": {
+          "type": "object",
+          "required": ["name", "version"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "const": "soroban-guard" },
+            "version": { "type": "string" }
+          }
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "summary": { "$ref": "#/$defs/summary" },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "high", "medium", "low", "files_scanned", "files_skipped"],
+      "additionalProperties": false,
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "high": { "type": "integer", "minimum": 0 },
+        "medium": { "type": "integer", "minimum": 0 },
+        "low": { "type": "integer", "minimum": 0 },
+        "files_scanned": { "type": "integer", "minimum": 0 },
+        "files_skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["check_name", "severity", "file_path", "line", "function_name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "check_name": { "type": "string" },
+        "severity": { "enum": ["high", "medium", "low"] },
+        "file_path": { "type": "string" },
+        "line": { "type": "integer", "minimum": 0 },
+        "function_name": { "type": "string" },
+        "description": { "type": "string" },
+        "rule_url": { "type": "string", "format": "uri" },
+        "suggestion": { "type": "string" }
+      }
+    },
+    "errorEnvelope": {
+      "type": "object",
+      "required": ["error", "errors"],
+      "additionalProperties": false,
+      "properties": {
+        "error": { "type": "string" },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

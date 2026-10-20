@@ -230,3 +230,9 @@ Parsers should treat unknown JSON keys as ignored (forward compatibility).
 
 See [`docs/integrations.md`](integrations.md) for CI and editor snippets that
 consume the `--json` and `--sarif` outputs.
+
+## Machine-readable schema
+
+The JSON report is described by [`docs/schemas/report.schema.json`](./schemas/report.schema.json)
+(JSON Schema, draft 2020-12). It covers the report object, the summary, each finding, and the
+error envelope. Consumers can validate output against it or generate types from it.
