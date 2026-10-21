@@ -91,3 +91,41 @@ fn json_output_sorted_by_check_matches_golden() {
         "scan-vulnerable-sort-check.json",
     );
 }
+
+#[test]
+fn pretty_output_grouped_by_file_matches_golden() {
+    assert_matches_golden_with(
+        "--pretty",
+        &["--group-by", "file"],
+        "scan-vulnerable-group-by-file.txt",
+    );
+}
+
+#[test]
+fn pretty_output_grouped_by_check_matches_golden() {
+    assert_matches_golden_with(
+        "--pretty",
+        &["--group-by", "check"],
+        "scan-vulnerable-group-by-check.txt",
+    );
+}
+
+#[test]
+fn pretty_output_group_by_check_respects_max_findings() {
+    assert_matches_golden_with(
+        "--pretty",
+        &["--group-by", "check", "--max-findings", "2"],
+        "scan-vulnerable-group-by-check-max2.txt",
+    );
+}
+
+#[test]
+fn json_output_unaffected_by_group_by() {
+    // `--group-by` only affects pretty output; structured formats must be
+    // byte-identical regardless of the grouping choice.
+    assert_matches_golden_with(
+        "--json",
+        &["--group-by", "check"],
+        "scan-vulnerable.json",
+    );
+}
