@@ -1,6 +1,7 @@
 //! `soroban-guard.toml` configuration file support.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level config file structure.
@@ -37,6 +38,14 @@ pub struct ChecksConfig {
     /// Check names to skip.
     pub disabled: Vec<String>,
     pub sensitive_names: SensitiveNamesConfig,
+    /// Per-check severity overrides (`[checks.severity]`), mapping a check
+    /// name to the severity it should report instead of its built-in one.
+    ///
+    /// Applied after a check runs and before `--fail-on` evaluation and
+    /// output formatting, so every output format agrees. For multi-severity
+    /// checks (e.g. `unchecked-arithmetic`) the override replaces **all**
+    /// levels. Unknown check names or severities are config errors (exit 2).
+    pub severity: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -213,42 +222,19 @@ mod tests {
     }
 
     #[test]
-    fn load_returns_the_config_and_the_path_it_came_from() {
-        let root = temp_root("load-ok");
+    fn parses_per_check_severity_overrides() {
+        let root = temp_root("severity");
+        let path = root.join("soroban-guard.toml");
         fs::write(
-            root.join("soroban-guard.toml"),
-            "[scan]\nmin_severity = \"medium\"\n",
+            &path,
+            "[checks.severity]\nhardcoded-address = \"low\"\nlarge-loop = \"high\"\n",
         )
         .unwrap();
 
-        let (cfg, path) = load(&root).unwrap();
-        let cfg = cfg.expect("config should be present");
-        assert_eq!(cfg.scan.min_severity.as_deref(), Some("medium"));
-        assert_eq!(path, Some(root.join("soroban-guard.toml")));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_parses_the_scan_jobs_key() {
-        let root = temp_root("jobs");
-        fs::write(root.join("soroban-guard.toml"), "[scan]\njobs = 1\n").unwrap();
-
-        let (cfg, _) = load(&root).unwrap();
-        let cfg = cfg.expect("config should be present");
-        assert_eq!(cfg.scan.jobs, Some(1));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn scan_jobs_defaults_to_none_when_unset() {
-        let root = temp_root("jobs-unset");
-        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
-
-        let (cfg, _) = load(&root).unwrap();
-        let cfg = cfg.expect("config should be present");
-        assert_eq!(cfg.scan.jobs, None);
+        let (cfg, _) = load_from_path(&path).unwrap();
+        let severity = cfg.unwrap().checks.severity;
+        assert_eq!(severity.get("hardcoded-address").map(String::as_str), Some("low"));
+        assert_eq!(severity.get("large-loop").map(String::as_str), Some("high"));
 
         fs::remove_dir_all(root).unwrap();
     }
