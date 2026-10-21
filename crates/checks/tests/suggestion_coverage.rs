@@ -651,3 +651,45 @@ impl C {
 "#,
     );
 }
+
+// ─── view-function-writes-storage ────────────────────────────────────────────
+
+#[test]
+fn view_function_writes_storage_has_suggestion() {
+    assert_check_has_suggestion(
+        "view-function-writes-storage",
+        r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn get_balance(env: Env) -> u32 {
+        let v: u32 = env.storage().instance().get(&symbol_short!("bal")).unwrap_or(0);
+        env.storage().instance().set(&symbol_short!("bal"), &v);
+        v
+    }
+}
+"#,
+    );
+}
+
+// ─── auth-on-wrong-address ───────────────────────────────────────────────────
+
+#[test]
+fn auth_on_wrong_address_has_suggestion() {
+    assert_check_has_suggestion(
+        "auth-on-wrong-address",
+        r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        to.require_auth();
+        let token = token::Client::new(&env, &env.current_contract_address());
+        token.transfer(&from, &to, &amount);
+    }
+}
+"#,
+    );
+}

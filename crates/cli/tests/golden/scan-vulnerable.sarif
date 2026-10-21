@@ -124,6 +124,120 @@
             "text": "Method `bump` writes to storage but does not emit an event. Consider using `env.events().publish(…)` to allow off-chain indexers to track contract activity."
           },
           "ruleId": "missing-event-emission"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 14
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` is named like a read-only getter but writes to storage. Getters are assumed to be side-effect free; move the mutation into a separate method."
+          },
+          "ruleId": "view-function-writes-storage"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 26
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` is named like a read-only getter but writes to storage. Getters are assumed to be side-effect free; move the mutation into a separate method."
+          },
+          "ruleId": "view-function-writes-storage"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 38
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` is named like a read-only getter but writes to storage. Getters are assumed to be side-effect free; move the mutation into a separate method."
+          },
+          "ruleId": "view-function-writes-storage"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 14
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` calls `require_auth()` only on the recipient (`to`) instead of the debited party (`from`). Anyone can move another user's funds by naming themselves as the recipient."
+          },
+          "ruleId": "auth-on-wrong-address"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 26
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` calls `require_auth()` only on the recipient (`to`) instead of the debited party (`from`). Anyone can move another user's funds by naming themselves as the recipient."
+          },
+          "ruleId": "auth-on-wrong-address"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startLine": 38
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Method `bump` calls `require_auth()` only on the recipient (`to`) instead of the debited party (`from`). Anyone can move another user's funds by naming themselves as the recipient."
+          },
+          "ruleId": "auth-on-wrong-address"
         }
       ],
       "tool": {
@@ -155,6 +269,32 @@
               "id": "missing-event-emission",
               "shortDescription": {
                 "text": "State-mutating function emits no events"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "fullDescription": {
+                "text": "Getter-named method mutates contract storage"
+              },
+              "helpUri": "https://github.com/SorobanGuard/Guard-CLI",
+              "id": "view-function-writes-storage",
+              "shortDescription": {
+                "text": "Getter-named method mutates contract storage"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "require_auth() called on the recipient instead of the debited party"
+              },
+              "helpUri": "https://github.com/SorobanGuard/Guard-CLI",
+              "id": "auth-on-wrong-address",
+              "shortDescription": {
+                "text": "require_auth() called on the recipient instead of the debited party"
               }
             }
           ],

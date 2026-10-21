@@ -65,6 +65,8 @@ Common causes:
 | `reentrancy-risk` | Branch-sensitive control flow and helper calls are not tracked; storage handle bound to a local variable is not tracked | [checks.md#reentrancy-risk-high](checks.md#reentrancy-risk-high) |
 | `missing-event-for-admin-change` | Events emitted by a helper function are not detected | — |
 | `missing-input-length-bound` | Length validation performed by a helper function is not tracked | — |
+| `view-function-writes-storage` | Storage mutation performed by a helper function is not tracked; storage handle bound to a local variable is not tracked; getter names outside the configured patterns are not matched | — |
+| `auth-on-wrong-address` | Auth performed by a helper function is not tracked; parameters renamed via a type alias or destructured binding may not be recognized as debit/credit sides | — |
 
 ---
 

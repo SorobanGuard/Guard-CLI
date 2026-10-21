@@ -49,6 +49,13 @@ disabled = ["unsafe-randomness", "reentrancy"]
 # `unprotected-upgrade`, `unprotected-token-mint`, and
 # `unprotected-contract-deployment`.
 extra = ["drain", "sweep", "rescue_funds"]
+
+[checks.getter_names]
+# Extra function-name patterns to treat as read-only getters, on top of the
+# built-in list used exclusively by the `view-function-writes-storage` check.
+# A `#[contractimpl]` method whose name matches one of these patterns and whose
+# body writes storage is reported (pure TTL extension is ignored).
+extra = ["peek", "snapshot", "stats"]
 ```
 
 ## Field reference
@@ -59,12 +66,14 @@ extra = ["drain", "sweep", "rescue_funds"]
 | `[scan] min_severity` | `"high"` \| `"medium"` \| `"low"` | unset | Same as `--fail-on`: exit `1` when a finding at or above this severity is present. |
 | `[checks] disabled` | list of strings | `[]` | Check names to skip, merged with any `--disable-check` flags. Unknown names cause the scan to exit `2`. |
 | `[checks.sensitive_names] extra` | list of strings | `[]` | Additional function-name patterns treated as privileged/admin-like, appended to the built-in list used **only** by `unprotected-admin`. Other checks (`missing-zero-address-check`, `unprotected-upgrade`, `unprotected-token-mint`, `unprotected-contract-deployment`) maintain their own separate hardcoded lists and are not affected by this option. |
+| `[checks.getter_names] extra` | list of strings | `[]` | Additional function-name patterns treated as read-only getters, appended to the built-in list used **only** by `view-function-writes-storage`. The built-in list matches names like `get_*`, `balance`, `total_supply`, `is_*`, `view_*`, and `*_of`. A matching `#[contractimpl]` method whose body mutates storage is reported (Low severity); pure TTL extension (`extend_ttl`/`bump`) is not treated as a mutation. Other checks are not affected by this option. |
 
 ## Example
 
 A contract crate that wants CI to fail on Medium findings, skip the
-randomness check (it uses an audited off-chain oracle instead), and flag a
-custom `drain` function as sensitive:
+randomness check (it uses an audited off-chain oracle instead), flag a
+custom `drain` function as sensitive, and treat `peek`/`snapshot` as getters
+for `view-function-writes-storage`:
 
 ```toml
 # soroban-guard.toml
@@ -76,6 +85,9 @@ disabled = ["unsafe-randomness"]
 
 [checks.sensitive_names]
 extra = ["drain"]
+
+[checks.getter_names]
+extra = ["peek", "snapshot"]
 ```
 
 ```bash
@@ -94,4 +106,3 @@ min_severity = "medium"
 ```bash
 soroban-guard scan            # scans contracts/token
 soroban-guard scan other/dir  # the argument wins over [scan] path
-```

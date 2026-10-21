@@ -243,6 +243,55 @@ mod integration {
         assert_eq!(pat_ident_name(&pat), None);
         Ok(())
     }
+
+    #[test]
+    fn getter_name_matches_default_patterns() {
+        assert!(is_getter_name("get_balance", &[]));
+        assert!(is_getter_name("is_frozen", &[]));
+        assert!(is_getter_name("view_admin", &[]));
+        assert!(is_getter_name("balance_of", &[]));
+        assert!(is_getter_name("balance", &[]));
+        assert!(is_getter_name("total_supply", &[]));
+        assert!(!is_getter_name("transfer", &[]));
+        assert!(!is_getter_name("set_admin", &[]));
+    }
+
+    #[test]
+    fn getter_name_honours_custom_patterns() {
+        assert!(is_getter_name("fetch_admin", &["fetch_"]));
+        assert!(!is_getter_name("get_admin", &["fetch_"]));
+    }
+
+    #[test]
+    fn transfer_params_are_classified_by_side() -> Result<(), syn::Error> {
+        let sig: Signature = syn::parse_str(
+            "fn transfer(env: Env, from: Address, to: Address, owner: Address, recipient: Address)",
+        )?;
+        let (debit, credit) = classify_transfer_params(&sig);
+        assert_eq!(debit, vec!["from".to_string(), "owner".to_string()]);
+        assert_eq!(credit, vec!["to".to_string(), "recipient".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_param_names_do_not_match_substrings() {
+        assert!(is_debit_side_param_name("from_addr"));
+        assert!(is_debit_side_param_name("token_owner"));
+        assert!(!is_debit_side_param_name("platform"));
+        assert!(is_credit_side_param_name("to"));
+        assert!(!is_credit_side_param_name("token"));
+    }
+
+    #[test]
+    fn receiver_refers_to_param_handles_clone_and_deref() -> Result<(), syn::Error> {
+        let clone: Expr = syn::parse_str("from.clone()")?;
+        assert!(receiver_refers_to_param(&clone, "from"));
+        let deref: Expr = syn::parse_str("*from")?;
+        assert!(receiver_refers_to_param(&deref, "from"));
+        let other: Expr = syn::parse_str("to")?;
+        assert!(!receiver_refers_to_param(&other, "from"));
+        Ok(())
+    }
 }
 
 /// Does the receiver chain of `expr` contain a call to `.<method>()`? Walks back through
@@ -279,6 +328,127 @@ pub(crate) fn is_storage_mutation_call(m: &syn::ExprMethodCall) -> bool {
         return false;
     }
     receiver_chain_contains_storage(&m.receiver)
+}
+
+/// Default name fragments that mark a `#[contractimpl]` method as a read-only getter.
+/// Matched case-insensitively against the method name: a name starting with `get_`,
+/// `is_`, or `view_`, ending with `_of`, or equal to `balance` / `total_supply`.
+pub(crate) const DEFAULT_GETTER_PATTERNS: &[&str] = &[
+    "get_",
+    "is_",
+    "view_",
+    "_of",
+    "balance",
+    "total_supply",
+];
+
+/// Does `name` match one of the getter `patterns`? A pattern ending in `_` is a prefix
+/// match, a pattern starting with `_` is a suffix match, and anything else is an exact
+/// match. All comparisons are case-insensitive so `get_Balance` and `total_supply` both
+/// match. Passing an empty `patterns` slice falls back to [`DEFAULT_GETTER_PATTERNS`].
+pub(crate) fn is_getter_name(name: &str, patterns: &[&str]) -> bool {
+    let lower = name.to_lowercase();
+    let patterns = if patterns.is_empty() {
+        DEFAULT_GETTER_PATTERNS
+    } else {
+        patterns
+    };
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.to_lowercase();
+        if let Some(prefix) = pattern.strip_suffix('_') {
+            lower.starts_with(prefix)
+        } else if let Some(suffix) = pattern.strip_prefix('_') {
+            lower.ends_with(suffix)
+        } else {
+            lower == pattern
+        }
+    })
+}
+
+/// Name fragments that mark a parameter as the *debited* side of a transfer — the party
+/// whose funds move and who must therefore authorise the call.
+const DEBIT_SIDE_KEYWORDS: &[&str] = &["from", "owner", "sender", "payer", "spender"];
+
+/// Name fragments that mark a parameter as the *credited* side of a transfer — the
+/// recipient, who must never be the only party authorising a debit.
+const CREDIT_SIDE_KEYWORDS: &[&str] = &["to", "recipient", "dest"];
+
+/// Is `name` a debit-side parameter name (`from`, `owner`, `sender`, `payer`, `spender`)?
+/// Matches whole words within the identifier so `from_addr` and `token_owner` count while
+/// `platform` does not.
+pub(crate) fn is_debit_side_param_name(name: &str) -> bool {
+    name_matches_keywords(name, DEBIT_SIDE_KEYWORDS)
+}
+
+/// Is `name` a credit-side parameter name (`to`, `recipient`, `dest`)?
+pub(crate) fn is_credit_side_param_name(name: &str) -> bool {
+    name_matches_keywords(name, CREDIT_SIDE_KEYWORDS)
+}
+
+/// Does `name` contain one of `keywords` as a whole word (split on `_` and camelCase
+/// boundaries, case-insensitively)?
+fn name_matches_keywords(name: &str, keywords: &[&str]) -> bool {
+    let words = split_ident_words(name);
+    keywords.iter().any(|k| words.iter().any(|w| w == k))
+}
+
+/// Split an identifier into lowercase words on `_` and camelCase boundaries:
+/// `fromAddress` -> `["from", "address"]`, `token_owner` -> `["token", "owner"]`.
+fn split_ident_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower = false;
+    for ch in name.chars() {
+        if ch == '_' {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_lower && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        prev_lower = ch.is_lowercase() || ch.is_numeric();
+        current.push(ch.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// The `Address`-typed parameters of `sig` classified as debit-side vs credit-side, by
+/// name. Returns `(debit_side, credit_side)`.
+pub(crate) fn classify_transfer_params(sig: &Signature) -> (Vec<String>, Vec<String>) {
+    let mut debit = Vec::new();
+    let mut credit = Vec::new();
+    for name in address_param_names(sig) {
+        if is_debit_side_param_name(&name) {
+            debit.push(name);
+        } else if is_credit_side_param_name(&name) {
+            credit.push(name);
+        }
+    }
+    (debit, credit)
+}
+
+/// Does `receiver` refer to the parameter named `param`? Accepts the bare binding
+/// (`from`), a clone (`from.clone()`), and a deref (`*from`), so aliases like
+/// `let payer = from;` are covered by passing the alias name as `param`.
+pub(crate) fn receiver_refers_to_param(receiver: &Expr, param: &str) -> bool {
+    match receiver {
+        Expr::Path(p) => p.path.is_ident(param),
+        Expr::MethodCall(m) => {
+            matches!(m.method.to_string().as_str(), "clone" | "to_address")
+                && receiver_refers_to_param(&m.receiver, param)
+        }
+        Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+            receiver_refers_to_param(&u.expr, param)
+        }
+        Expr::Paren(p) => receiver_refers_to_param(&p.expr, param),
+        _ => false,
+    }
 }
 
 /// Is `receiver` something `.require_auth()` / `.require_auth_for_args()` can be legally

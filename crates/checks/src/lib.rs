@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod annotations;
 pub mod auth;
+pub mod auth_on_wrong_address;
 pub mod auth_order;
 pub mod balance;
 pub mod delegate;
@@ -27,6 +28,7 @@ pub mod ttl;
 pub mod unchecked_divisor;
 pub mod unsafe_randomness;
 pub mod vec_growth;
+pub mod view_function_writes_storage;
 pub mod xc_input;
 pub mod zero_address;
 pub mod unchecked_token_amount;
@@ -39,6 +41,7 @@ pub mod util;
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
+pub use auth_on_wrong_address::AuthOnWrongAddressCheck;
 pub use auth_order::AuthAfterStorageWriteCheck;
 pub use balance::MissingBalanceCheck;
 pub use delegate::DelegateCallRiskCheck;
@@ -63,6 +66,7 @@ pub use ttl::MissingTtlExtensionCheck;
 pub use unchecked_divisor::UncheckedDivisorCheck;
 pub use unsafe_randomness::UnsafeRandomnessCheck;
 pub use vec_growth::UnboundedVecGrowthCheck;
+pub use view_function_writes_storage::ViewFunctionWritesStorageCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
 pub use unchecked_token_amount::UncheckedTokenAmountCheck;
@@ -230,6 +234,8 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(ViewFunctionWritesStorageCheck),
+        Box::new(AuthOnWrongAddressCheck),
     ]
 }
 

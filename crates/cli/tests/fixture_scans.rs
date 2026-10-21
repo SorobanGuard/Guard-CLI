@@ -278,3 +278,13 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn view_function_writes_storage_fixtures() {
+    assert_fixture_pair("view-function-writes-storage", "view-function-writes-storage");
+}
+
+#[test]
+fn auth_on_wrong_address_fixtures() {
+    assert_fixture_pair("auth-on-wrong-address", "auth-on-wrong-address");
+}
