@@ -63,3 +63,66 @@ fn sarif_output_matches_golden() {
 fn markdown_output_matches_golden() {
     assert_matches_golden("--markdown", "scan-vulnerable.md");
 }
+
+/// Golden test for `explain <check> --json` (Issue #881).
+///
+/// Asserts the JSON object exposes exactly the documented keys so editors and
+/// dashboards can rely on a stable shape, and that it is sourced from the same
+/// `CheckMeta` data used by the text output.
+#[test]
+fn explain_json_matches_golden() {
+    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join("explain-json.json");
+    let expected = normalise(
+        &std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", golden_path.display())),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .current_dir(workspace_root())
+        .args(["explain", "unprotected-upgrade", "--json"])
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("failed to run soroban-guard");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "unexpected exit status; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = normalise(&String::from_utf8(output.stdout).expect("stdout is UTF-8"));
+    assert!(
+        actual == expected,
+        "`explain unprotected-upgrade --json` no longer matches {}.\n\
+         If the change is intended, update the golden file.\n--- expected\n{expected}\n--- actual\n{actual}",
+        golden_path.display()
+    );
+}
+
+/// Unknown checks must exit `2` and, with `--json`, emit a JSON error object
+/// (consistent with #670).
+#[test]
+fn explain_json_unknown_check_errors() {
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .current_dir(workspace_root())
+        .args(["explain", "definitely-not-a-check", "--json"])
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("failed to run soroban-guard");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unknown check should exit 2; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be a JSON error object");
+    assert!(
+        value.get("error").is_some(),
+        "JSON error object should contain an `error` field, got: {stdout}"
+    );
+}
