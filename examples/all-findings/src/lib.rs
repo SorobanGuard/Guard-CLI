@@ -85,9 +85,20 @@ impl AllFindingsContract {
     }
 
     // Triggers `self-transfer`: transfer-like method has no `from == to` guard.
+    // Also triggers `auth-on-wrong-address`: only the credit-side `to` address is
+    // authorised, while the debited `from` address is never authorised.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        to.require_auth();
         let token = soroban_sdk::token::Client::new(&env, &from);
         token.transfer(&from, &to, &amount);
+    }
+
+    // Triggers `view-function-writes-storage`: a getter-style method mutates storage.
+    pub fn get_balance(env: Env) -> i128 {
+        let key = symbol_short!("balance");
+        let current: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        env.storage().instance().set(&key, &(current + 1));
+        current
     }
 
     // Triggers `missing-zero-address-check`: address is accepted and stored without a

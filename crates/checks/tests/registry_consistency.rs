@@ -45,6 +45,8 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("view-function-writes-storage", "view-function-writes-storage"),
+    ("auth-on-wrong-address", "auth-on-wrong-address"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,

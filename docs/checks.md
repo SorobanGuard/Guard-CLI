@@ -19,11 +19,16 @@ In an `impl` block marked with `#[contractimpl]` or `#[soroban_sdk::contractimpl
 
 Contract state updates should be gated. This rule recognizes both `env.require_auth()` and `env.require_auth_for_args(…)` as valid auth gates.
 
+**Relationship to `auth-on-wrong-address`**
+
+This check only verifies that *some* `require_auth` call is present. It does not verify *which* address is authorised, so a transfer that calls `to.require_auth()` (the recipient) while never authorising `from` (the debited party) passes this check. That copy/paste bug is covered by [`auth-on-wrong-address`](#auth-on-wrong-address-high).
+
 **Limitations**
 
 - Only the `Env` binding named `env` counts.
 - Static analysis cannot see auth hidden in helpers.
 - `extend_ttl`/`bump` are not treated as storage mutations: extending a ledger entry's TTL does not change the stored value, cannot move funds, and cannot escalate privilege, so it is not a write this check cares about.
+- Does not check that the authorised address is the correct one; see [`auth-on-wrong-address`](#auth-on-wrong-address-high).
 
 **Fixture:** `test-contracts/vulnerable/`, `test-contracts/safe/`
 
@@ -804,3 +809,81 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+---
+
+## `view-function-writes-storage` (Low)
+
+**What it detects**
+
+In `#[contractimpl]` methods whose name matches a getter pattern — `get_*`, `balance`, `total_supply`, `is_*`, `view_*`, `*_of` (configurable) — a storage mutation per `util::is_storage_mutation_call` (`set`, `remove`, `append`, …). Pure TTL extension (`extend_ttl` / `bump`) is excluded, since refreshing a ledger entry's TTL is a common and acceptable getter side effect.
+
+**Why it matters**
+
+Functions named like getters are called by clients, indexers and other contracts under the assumption that they are side-effect free. A getter that writes storage (counters, lazy initialisation, TTL refresh combined with a `set`) is surprising and can be abused to make read-only simulations diverge from real execution: a "read" that mutates state changes results between simulation and submission, and can be used to grief callers or skew accounting.
+
+**Example**
+
+```rust
+#[contractimpl]
+impl Contract {
+	pub fn get_count(env: Env) -> u32 {
+		let count: u32 = env.storage().instance().get(&symbol_short!("count")).unwrap_or(0);
+		// Finding: a getter mutates contract state.
+		env.storage().instance().set(&symbol_short!("count"), &(count + 1));
+		count
+	}
+
+	pub fn get_count_safely(env: Env) -> u32 {
+		// Not flagged: TTL extension only.
+		env.storage().instance().extend_ttl(100, 1000);
+		env.storage().instance().get(&symbol_short!("count")).unwrap_or(0)
+	}
+}
+```
+
+**Limitations**
+
+- Name-based heuristic: a getter with a non-standard name (e.g. `fetch_total`) is not detected, and a mutating function that happens to match a getter pattern is flagged.
+- Any storage mutation anywhere in the body triggers the finding, even if it is on a branch that is rarely taken.
+- Mutations performed inside helper functions called by the getter are not visible to this check.
+
+**Fixture:** `test-contracts/view-writes-vulnerable/`, `test-contracts/view-writes-safe/`
+
+---
+
+## `auth-on-wrong-address` (High)
+
+**What it detects**
+
+In `#[contractimpl]` functions that have both a debit-side parameter (`from`, `owner`, `sender`, `payer`, `spender`) and a credit-side parameter (`to`, `recipient`, `dest`) and that perform a transfer or balance debit: the function is flagged when `require_auth` / `require_auth_for_args` is invoked **only** on credit-side addresses and never on the debit-side address.
+
+**Why it matters**
+
+In transfer-like functions the *debited* party must authorise the call. A common copy/paste bug is calling `to.require_auth()` (the recipient) while `from` is never authorised, so anyone can move another user's funds by naming themselves as `to`. [`missing-require-auth`](#missing-require-auth-high) does not catch this because *an* `Address::require_auth` call is present.
+
+**Example**
+
+```rust
+#[contractimpl]
+impl Contract {
+	pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+		// Finding: only the recipient is authorised.
+		to.require_auth();
+		// … debit `from`, credit `to` …
+	}
+
+	pub fn transfer_safely(env: Env, from: Address, to: Address, amount: i128) {
+		from.require_auth();
+		// … debit `from`, credit `to` …
+	}
+}
+```
+
+**Limitations**
+
+- Parameter-name based: debit/credit sides are recognised by conventional names; renamed parameters are resolved through simple aliases where possible, but unusual naming may be missed.
+- Only inspects auth calls made directly in the method body; auth enforced inside a helper function is not visible.
+- Authorising both sides is accepted (not flagged), even if only the debit side strictly needs it.
+
+**Fixture:** `test-contracts/auth-wrong-address-vulnerable/`, `test-contracts/auth-wrong-address-safe/`
