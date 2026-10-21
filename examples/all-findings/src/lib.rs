@@ -222,4 +222,14 @@ impl AllFindingsContract {
         env.require_auth();
         env.storage().instance().set(&symbol_short!("payload"), &payload);
     }
+
+    // Triggers `contract-fn-name-too-long`: public entrypoint exceeds Soroban's 32-character symbol limit.
+    pub fn this_contract_entrypoint_name_is_too_long() {}
+
+    // Triggers `allowance-expiration-unchecked`: expiration is stored without comparing it to the ledger.
+    pub fn approve_allowance(env: Env, amount: i128, expiration_ledger: u32) {
+        env.storage()
+            .persistent()
+            .set(&symbol_short!("allowance"), &(amount, expiration_ledger));
+    }
 }
