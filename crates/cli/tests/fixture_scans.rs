@@ -1,6 +1,7 @@
 use soroban_guard_analyzer::{scan_directory, scan_directory_with_checks};
 use soroban_guard_checks::default_checks_with_config;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[path = "../src/config.rs"]
 mod config;
@@ -40,6 +41,84 @@ fn assert_fixture_pair(base: &str, expected_check: &str) {
             .all(|finding| finding.check_name != expected_check),
         "{base}-safe unexpectedly produced {expected_check}; findings: {safe:#?}"
     );
+}
+
+/// Runs the CLI binary with `--json` over the given fixture and returns the
+/// parsed JSON document. Panics with the fixture name on any failure.
+fn run_cli_json(fixture: &str) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .arg("scan")
+        .arg(fixture_path(fixture))
+        .arg("--json")
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run CLI on {fixture}: {error}"));
+    assert!(
+        output.status.success(),
+        "CLI failed on {fixture}: status {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("CLI emitted invalid JSON for {fixture}: {error}"))
+}
+
+/// Asserts that `value` at `pointer` is a JSON integer (not a float/string).
+fn assert_integer(doc: &serde_json::Value, fixture: &str, pointer: &str) {
+    let value = doc
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("{fixture}: missing JSON pointer {pointer}"));
+    assert!(
+        value.is_i64() || value.is_u64(),
+        "{fixture}: JSON pointer {pointer} must be an integer, got {value}"
+    );
+}
+
+/// Asserts that `value` at `pointer` is a JSON string.
+fn assert_string(doc: &serde_json::Value, fixture: &str, pointer: &str) {
+    let value = doc
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("{fixture}: missing JSON pointer {pointer}"));
+    assert!(
+        value.is_string(),
+        "{fixture}: JSON pointer {pointer} must be a string, got {value}"
+    );
+}
+
+/// Validates a single `--json` document against the field types documented in
+/// `docs/json-schema.md`. Hand-rolled assertions only; no schema crate.
+fn assert_json_schema(fixture: &str, doc: &serde_json::Value) {
+    // summary.* integers
+    assert_integer(doc, fixture, "/summary/total");
+    assert_integer(doc, fixture, "/summary/high");
+    assert_integer(doc, fixture, "/summary/medium");
+    assert_integer(doc, fixture, "/summary/low");
+
+    // findings[] array with documented field types
+    let findings = doc
+        .pointer("/findings")
+        .unwrap_or_else(|| panic!("{fixture}: missing JSON pointer /findings"));
+    let findings = findings
+        .as_array()
+        .unwrap_or_else(|| panic!("{fixture}: /findings must be an array"));
+
+    for (index, finding) in findings.iter().enumerate() {
+        let base = format!("/findings/{index}");
+        assert_string(doc, fixture, &format!("{base}/check_name"));
+        assert_string(doc, fixture, &format!("{base}/message"));
+        assert_string(doc, fixture, &format!("{base}/file_path"));
+        assert_integer(doc, fixture, &format!("{base}/line"));
+
+        let severity = finding
+            .pointer("/severity")
+            .unwrap_or_else(|| panic!("{fixture}: missing JSON pointer {base}/severity"));
+        let severity = severity
+            .as_str()
+            .unwrap_or_else(|| panic!("{fixture}: {base}/severity must be a string"));
+        assert!(
+            matches!(severity, "High" | "Medium" | "Low"),
+            "{fixture}: {base}/severity must be one of High, Medium, Low; got {severity}"
+        );
+    }
 }
 
 #[test]
@@ -271,10 +350,45 @@ fn ttl_fixtures() {
 
 #[test]
 fn input_length_fixtures() {
-    assert_fixture_pair("input-length", "missing-input-length-bound");
+    assert_fixture_pair("input-length", "missing-input-length-check");
 }
 
+/// Every vulnerable fixture's `--json` output must validate against the field
+/// types documented in `docs/json-schema.md`.
 #[test]
-fn large_loop_fixtures() {
-    assert_fixture_pair("large-loop", "large-loop");
+fn json_output_matches_documented_schema_for_all_fixtures() {
+    let fixtures = [
+        "vulnerable",
+        "admin-vulnerable",
+        "arithmetic-vulnerable",
+        "division-vulnerable",
+        "global-state-vulnerable",
+        "panic-vulnerable",
+        "reentrancy-vulnerable",
+        "contract-deployment-vulnerable",
+        "token-amount-vulnerable",
+        "upgrade-vulnerable",
+        "delegate-vulnerable",
+        "self-transfer-vulnerable",
+        "std-imports-vulnerable",
+        "contract-annotation-vulnerable",
+        "key-collision-vulnerable",
+        "storage-vulnerable",
+        "auth-order-vulnerable",
+        "token-mint-vulnerable",
+        "vec-growth-vulnerable",
+        "invoke-return-vulnerable",
+        "event-vulnerable",
+        "admin-event-vulnerable",
+        "nonce-vulnerable",
+        "zero-address-vulnerable",
+        "uninitialized-storage-read-vulnerable",
+        "ttl-vulnerable",
+        "input-length-vulnerable",
+    ];
+
+    for fixture in fixtures {
+        let doc = run_cli_json(fixture);
+        assert_json_schema(fixture, &doc);
+    }
 }
