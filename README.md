@@ -52,16 +52,68 @@ Soroban contracts are Rust crates compiled to WASM and deployed to the Stellar n
 
 ## Requirements
 
-- Rust 1.74+ (2021 edition)
+- Rust 1.74+ (2021 edition) — this is the MSRV declared as `rust-version` in `Cargo.toml`
 - No Stellar SDK or network connection required — analysis is purely static
 
-## Build
+## Install
+
+### From crates.io
+
+Once `soroban-guard-cli` is published, install the latest release with:
 
 ```bash
+cargo install soroban-guard-cli
+```
+
+### From a local checkout
+
+Install the CLI from the workspace on a clean checkout:
+
+```bash
+git clone https://github.com/SorobanGuard/Guard-CLI.git
+cd Guard-CLI
+cargo install --path crates/cli
+```
+
+This places the `soroban-guard` binary in `~/.cargo/bin` (make sure that directory is on your `PATH`).
+
+### Build from source
+
+To build without installing (e.g. to run from `target/`):
+
+```bash
+git clone https://github.com/SorobanGuard/Guard-CLI.git
+cd Guard-CLI
 cargo build --release
 ```
 
 The binary is `target/release/soroban-guard` (package `soroban-guard-cli`).
+
+### Prebuilt binaries
+
+Prebuilt release binaries for Linux, macOS, and Windows will be downloadable from the [Releases](https://github.com/SorobanGuard/Guard-CLI/releases) page once [#825](https://github.com/SorobanGuard/Guard-CLI/issues/825) lands. Until then, use one of the `cargo` methods above.
+
+### Shell completions
+
+Generate completions for your shell with `soroban-guard completions <shell>` and source the output from your shell's startup file.
+
+**Bash** — add to `~/.bashrc`:
+
+```bash
+soroban-guard completions bash > ~/.local/share/bash-completion/completions/soroban-guard
+```
+
+**Zsh** — add to a directory on your `fpath` (e.g. `~/.zfunc`), then `compinit`:
+
+```zsh
+soroban-guard completions zsh > ~/.zfunc/_soroban-guard
+```
+
+**Fish** — write to the completions directory:
+
+```fish
+soroban-guard completions fish > ~/.config/fish/completions/soroban-guard.fish
+```
 
 ---
 
@@ -194,8 +246,6 @@ Guard-CLI/
 │   └── checks/                 # Check trait + individual detectors
 │       └── src/
 │           ├── lib.rs          # trait definition, Finding, Severity, default_checks()
-│           └── ...             # one module per detector; see docs/checks.md for the full list
-└── test-contracts/             # 68 standalone Soroban fixture crates (excluded from workspace)
-    ├── vulnerable/             # triggers missing-require-a
+│           └── ...    
 
-/* … truncated 4531 chars — edit only what you need near the top … */
+/* … truncated 302 chars — edit only what you need near the top … */
