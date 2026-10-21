@@ -57,3 +57,19 @@ fn clap_rejects_output_with_pretty_format() {
     assert!(stderr.contains("required"), "{stderr}");
     assert!(stderr.contains("--output"), "{stderr}");
 }
+
+#[test]
+fn man_page_includes_subcommands_and_flags() {
+    let output = run(&["man"]);
+    assert!(
+        output.status.success(),
+        "man command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scan"), "man page missing scan: {stdout}");
+    assert!(
+        stdout.contains("--fail-on"),
+        "man page missing --fail-on: {stdout}"
+    );
+}

@@ -19,6 +19,7 @@ soroban-guard-analyzer = { path = "../analyzer", version = "0.1.0" }
 soroban-guard-checks = { path = "../checks", version = "0.1.0" }
 clap.workspace = true
 clap_complete = "4.5"
+clap_mangen = "0.2"
 colored.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
