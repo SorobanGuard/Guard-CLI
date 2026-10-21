@@ -1,0 +1,7 @@
+- id: soroban-guard
+  name: Soroban Guard
+  description: Static analysis for Soroban smart contracts (blocks on High findings).
+  entry: soroban-guard scan . --fail-on high
+  language: system
+  pass_filenames: false
+  types: [rust]

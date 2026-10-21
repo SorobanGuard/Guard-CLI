@@ -14,6 +14,41 @@ Add `target/release/soroban-guard` to your `PATH`, or replace `soroban-guard` in
 
 ## Pre-commit hook
 
+There are two ways to wire Soroban Guard into [pre-commit](https://pre-commit.com/):
+reference this repository directly, or drop in a hand-written local hook.
+
+### Option A — reference this repository (recommended)
+
+The repo ships a `.pre-commit-hooks.yaml`, so you can point pre-commit at it
+directly. Add this to your `.pre-commit-config.yaml`:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/SorobanGuard/Guard-CLI
+    rev: v0.1.0  # pin to a released tag or commit SHA
+    hooks:
+      - id: soroban-guard
+```
+
+Then install the hook:
+
+```bash
+pre-commit install
+```
+
+The published hook uses `language: system`, so the `soroban-guard` binary must be
+on your `PATH` (see the build step above). It runs `soroban-guard scan . --fail-on high`,
+so it **blocks on High findings only** — the same default as the CLI. To block on
+Medium or Low findings too, override the entry in your config:
+
+```yaml
+      - id: soroban-guard
+        entry: soroban-guard scan . --fail-on low
+```
+
+### Option B — hand-written local hook
+
 Blocks a commit whenever any **High** finding is present. Drop the snippet into
 `.git/hooks/pre-commit` and make it executable.
 

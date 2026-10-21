@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'README.md'
+      - 'docs/**'
   pull_request:
     branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'README.md'
+      - 'docs/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,6 +42,36 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --release
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (LCOV)
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
+
+      - name: Coverage summary
+        run: cargo llvm-cov report --summary-only | tee "$GITHUB_STEP_SUMMARY"
 
   msrv:
     name: MSRV (1.74)
@@ -80,3 +118,29 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/examples
         run: cargo check --manifest-path examples/all-findings/Cargo.toml
+
+  lint-workflows-and-docs:
+    name: Lint workflows and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        uses: raven-actions/actionlint@v2
+        with:
+          # Pin the actionlint release so CI is reproducible.
+          version: 1.7.7
+          # Fail the job if actionlint reports any findings.
+          fail-on-error: true
+
+      - name: Lint Markdown links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # Check README and docs for broken links/anchors.
+          args: >-
+            --no-progress
+            --verbose
+            --accept 200,204,206,301,302,307,308,429
+            README.md
+            docs/
+          fail: true
