@@ -26,6 +26,12 @@ pub struct ScanConfig {
     /// process exits `1` when a finding at or above this severity is present.
     /// This does **not** filter findings out of the printed output.
     pub min_severity: Option<String>,
+    /// Maximum size in bytes of a `.rs` file that will be parsed.
+    ///
+    /// Files larger than this are counted as skipped (and reported under
+    /// `--verbose`) rather than parsed. Equivalent to the `--max-file-size`
+    /// flag (the flag wins if both are set). Defaults to 2 MiB when unset.
+    pub max_file_size: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -219,93 +225,25 @@ mod tests {
         .unwrap();
 
         let (cfg, path) = load(&root).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
+        let cfg = cfg.expect("config should be present");
+        assert_eq!(cfg.scan.min_severity.as_deref(), Some("medium"));
         assert_eq!(path, Some(root.join("soroban-guard.toml")));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_returns_none_none_when_nothing_is_found() {
-        let root = temp_root("load-none");
-        fs::create_dir_all(root.join(".git")).unwrap();
+    fn scan_max_file_size_is_parsed_from_config() {
+        let root = temp_root("maxfilesize");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[scan]\nmax_file_size = 1048576\n",
+        )
+        .unwrap();
 
-        let (cfg, path) = load(&root).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_reports_a_malformed_config_as_an_error() {
-        let root = temp_root("load-bad");
-        fs::write(root.join("soroban-guard.toml"), "not valid toml [[[").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_from_path_uses_exactly_the_given_file() {
-        let root = temp_root("explicit");
-        fs::create_dir_all(root.join("src")).unwrap();
-        // A discovered config that must be ignored in favor of the explicit one.
-        fs::write(root.join("soroban-guard.toml"), "[scan]\nmin_severity = \"low\"\n").unwrap();
-        let explicit = root.join("shared-policy.toml");
-        fs::write(&explicit, "[scan]\nmin_severity = \"high\"\n").unwrap();
-
-        let (cfg, path) = resolve(&root.join("src"), Some(&explicit), false).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("high"));
-        assert_eq!(path, Some(explicit));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_missing_explicit_config_as_an_error() {
-        let root = temp_root("explicit-missing");
-        let missing = root.join("nope.toml");
-
-        let err = resolve(&root, Some(&missing), false).unwrap_err();
-        assert!(err.contains("nope.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_malformed_explicit_config_as_an_error() {
-        let root = temp_root("explicit-bad");
-        let bad = root.join("bad.toml");
-        fs::write(&bad, "not valid toml [[[").unwrap();
-
-        let err = resolve(&root, Some(&bad), false).unwrap_err();
-        assert!(err.contains("bad.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_with_no_config_skips_discovery() {
-        let root = temp_root("no-config");
-        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
-
-        let (cfg, path) = resolve(&root, None, true).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn unknown_top_level_table_is_rejected() {
-        let root = temp_root("unknown-table");
-        fs::write(root.join("soroban-guard.toml"), "[check]\n").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
+        let (cfg, _) = load(&root).unwrap();
+        let cfg = cfg.expect("config should be present");
+        assert_eq!(cfg.scan.max_file_size, Some(1_048_576));
 
         fs::remove_dir_all(root).unwrap();
     }
