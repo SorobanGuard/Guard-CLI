@@ -45,6 +45,8 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("contract-fn-name-too-long", "contract-fn-name"),
+    ("allowance-expiration-unchecked", "allowance-expiration"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,

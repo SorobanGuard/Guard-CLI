@@ -804,3 +804,44 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+---
+
+## `contract-fn-name-too-long` (Low)
+
+**What it detects**
+
+Public functions in `#[contractimpl]` blocks whose identifier exceeds Soroban's 32-character symbol limit.
+
+**Why it matters**
+
+Soroban contract entrypoint names are encoded as `Symbol`s, which support at most 32 characters from `[a-zA-Z0-9_]`. Longer names can fail during build or deployment; reporting the name and its length makes the issue visible during scanning.
+
+**Limitations**
+
+- Only public functions in recognized `#[contractimpl]` blocks are checked.
+- Functions gated by `#[cfg(test)]` and functions in test modules are ignored.
+- Length is measured in characters. Soroban entrypoint symbols must also use only `[a-zA-Z0-9_]`.
+
+**Fixture:** `test-contracts/contract-fn-name-vulnerable/`, `test-contracts/contract-fn-name-safe/`
+
+---
+
+## `allowance-expiration-unchecked` (Medium)
+
+**What it detects**
+
+Public `approve*` and `increase_allowance*` methods with an expiration-named parameter that write to storage without comparing that expiry to `env.ledger().sequence()` or `timestamp()`. It also detects `transfer_from*` methods that read from storage without comparing an expiration-named value to the current ledger sequence or timestamp.
+
+**Why it matters**
+
+SEP-41-style allowances must reject expirations in the past unless an approval sets the amount to zero. A missing or inverted expiry check can leave an unusable allowance stored or permit an expired allowance to be spent.
+
+**Limitations**
+
+- Method names, parameter names, storage access, and comparisons are matched syntactically; validations hidden in helpers are not seen.
+- Any matching comparison anywhere in a method suppresses the finding; control-flow correctness and comparison direction are not proven.
+- Approval expiry parameters are recognized by names containing `expiration`, `expires_at`, or `expiry`.
+- `transfer_from*` detection requires a storage read in the same method and an expiration-named expression compared with the current ledger.
+
+**Fixture:** `test-contracts/allowance-expiration-vulnerable/`, `test-contracts/allowance-expiration-safe/`

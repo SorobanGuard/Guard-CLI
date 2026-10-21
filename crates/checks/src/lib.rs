@@ -34,6 +34,8 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod contract_fn_name_too_long;
+pub mod allowance_expiration_unchecked;
 pub mod util;
 
 pub use admin::UnprotectedAdminCheck;
@@ -70,6 +72,8 @@ pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
 pub use unprotected_token_mint::UnprotectedTokenMintCheck;
 pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use contract_fn_name_too_long::ContractFnNameTooLongCheck;
+pub use allowance_expiration_unchecked::AllowanceExpirationUncheckedCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -230,6 +234,8 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(ContractFnNameTooLongCheck),
+        Box::new(AllowanceExpirationUncheckedCheck),
     ]
 }
 
