@@ -44,7 +44,34 @@ fn only_check_rejects_unknown_check() {
 }
 
 #[test]
-fn only_check_conflicts_with_disable_check() {
+fn only_check_suggests_closest_name_for_typo() {
+    let output = run(&["scan", ".", "--only-check", "panic"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("did you mean"), "{stderr}");
+    assert!(stderr.contains("panics"), "{stderr}");
+}
+
+#[test]
+fn disable_check_suggests_closest_name_for_typo() {
+    let output = run(&["scan", ".", "--disable-check", "panic"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("did you mean"), "{stderr}");
+    assert!(stderr.contains("panics"), "{stderr}");
+}
+
+#[test]
+fn explain_suggests_closest_name_for_typo() {
+    let output = run(&["explain", "panic"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("did you mean"), "{stderr}");
+    assert!(stderr.contains("panics"), "{stderr}");
+}
+
+#[test]
+only_check_conflicts_with_disable_check() {
     let output = run(&[
         "scan",
         ".",
