@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions & discussion
+    url: https://github.com/orgs/org/discussions
+    about: Ask "how do I…" questions and discuss usage here instead of the bug tracker.
+  - name: Documentation
+    url: https://github.com/org/repo#readme
+    about: Read the docs and README before filing an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/org/repo/security/policy
+    about: Please report vulnerabilities privately per SECURITY.md — do not open a public issue.
