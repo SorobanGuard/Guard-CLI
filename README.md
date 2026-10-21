@@ -10,6 +10,8 @@
 
 Guard CLI is a CLI-based static analyzer for Rust smart contracts deployed on the **Stellar network** via the Soroban smart contract platform. It detects vulnerabilities before your code ever touches the chain.
 
+> **Guard is a heuristic, syntax-level analyzer — not a substitute for an audit.** See [Limitations and what Guard does not detect](docs/limitations.md) for what a clean report does and does not mean.
+
 ---
 
 ## Why Soroban Guard?
@@ -202,4 +204,4 @@ Guard-CLI/
 │   │   └── src/lib.rs
 │   └── checks/                 # Check trait + individual d
 
-/* … truncated 439 chars — edit only what you need near the top … */
+/* … truncated 71 chars — edit only what you need near the top … */
