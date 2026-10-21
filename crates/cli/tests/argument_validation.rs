@@ -26,3 +26,34 @@ fn clap_rejects_output_without_structured_format() {
     assert!(stderr.contains("required"), "{stderr}");
     assert!(stderr.contains("--output"), "{stderr}");
 }
+
+#[test]
+fn only_check_accepts_known_check() {
+    let output = run(&["scan", ".", "--only-check", "panics"]);
+    assert_ne!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("unknown check"), "{stderr}");
+}
+
+#[test]
+fn only_check_rejects_unknown_check() {
+    let output = run(&["scan", ".", "--only-check", "not-a-real-check"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not-a-real-check"), "{stderr}");
+}
+
+#[test]
+fn only_check_conflicts_with_disable_check() {
+    let output = run(&[
+        "scan",
+        ".",
+        "--only-check",
+        "panics",
+        "--disable-check",
+        "panics",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("panics"), "{stderr}");
+}
