@@ -71,6 +71,53 @@ impl ColorArgs {
     }
 }
 
+/// Shared stats-related CLI arguments.
+#[derive(Debug, Clone, Parser)]
+pub struct StatsArgs {
+    /// Print per-check timing and finding counts to stderr after the scan.
+    ///
+    /// Goes to stderr so structured stdout stays clean. Timing is only
+    /// measured when this flag is set, so there is zero overhead otherwise.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub stats: bool,
+}
+
+/// Per-check statistics collected during a scan.
+///
+/// `findings` is the number of findings the check produced and `elapsed`
+/// is the cumulative wall time spent inside `Check::run` across all files.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckStats {
+    /// Name of the check.
+    pub name: String,
+    /// Number of findings produced by the check.
+    pub findings: usize,
+    /// Cumulative wall time spent running the check across all files.
+    pub elapsed: std::time::Duration,
+}
+
+/// Render a per-check stats table to `stderr`.
+///
+/// The table lists each check's name, finding count, and cumulative wall
+/// time. Output goes to stderr so structured stdout stays clean.
+pub fn print_stats(stats: &[CheckStats]) {
+    use std::io::Write;
+
+    let stderr = std::io::stderr();
+    let mut out = stderr.lock();
+
+    let _ = writeln!(out, "{:<32} {:>10} {:>14}", "check", "findings", "time");
+    for stat in stats {
+        let _ = writeln!(
+            out,
+            "{:<32} {:>10} {:>14.3}ms",
+            stat.name,
+            stat.findings,
+            stat.elapsed.as_secs_f64() * 1000.0,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +150,17 @@ mod tests {
         let args = ColorArgs::try_parse_from(["test", "--no-color"]).unwrap();
         assert!(args.no_color);
         assert_eq!(resolve_color(Some(args.color), args.no_color), ColorWhen::Never);
+    }
+
+    #[test]
+    fn parses_stats_flag() {
+        let args = StatsArgs::try_parse_from(["test", "--stats"]).unwrap();
+        assert!(args.stats);
+    }
+
+    #[test]
+    fn stats_defaults_to_off() {
+        let args = StatsArgs::try_parse_from(["test"]).unwrap();
+        assert!(!args.stats);
     }
 }
