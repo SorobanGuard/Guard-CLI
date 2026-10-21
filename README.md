@@ -200,11 +200,6 @@ Guard-CLI/
 │   │   └── src/main.rs
 │   ├── analyzer/               # walks .rs files, parses with syn, runs checks
 │   │   └── src/lib.rs
-│   └── checks/                 # Check trait + individual detectors
-│       └── src/
-│           ├── lib.rs          # trait definition, Finding, Severity, default_checks()
-│           └── ...             # one module per detector; see docs/checks.md for the full list
-└── test-contracts/             # 68 standalone Soroban fixture crates (excluded from workspace)
-    ├── vulnerable/             # triggers missing-require-a
+│   └── checks/                 # Check trait + individual d
 
-/* … truncated 4531 chars — edit only what you need near the top … */
+/* … truncated 439 chars — edit only what you need near the top … */

@@ -67,6 +67,25 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 Coverage is **informational only** — there is no enforced threshold. Use it to spot untested
 branches when adding or reviewing a check.
 
+### Linting workflows and Markdown
+
+CI runs [`actionlint`](https://github.com/rhysd/actionlint) over `.github/workflows/` and a
+Markdown link checker over `README.md` and `docs/`. Both catch silently-wrong workflow inputs and
+doc anchors before review. To reproduce locally:
+
+```bash
+# Workflow linting (install once via your package manager or `go install github.com/rhysd/actionlint/cmd/actionlint@latest`)
+actionlint
+
+# Markdown link checking (install once via `npm install -g markdown-link-check`)
+markdown-link-check README.md
+find docs -name '*.md' -exec markdown-link-check {} \;
+```
+
+If a link or workflow construct is intentionally exempt, add an inline allow-list comment
+(e.g. `<!-- markdown-link-check-disable-next-line -->` or `# actionlint-disable`) with a short
+note explaining why, so the exemption is reviewable.
+
 ### Commit hygiene
 
 Prefer **small, focused commits** (one logical change per commit): a single check, a doc section, or a test fixture pair. This makes review and `git bisect` straightforward. Aim for **clear commit messages** in [Conventional Commits](https://www.conventionalcommits.org/) style (`feat(checks): …`, `fix(cli): …`, `docs: …`).
@@ -193,13 +212,6 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 
 4. **Naming** — Use `*-vulnerable` / `*-safe` pairs for clarity in docs and CI.
 
-5. **Scanning** — `soroban-guard scan test-contracts/my-rule-vulnerable` only reads `.rs` files; building first is optional.
+5. **Scanning** — `soroban-guard scan test-co
 
----
-
-## Architecture constraints (for contributors)
-
-- **`syn` `full`** — New crates in this workspace should inherit workspace `syn` with `features = ["full", "visit"]` unless there is a strong reason not to.
-- **No `todo!()`** — Land complete logic; placeholders block merge.
-- **No panics in library / CLI paths** — Propagate or handle `Result` (the CLI uses exit code **2** for report serialization failures and scan errors).
-- **Checks stay isolated** — Stateless `run` implementations; no reliance on
+/* … truncated 588 chars — edit only what you need near the top … */
