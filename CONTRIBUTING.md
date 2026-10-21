@@ -139,7 +139,7 @@ Use [`crates/checks/src/auth.rs`](crates/checks/src/auth.rs) as the canonical la
 
 3. **Keep checks isolated** — Do **not** use shared mutable static state. Pass data through function arguments or use `util.rs` for **pure** helpers. Each `Check::run` must behave the same regardless of which other checks ran first.
 
-4. **Document the rule** — Add a section to [`docs/checks.md`](docs/checks.md) (severity, patterns, false positives).
+4. **Document the rule** — Add a section to [`docs/checks.md`](docs/checks.md) (severity, patterns, false positives). Pick the severity using the [severity rubric](docs/checks.md#severity-rubric) and state the rationale in the section.
 
 5. **Unit tests** — In `my_rule.rs`, add `#[test] fn ...() -> Result<(), syn::Error>` and use `parse_file(src)?` so parse failures surface as test errors instead of panics.
 
@@ -187,15 +187,6 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 - **`syn` `full`** — New crates in this workspace should inherit workspace `syn` with `features = ["full", "visit"]` unless there is a strong reason not to.
 - **No `todo!()`** — Land complete logic; placeholders block merge.
 - **No panics in library / CLI paths** — Propagate or handle `Result` (the CLI uses exit code **2** for report serialization failures and scan errors).
-- **Checks stay isolated** — Stateless `run` implementations; no reliance on execution order or global mutable state.
+- **Checks stay isolated** — Stateless `run` implementations; no reliance on
 
----
-
-## Code style
-
-- Prefer small visitors and helpers over monolithic passes.
-- Keep `--json` output stable for scripting.
-- When you change severity or rule IDs, update `docs/checks.md` in the same change.
-- Run `cargo fmt --all` before pushing so CI's `cargo fmt --all -- --check` step passes.
-
-Thank you for contributing.
+/* … truncated 370 chars — edit only what you need near the top … */

@@ -98,6 +98,95 @@ to see them inline in pull requests:
 
 ---
 
+## GitLab CI
+
+Run the scan in a dedicated job, archive the JSON and Markdown reports, and let
+the job fail on the scanner's exit code. The `artifacts:when: always` setting
+keeps the reports available even when the job fails on High findings.
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - test
+
+soroban-guard:
+  stage: test
+  image: rust:latest
+  before_script:
+    - cargo build --release -p soroban-guard-cli
+    - export PATH="$PWD/target/release:$PATH"
+  script:
+    # `|| STATUS=$?` captures the exit code so we can archive reports first
+    # and then re-raise it, honouring the exit-code table below.
+    - STATUS=0
+    - soroban-guard scan . --json --output guard-report.json || STATUS=$?
+    - soroban-guard scan . --markdown --output guard-report.md || STATUS=$?
+    - exit $STATUS
+  artifacts:
+    when: always
+    paths:
+      - guard-report.json
+      - guard-report.md
+    expire_in: 1 week
+```
+
+> **Note:** This snippet is provided as-is and has not been validated against a
+> live GitLab runner. Adjust the `image` and build step to match your toolchain.
+>
+> **Tip:** GitLab Code Quality ingestion (see #802) consumes a Code Climate
+> JSON report. Until that output format lands, archive the JSON report above and
+> review it manually, or convert it in a follow-up job.
+
+---
+
+## CircleCI
+
+Store the JSON and Markdown reports as job artifacts and honour the scanner's
+exit code. `when: always` on the `store_artifacts` step keeps the reports
+available even when the scan fails the job.
+
+```yaml
+# .circleci/config.yml
+version: 2.1
+
+jobs:
+  soroban-guard:
+    docker:
+      - image: cimg/rust:1.75
+    steps:
+      - checkout
+      - run:
+          name: Build soroban-guard
+          command: cargo build --release -p soroban-guard-cli
+      - run:
+          name: Soroban Guard scan
+          command: |
+            export PATH="$PWD/target/release:$PATH"
+            # Capture the exit code so artifacts are stored before failing.
+            STATUS=0
+            soroban-guard scan . --json --output guard-report.json || STATUS=$?
+            soroban-guard scan . --markdown --output guard-report.md || STATUS=$?
+            exit $STATUS
+      - store_artifacts:
+          path: guard-report.json
+          destination: soroban-guard/report.json
+          when: always
+      - store_artifacts:
+          path: guard-report.md
+          destination: soroban-guard/report.md
+          when: always
+
+workflows:
+  ci:
+    jobs:
+      - soroban-guard
+```
+
+> **Note:** This snippet is provided as-is and has not been validated against a
+> live CircleCI pipeline. Adjust the executor image to match your toolchain.
+
+---
+
 ## VS Code tasks
 
 Add a **Soroban Guard: Scan** task so you can run the scan from the Command Palette
