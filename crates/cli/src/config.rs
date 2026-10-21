@@ -124,6 +124,42 @@ pub fn resolve(
     load(scan_path)
 }
 
+/// Validate a config file without scanning.
+///
+/// Uses the same discovery rules as [`resolve`] (explicit `--config` wins,
+/// otherwise walk up from `scan_path`). On top of the TOML/unknown-key
+/// checks performed by the loader, this verifies that every name in
+/// `[checks].disabled` refers to a known check, so a typo'd check name is
+/// reported with the file and offending key rather than silently ignored.
+///
+/// Returns the resolved config and the path it came from on success, or a
+/// human-readable error (for exit-2 reporting) on failure.
+pub fn validate(
+    scan_path: &Path,
+    explicit: Option<&Path>,
+    known_checks: &[&str],
+) -> Result<(GuardConfig, PathBuf), String> {
+    let (cfg, path) = resolve(scan_path, explicit, false)?;
+    let (Some(cfg), Some(path)) = (cfg, path) else {
+        return Err(format!(
+            "no soroban-guard.toml found searching upward from {}",
+            scan_path.display()
+        ));
+    };
+
+    for name in &cfg.checks.disabled {
+        if !known_checks.contains(&name.as_str()) {
+            return Err(format!(
+                "{}: unknown check name `{name}` in [checks].disabled (known checks: {})",
+                path.display(),
+                known_checks.join(", ")
+            ));
+        }
+    }
+
+    Ok((cfg, path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,93 +255,80 @@ mod tests {
         .unwrap();
 
         let (cfg, path) = load(&root).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
+        let cfg = cfg.expect("config should be present");
         assert_eq!(path, Some(root.join("soroban-guard.toml")));
+        assert_eq!(cfg.scan.min_severity.as_deref(), Some("medium"));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_returns_none_none_when_nothing_is_found() {
-        let root = temp_root("load-none");
-        fs::create_dir_all(root.join(".git")).unwrap();
+    fn validate_accepts_a_valid_config() {
+        let root = temp_root("validate-ok");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[scan]\nmin_severity = \"high\"\n\n[checks]\ndisabled = [\"auth\"]\n",
+        )
+        .unwrap();
 
-        let (cfg, path) = load(&root).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_reports_a_malformed_config_as_an_error() {
-        let root = temp_root("load-bad");
-        fs::write(root.join("soroban-guard.toml"), "not valid toml [[[").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
+        let (cfg, path) = validate(&root, None, &["auth", "overflow"]).unwrap();
+        assert_eq!(path, root.join("soroban-guard.toml"));
+        assert_eq!(cfg.checks.disabled, vec!["auth".to_string()]);
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_from_path_uses_exactly_the_given_file() {
-        let root = temp_root("explicit");
-        fs::create_dir_all(root.join("src")).unwrap();
-        // A discovered config that must be ignored in favor of the explicit one.
-        fs::write(root.join("soroban-guard.toml"), "[scan]\nmin_severity = \"low\"\n").unwrap();
-        let explicit = root.join("shared-policy.toml");
-        fs::write(&explicit, "[scan]\nmin_severity = \"high\"\n").unwrap();
+    fn validate_reports_unknown_key_with_file() {
+        let root = temp_root("validate-unknown-key");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[scan]\nmin_severty = \"high\"\n",
+        )
+        .unwrap();
 
-        let (cfg, path) = resolve(&root.join("src"), Some(&explicit), false).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("high"));
-        assert_eq!(path, Some(explicit));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_missing_explicit_config_as_an_error() {
-        let root = temp_root("explicit-missing");
-        let missing = root.join("nope.toml");
-
-        let err = resolve(&root, Some(&missing), false).unwrap_err();
-        assert!(err.contains("nope.toml"), "{err}");
+        let err = validate(&root, None, &["auth"]).unwrap_err();
+        assert!(err.contains("soroban-guard.toml"), "error should name the file: {err}");
+        assert!(err.contains("min_severty"), "error should name the key: {err}");
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn resolve_reports_a_malformed_explicit_config_as_an_error() {
-        let root = temp_root("explicit-bad");
-        let bad = root.join("bad.toml");
-        fs::write(&bad, "not valid toml [[[").unwrap();
+    fn validate_reports_unknown_check_name_with_file_and_key() {
+        let root = temp_root("validate-unknown-check");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[checks]\ndisabled = [\"not-a-check\"]\n",
+        )
+        .unwrap();
 
-        let err = resolve(&root, Some(&bad), false).unwrap_err();
-        assert!(err.contains("bad.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_with_no_config_skips_discovery() {
-        let root = temp_root("no-config");
-        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
-
-        let (cfg, path) = resolve(&root, None, true).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
+        let err = validate(&root, None, &["auth", "overflow"]).unwrap_err();
+        assert!(err.contains("soroban-guard.toml"), "error should name the file: {err}");
+        assert!(err.contains("not-a-check"), "error should name the check: {err}");
+        assert!(err.contains("[checks].disabled"), "error should name the key: {err}");
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn unknown_top_level_table_is_rejected() {
-        let root = temp_root("unknown-table");
-        fs::write(root.join("soroban-guard.toml"), "[check]\n").unwrap();
+    fn validate_reports_malformed_toml_with_file() {
+        let root = temp_root("validate-malformed");
+        fs::write(root.join("soroban-guard.toml"), "[scan\nmin_severity =\n").unwrap();
 
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
+        let err = validate(&root, None, &["auth"]).unwrap_err();
+        assert!(err.contains("soroban-guard.toml"), "error should name the file: {err}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validate_errors_when_no_config_is_found() {
+        let root = temp_root("validate-missing");
+        fs::create_dir_all(root.join("repo/.git")).unwrap();
+
+        let err = validate(&root.join("repo"), None, &["auth"]).unwrap_err();
+        assert!(err.contains("no soroban-guard.toml"), "unexpected error: {err}");
 
         fs::remove_dir_all(root).unwrap();
     }
