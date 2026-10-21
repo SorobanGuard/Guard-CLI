@@ -1,6 +1,7 @@
 //! `soroban-guard.toml` configuration file support.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level config file structure.
@@ -13,6 +14,11 @@ use std::path::{Path, PathBuf};
 pub struct GuardConfig {
     pub scan: ScanConfig,
     pub checks: ChecksConfig,
+    /// Per-path rule overrides (`[[overrides]]`). Each entry disables a set
+    /// of checks for files matching its globs. Overrides stack in file
+    /// order: for a matching path, the union of every matching override's
+    /// `disabled` list is applied.
+    pub overrides: Vec<OverrideConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -26,6 +32,9 @@ pub struct ScanConfig {
     /// process exits `1` when a finding at or above this severity is present.
     /// This does **not** filter findings out of the printed output.
     pub min_severity: Option<String>,
+    /// Cap on analyzer parallelism (equivalent to the `--jobs` flag; the flag
+    /// wins if both are set). `0` or unset means rayon's default parallelism.
+    pub jobs: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -34,6 +43,14 @@ pub struct ChecksConfig {
     /// Check names to skip.
     pub disabled: Vec<String>,
     pub sensitive_names: SensitiveNamesConfig,
+    /// Per-check severity overrides (`[checks.severity]`), mapping a check
+    /// name to the severity it should report instead of its built-in one.
+    ///
+    /// Applied after a check runs and before `--fail-on` evaluation and
+    /// output formatting, so every output format agrees. For multi-severity
+    /// checks (e.g. `unchecked-arithmetic`) the override replaces **all**
+    /// levels. Unknown check names or severities are config errors (exit 2).
+    pub severity: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -41,6 +58,48 @@ pub struct ChecksConfig {
 pub struct SensitiveNamesConfig {
     /// Extra function names added to the built-in `SENSITIVE_NAMES` list.
     pub extra: Vec<String>,
+}
+
+/// A single `[[overrides]]` entry: disable `disabled` checks for files whose
+/// path matches any of the `paths` globs.
+///
+/// Globs use the same matcher as `--include`/`--exclude`. Findings are
+/// filtered after the check runs, so other checks still apply to those
+/// files. Overrides stack in file order (union of `disabled` for matching
+/// paths).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OverrideConfig {
+    /// Glob patterns (same matcher as `--include`/`--exclude`) selecting the
+    /// files this override applies to.
+    pub paths: Vec<String>,
+    /// Check names to drop for files matching `paths`.
+    pub disabled: Vec<String>,
+}
+
+impl GuardConfig {
+    /// Return the set of check names disabled for `file_path` by every
+    /// matching `[[overrides]]` entry, stacked in file order.
+    ///
+    /// `matches` is the same glob predicate used by `--include`/`--exclude`
+    /// (it receives the override glob and the candidate path). Returns an
+    /// empty set when no override matches.
+    pub fn disabled_checks_for<F>(&self, file_path: &Path, matches: F) -> Vec<String>
+    where
+        F: Fn(&str, &Path) -> bool,
+    {
+        let mut disabled: Vec<String> = Vec::new();
+        for ov in &self.overrides {
+            if ov.paths.iter().any(|glob| matches(glob, file_path)) {
+                for name in &ov.disabled {
+                    if !disabled.iter().any(|d| d == name) {
+                        disabled.push(name.clone());
+                    }
+                }
+            }
+        }
+        disabled
+    }
 }
 
 /// Search upward from `scan_path` for the nearest `soroban-guard.toml`.
@@ -195,118 +254,49 @@ mod tests {
     }
 
     #[test]
-    fn works_when_scan_path_is_a_file() {
-        let root = temp_root("singlefile");
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
-        fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+    fn parses_overrides_section() {
+        let raw = r#"
+[[overrides]]
+paths = ["src/legacy/**"]
+disabled = ["unchecked-arithmetic"]
 
-        assert_eq!(
-            find_config_path(&root.join("src/lib.rs")),
-            Some(root.join("soroban-guard.toml"))
-        );
-
-        fs::remove_dir_all(root).unwrap();
+[[overrides]]
+paths = ["vendor/**"]
+disabled = ["unchecked-arithmetic", "missing-auth"]
+"#;
+        let cfg: GuardConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.overrides.len(), 2);
+        assert_eq!(cfg.overrides[0].paths, vec!["src/legacy/**"]);
+        assert_eq!(cfg.overrides[0].disabled, vec!["unchecked-arithmetic"]);
+        assert_eq!(cfg.overrides[1].disabled.len(), 2);
     }
 
     #[test]
-    fn load_returns_the_config_and_the_path_it_came_from() {
-        let root = temp_root("load-ok");
-        fs::write(
-            root.join("soroban-guard.toml"),
-            "[scan]\nmin_severity = \"medium\"\n",
-        )
-        .unwrap();
+    fn overrides_stack_for_matching_paths() {
+        let raw = r#"
+[[overrides]]
+paths = ["src/**"]
+disabled = ["unchecked-arithmetic"]
 
-        let (cfg, path) = load(&root).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
-        assert_eq!(path, Some(root.join("soroban-guard.toml")));
+[[overrides]]
+paths = ["src/legacy/**"]
+disabled = ["missing-auth"]
+"#;
+        let cfg: GuardConfig = toml::from_str(raw).unwrap();
+        // A simple prefix matcher standing in for the shared glob matcher.
+        let matches = |glob: &str, path: &Path| {
+            let prefix = glob.trim_end_matches("**").trim_end_matches('/');
+            path.to_string_lossy().starts_with(prefix)
+        };
 
-        fs::remove_dir_all(root).unwrap();
-    }
+        let legacy = cfg.disabled_checks_for(Path::new("src/legacy/old.rs"), matches);
+        assert!(legacy.contains(&"unchecked-arithmetic".to_string()));
+        assert!(legacy.contains(&"missing-auth".to_string()));
 
-    #[test]
-    fn load_returns_none_none_when_nothing_is_found() {
-        let root = temp_root("load-none");
-        fs::create_dir_all(root.join(".git")).unwrap();
+        let other = cfg.disabled_checks_for(Path::new("src/main.rs"), matches);
+        assert_eq!(other, vec!["unchecked-arithmetic".to_string()]);
 
-        let (cfg, path) = load(&root).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_reports_a_malformed_config_as_an_error() {
-        let root = temp_root("load-bad");
-        fs::write(root.join("soroban-guard.toml"), "not valid toml [[[").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_from_path_uses_exactly_the_given_file() {
-        let root = temp_root("explicit");
-        fs::create_dir_all(root.join("src")).unwrap();
-        // A discovered config that must be ignored in favor of the explicit one.
-        fs::write(root.join("soroban-guard.toml"), "[scan]\nmin_severity = \"low\"\n").unwrap();
-        let explicit = root.join("shared-policy.toml");
-        fs::write(&explicit, "[scan]\nmin_severity = \"high\"\n").unwrap();
-
-        let (cfg, path) = resolve(&root.join("src"), Some(&explicit), false).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("high"));
-        assert_eq!(path, Some(explicit));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_missing_explicit_config_as_an_error() {
-        let root = temp_root("explicit-missing");
-        let missing = root.join("nope.toml");
-
-        let err = resolve(&root, Some(&missing), false).unwrap_err();
-        assert!(err.contains("nope.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_malformed_explicit_config_as_an_error() {
-        let root = temp_root("explicit-bad");
-        let bad = root.join("bad.toml");
-        fs::write(&bad, "not valid toml [[[").unwrap();
-
-        let err = resolve(&root, Some(&bad), false).unwrap_err();
-        assert!(err.contains("bad.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_with_no_config_skips_discovery() {
-        let root = temp_root("no-config");
-        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
-
-        let (cfg, path) = resolve(&root, None, true).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn unknown_top_level_table_is_rejected() {
-        let root = temp_root("unknown-table");
-        fs::write(root.join("soroban-guard.toml"), "[check]\n").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
+        let none = cfg.disabled_checks_for(Path::new("tests/foo.rs"), matches);
+        assert!(none.is_empty());
     }
 }

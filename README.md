@@ -352,3 +352,8 @@ See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--jso
 ## License
 
 MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+
+## Handsoff notes
+
+<!-- handsoff-issue-859 -->
+- #859: cli: add a `--list-files` flag to print which files a scan would analyse and exit
