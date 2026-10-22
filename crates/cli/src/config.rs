@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GuardConfig {
+    /// Optional path to a base config file to extend (relative to this file).
+    /// When set, the base config is loaded first and this config's values
+    /// are merged on top (override/extend).
+    pub extends: Option<String>,
     pub scan: ScanConfig,
     pub checks: ChecksConfig,
 }
@@ -99,9 +103,59 @@ pub fn load(scan_path: &Path) -> Result<(Option<GuardConfig>, Option<PathBuf>), 
 pub fn load_from_path(config_path: &Path) -> Result<(Option<GuardConfig>, Option<PathBuf>), String> {
     let raw = std::fs::read_to_string(config_path)
         .map_err(|e| format!("could not read {}: {e}", config_path.display()))?;
-    let cfg: GuardConfig = toml::from_str(&raw)
+    let mut cfg: GuardConfig = toml::from_str(&raw)
         .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    
+    // Handle `extends` key - load base config and merge
+    if let Some(extends_path) = &cfg.extends {
+        let base_path = config_path.parent().unwrap_or(Path::new(".")).join(extends_path);
+        let base_raw = std::fs::read_to_string(&base_path)
+            .map_err(|e| format!("could not read extended config {}: {e}", base_path.display()))?;
+        let mut base_cfg: GuardConfig = toml::from_str(&base_raw)
+            .map_err(|e| format!("{}: {e}", base_path.display()))?;
+        
+        // Merge: base config first, then override with current config
+        base_cfg.scan = merge_scan_config(base_cfg.scan, cfg.scan);
+        base_cfg.checks = merge_checks_config(base_cfg.checks, cfg.checks);
+        // Note: we don't merge `extends` from current config to avoid chains
+        cfg = base_cfg;
+    }
+    
     Ok((Some(cfg), Some(config_path.to_path_buf())))
+}
+
+/// Merge scan configs: values from `override` take precedence over `base`.
+fn merge_scan_config(base: ScanConfig, override_: ScanConfig) -> ScanConfig {
+    ScanConfig {
+        path: override_.path.or(base.path),
+        min_severity: override_.min_severity.or(base.min_severity),
+    }
+}
+
+/// Merge checks configs: values from `override` take precedence over `base`.
+fn merge_checks_config(base: ChecksConfig, override_: ChecksConfig) -> ChecksConfig {
+    ChecksConfig {
+        disabled: {
+            let mut merged = base.disabled;
+            for item in override_.disabled {
+                if !merged.contains(&item) {
+                    merged.push(item);
+                }
+            }
+            merged
+        },
+        sensitive_names: SensitiveNamesConfig {
+            extra: {
+                let mut merged = base.sensitive_names.extra;
+                for item in override_.sensitive_names.extra {
+                    if !merged.contains(&item) {
+                        merged.push(item);
+                    }
+                }
+                merged
+            },
+        },
+    }
 }
 
 /// Resolve the config to use, honoring the CLI flags.
@@ -306,6 +360,150 @@ mod tests {
 
         let err = load(&root).unwrap_err();
         assert!(err.contains("soroban-guard.toml"), "{err}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extends_loads_base_config_and_merges() {
+        let root = temp_root("extends");
+
+        // Base config
+        fs::write(
+            root.join("base.toml"),
+            r#"
+[scan]
+min_severity = "low"
+path = "src/contracts"
+
+[checks]
+disabled = ["forbidden-std-imports"]
+sensitive_names.extra = ["admin_only"]
+"#,
+        )
+        .unwrap();
+
+        // Child config extending base
+        fs::write(
+            root.join("soroban-guard.toml"),
+            r#"
+extends = "base.toml"
+
+[scan]
+min_severity = "high"
+
+[checks]
+disabled = ["hardcoded-address"]
+sensitive_names.extra = ["custom_admin"]
+"#,
+        )
+        .unwrap();
+
+        let (cfg, _path) = load(&root).unwrap();
+        let cfg = cfg.unwrap();
+
+        // scan.path should come from base
+        assert_eq!(cfg.scan.path.as_deref(), Some("src/contracts"));
+        // scan.min_severity should be overridden by child
+        assert_eq!(cfg.scan.min_severity.as_deref(), Some("high"));
+
+        // checks.disabled should merge (both from base and child)
+        assert!(cfg.checks.disabled.contains(&"forbidden-std-imports".to_string()));
+        assert!(cfg.checks.disabled.contains(&"hardcoded-address".to_string()));
+
+        // sensitive_names.extra should merge
+        assert!(cfg.checks.sensitive_names.extra.contains(&"admin_only".to_string()));
+        assert!(cfg.checks.sensitive_names.extra.contains(&"custom_admin".to_string()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extends_with_relative_path() {
+        let root = temp_root("extends-rel");
+
+        // Create subdirectory structure
+        fs::create_dir_all(root.join("config")).unwrap();
+
+        // Base config in config/
+        fs::write(
+            root.join("config/base.toml"),
+            r#"
+[scan]
+min_severity = "medium"
+"#,
+        )
+        .unwrap();
+
+        // Child config in root extending config/base.toml
+        fs::write(
+            root.join("soroban-guard.toml"),
+            r#"
+extends = "config/base.toml"
+
+[scan]
+min_severity = "high"
+"#,
+        )
+        .unwrap();
+
+        let (cfg, _path) = load(&root).unwrap();
+        let cfg = cfg.unwrap();
+
+        // Child overrides base
+        assert_eq!(cfg.scan.min_severity.as_deref(), Some("high"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extends_nonexistent_file_returns_error() {
+        let root = temp_root("extends-missing");
+
+        fs::write(
+            root.join("soroban-guard.toml"),
+            r#"
+extends = "does-not-exist.toml"
+"#,
+        )
+        .unwrap();
+
+        let err = load(&root).unwrap_err();
+        assert!(err.contains("does-not-exist.toml") || err.contains("could not read"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_from_path_handles_extends() {
+        let root = temp_root("load-from-path-extends");
+
+        fs::write(
+            root.join("base.toml"),
+            r#"
+[scan]
+min_severity = "low"
+"#,
+        )
+        .unwrap();
+
+        let child = root.join("child.toml");
+        fs::write(
+            &child,
+            r#"
+extends = "base.toml"
+
+[scan]
+min_severity = "high"
+"#,
+        )
+        .unwrap();
+
+        let (cfg, path) = load_from_path(&child).unwrap();
+        let cfg = cfg.unwrap();
+
+        assert_eq!(cfg.scan.min_severity.as_deref(), Some("high"));
+        assert_eq!(path, Some(child));
 
         fs::remove_dir_all(root).unwrap();
     }
