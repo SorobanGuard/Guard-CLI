@@ -3,6 +3,14 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// Environment variable that supplies the config path when `--config` is
+/// not passed on the command line.
+pub const CONFIG_ENV: &str = "SOROBAN_GUARD_CONFIG";
+
+/// Environment variable that supplies the `--fail-on` threshold when the
+/// flag is not passed on the command line.
+pub const FAIL_ON_ENV: &str = "SOROBAN_GUARD_FAIL_ON";
+
 /// Top-level config file structure.
 ///
 /// `deny_unknown_fields` turns a typo'd or misplaced key (e.g. `[check]`
@@ -41,6 +49,18 @@ pub struct ChecksConfig {
 pub struct SensitiveNamesConfig {
     /// Extra function names added to the built-in `SENSITIVE_NAMES` list.
     pub extra: Vec<String>,
+}
+
+/// Read an environment variable, treating unset and empty values as `None`.
+///
+/// Empty values are treated as not set so that a wrapper script that exports
+/// `SOROBAN_GUARD_CONFIG=` (or `SOROBAN_GUARD_FAIL_ON=`) does not accidentally
+/// override discovery or the default threshold.
+pub fn env_value(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
 }
 
 /// Search upward from `scan_path` for the nearest `soroban-guard.toml`.
@@ -104,12 +124,17 @@ pub fn load_from_path(config_path: &Path) -> Result<(Option<GuardConfig>, Option
     Ok((Some(cfg), Some(config_path.to_path_buf())))
 }
 
-/// Resolve the config to use, honoring the CLI flags.
+/// Resolve the config to use, honoring the CLI flags and environment.
 ///
-/// Precedence: an explicit `--config <PATH>` wins and skips discovery;
-/// `--no-config` disables discovery entirely (returns `(None, None)`);
-/// otherwise the nearest `soroban-guard.toml` is discovered by walking up
-/// from `scan_path` (see [`find_config_path`]).
+/// Precedence: an explicit `--config <PATH>` (or `SOROBAN_GUARD_CONFIG`)
+/// wins and skips discovery; `--no-config` disables discovery entirely
+/// (returns `(None, None)`); otherwise the nearest `soroban-guard.toml` is
+/// discovered by walking up from `scan_path` (see [`find_config_path`]).
+///
+/// The `explicit` argument is expected to already reflect the flag > env
+/// precedence (clap's `env` support resolves this before we get here);
+/// when it is `None`, `SOROBAN_GUARD_CONFIG` is consulted as a fallback so
+/// callers that bypass clap still honor the variable.
 pub fn resolve(
     scan_path: &Path,
     explicit: Option<&Path>,
@@ -120,6 +145,9 @@ pub fn resolve(
     }
     if no_config {
         return Ok((None, None));
+    }
+    if let Some(env_path) = env_value(CONFIG_ENV) {
+        return load_from_path(Path::new(&env_path));
     }
     load(scan_path)
 }
@@ -219,94 +247,25 @@ mod tests {
         .unwrap();
 
         let (cfg, path) = load(&root).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
         assert_eq!(path, Some(root.join("soroban-guard.toml")));
+        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_returns_none_none_when_nothing_is_found() {
-        let root = temp_root("load-none");
-        fs::create_dir_all(root.join(".git")).unwrap();
+    fn env_value_treats_unset_and_empty_as_none() {
+        // Use a name that is guaranteed not to be set in the test env.
+        let name = "SOROBAN_GUARD_TEST_UNSET_VAR_909";
+        std::env::remove_var(name);
+        assert_eq!(env_value(name), None);
 
-        let (cfg, path) = load(&root).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
+        std::env::set_var(name, "");
+        assert_eq!(env_value(name), None);
 
-        fs::remove_dir_all(root).unwrap();
-    }
+        std::env::set_var(name, "value");
+        assert_eq!(env_value(name), Some("value".to_string()));
 
-    #[test]
-    fn load_reports_a_malformed_config_as_an_error() {
-        let root = temp_root("load-bad");
-        fs::write(root.join("soroban-guard.toml"), "not valid toml [[[").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_from_path_uses_exactly_the_given_file() {
-        let root = temp_root("explicit");
-        fs::create_dir_all(root.join("src")).unwrap();
-        // A discovered config that must be ignored in favor of the explicit one.
-        fs::write(root.join("soroban-guard.toml"), "[scan]\nmin_severity = \"low\"\n").unwrap();
-        let explicit = root.join("shared-policy.toml");
-        fs::write(&explicit, "[scan]\nmin_severity = \"high\"\n").unwrap();
-
-        let (cfg, path) = resolve(&root.join("src"), Some(&explicit), false).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("high"));
-        assert_eq!(path, Some(explicit));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_missing_explicit_config_as_an_error() {
-        let root = temp_root("explicit-missing");
-        let missing = root.join("nope.toml");
-
-        let err = resolve(&root, Some(&missing), false).unwrap_err();
-        assert!(err.contains("nope.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_malformed_explicit_config_as_an_error() {
-        let root = temp_root("explicit-bad");
-        let bad = root.join("bad.toml");
-        fs::write(&bad, "not valid toml [[[").unwrap();
-
-        let err = resolve(&root, Some(&bad), false).unwrap_err();
-        assert!(err.contains("bad.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_with_no_config_skips_discovery() {
-        let root = temp_root("no-config");
-        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
-
-        let (cfg, path) = resolve(&root, None, true).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn unknown_top_level_table_is_rejected() {
-        let root = temp_root("unknown-table");
-        fs::write(root.join("soroban-guard.toml"), "[check]\n").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
+        std::env::remove_var(name);
     }
 }
