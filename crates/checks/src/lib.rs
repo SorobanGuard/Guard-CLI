@@ -16,6 +16,7 @@ pub mod large_loop;
 pub mod missing_event_for_admin_change;
 pub mod missing_input_length_bound;
 pub mod missing_nonce;
+pub mod negation;
 pub mod overflow;
 pub mod panics;
 pub mod reentrancy;
@@ -52,6 +53,7 @@ pub use large_loop::LargeLoopCheck;
 pub use missing_event_for_admin_change::MissingEventForAdminChangeCheck;
 pub use missing_input_length_bound::MissingInputLengthBoundCheck;
 pub use missing_nonce::MissingNonceCheck;
+pub use negation::UncheckedNegationOrAbsCheck;
 pub use overflow::UncheckedArithmeticCheck;
 pub use panics::PanicInContractCheck;
 pub use reentrancy::ReentrancyRiskCheck;
@@ -230,6 +232,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(UncheckedNegationOrAbsCheck),
     ]
 }
 

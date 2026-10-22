@@ -472,9 +472,147 @@ fn classify_rust_path(
     Ok(PathVerdict::Scan)
 }
 
+/// Collect the out-of-line `mod name;` declarations of a single source file, resolving
+/// each to `name.rs` or `name/mod.rs` relative to the declaring file's directory (or to
+/// the literal `#[path = "..."]` target when present). Recurses into each resolved
+/// module so a contract split across `mod storage;` / `mod admin;` files is scanned in
+/// full even when the scan target is a single `.rs` file (issue #914).
+///
+/// `visited` holds canonical paths already queued, so a `mod` cycle (`a` declares `b`,
+/// `b` declares `a`) terminates and no file is scanned twice. `exclude_patterns` and
+/// `include_patterns` are applied to each discovered module exactly as the directory
+/// walk applies them, and generated-file headers are counted in `files_skipped`.
+/// A missing module file is reported as a warning on stderr and skipped, never an error.
+fn collect_module_paths(
+    root_file: &Path,
+    root: &Path,
+    exclude_patterns: &[glob::Pattern],
+    include_patterns: &[glob::Pattern],
+    visited: &mut HashSet<PathBuf>,
+    files_skipped: &mut usize,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut queue: Vec<PathBuf> = vec![root_file.to_path_buf()];
+
+    while let Some(path) = queue.pop() {
+        let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !visited.insert(canon.clone()) {
+            continue;
+        }
+
+        let label = canon.strip_prefix(root).unwrap_or(&canon);
+        match classify_rust_path(&canon, label, exclude_patterns, include_patterns) {
+            Ok(PathVerdict::Scan) => paths.push(canon.clone()),
+            Ok(PathVerdict::GeneratedSkip) => {
+                *files_skipped += 1;
+                continue;
+            }
+            Ok(PathVerdict::Reject) => continue,
+            Err(e) => {
+                warn_skipping_unreadable(&canon, e);
+                continue;
+            }
+        }
+
+        let content = match std::fs::read_to_string(&canon) {
+            Ok(c) => c,
+            Err(e) => {
+                warn_skipping_unreadable(&canon, ScanError::IoRead {
+                    path: canon.clone(),
+                    source: e,
+                });
+                continue;
+            }
+        };
+        let syn_file = match syn::parse_file(&content) {
+            Ok(f) => f,
+            // A parse error is surfaced later by `run_checks_for_file`; here we only
+            // need the module declarations, so skip resolution for this file.
+            Err(_) => continue,
+        };
+
+        let dir = canon.parent().unwrap_or(root);
+        for module in collect_out_of_line_modules(&syn_file) {
+            let candidate = match module.path_attr {
+                Some(ref p) => dir.join(p),
+                None => {
+                    let flat = dir.join(format!("{}.rs", module.name));
+                    if flat.is_file() {
+                        flat
+                    } else {
+                        dir.join(&module.name).join("mod.rs")
+                    }
+                }
+            };
+            if !candidate.is_file() {
+                eprintln!(
+                    "warning: module `{}` declared in {} has no source file at {}, skipping",
+                    module.name,
+                    canon.display(),
+                    candidate.display()
+                );
+                continue;
+            }
+            queue.push(candidate);
+        }
+    }
+
+    paths
+}
+
+/// One out-of-line `mod name;` declaration recovered from a parsed file.
+struct OutOfLineModule {
+    name: String,
+    /// The literal target of `#[path = "..."]`, when present.
+    path_attr: Option<String>,
+}
+
+/// Collect every out-of-line `mod name;` declaration in `file`, including those nested
+/// inside inline `mod name { ... }` blocks, since their children resolve relative to the
+/// same directory as the declaring file.
+fn collect_out_of_line_modules(file: &syn::File) -> Vec<OutOfLineModule> {
+    fn walk(items: &[syn::Item], out: &mut Vec<OutOfLineModule>) {
+        for item in items {
+            if let syn::Item::Mod(m) = item {
+                if m.content.is_none() {
+                    let path_attr = m.attrs.iter().find_map(|attr| {
+                        if !attr.path().is_ident("path") {
+                            return None;
+                        }
+                        match &attr.meta {
+                            syn::Meta::NameValue(nv) => match &nv.value {
+                                syn::Expr::Lit(syn::ExprLit {
+                                    lit: syn::Lit::Str(s),
+                                    ..
+                                }) => Some(s.value()),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    });
+                    out.push(OutOfLineModule {
+                        name: m.ident.to_string(),
+                        path_attr,
+                    });
+                } else if let Some((_, inner)) = &m.content {
+                    walk(inner, out);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&file.items, &mut out);
+    out
+}
+
 /// Collect `.rs` paths under `root`, applying exclude/include glob filters and skipping
 /// files that carry a generated-file header. Returns `(paths, files_skipped)` where
 /// `files_skipped` is the count of files omitted due to the generated-file header.
+///
+/// When `root` is a single `.rs` file, its out-of-line `mod name;` declarations are
+/// resolved recursively (see [`collect_module_paths`]) so a single-file scan covers the
+/// same modules a directory scan would.
 fn collect_rust_paths(
     root: &Path,
     excludes: &[String],
@@ -484,7 +622,17 @@ fn collect_rust_paths(
     let include_patterns = compile_globs(includes)?;
 
     if root.is_file() {
-        return Ok((vec![root.to_path_buf()], 0));
+        let mut visited = HashSet::new();
+        let mut files_skipped = 0;
+        let paths = collect_module_paths(
+            root,
+            root,
+            &exclude_patterns,
+            &include_patterns,
+            &mut visited,
+            &mut files_skipped,
+        );
+        return Ok((paths, files_skipped));
     }
 
     let mut files_skipped = 0;
@@ -774,6 +922,7 @@ pub fn scan_files(
 
     let mut selected = Vec::new();
     let mut files_skipped = 0;
+    let mut visited: HashSet<PathBuf> = HashSet::new();
     for path in paths {
         // Match the directory walk: build output and VCS internals are never scanned.
         if is_ignored_path(path.strip_prefix(&root).unwrap_or(path)) {
@@ -782,7 +931,22 @@ pub fn scan_files(
         let path_canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let label = path_canon.strip_prefix(&root).unwrap_or(&path_canon);
         match classify_rust_path(&path_canon, label, &exclude_patterns, &include_patterns) {
-            Ok(PathVerdict::Scan) => selected.push(path_canon),
+            Ok(PathVerdict::Scan) => {
+                // Follow out-of-line `mod name;` declarations from each explicitly
+                // listed file, so `scan_files` covers the same modules a directory
+                // scan would (issue #914). `visited` de-duplicates across entries.
+                let mut module_skipped = 0;
+                let module_paths = collect_module_paths(
+                    &path_canon,
+                    &root,
+                    &exclude_patterns,
+                    &include_patterns,
+                    &mut visited,
+                    &mut module_skipped,
+                );
+                files_skipped += module_skipped;
+                selected.extend(module_paths);
+            }
             Ok(PathVerdict::GeneratedSkip) => files_skipped += 1,
             Ok(PathVerdict::Reject) => {}
             // Same as `scan_directory`: one unreadable path in the list is
@@ -843,6 +1007,121 @@ mod tests {
         assert_eq!(files_skipped, 0);
         assert!(check_panics.is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn single_file_scan_follows_nested_out_of_line_modules() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-modtree-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src/storage")).unwrap();
+        fs::create_dir_all(root.join("src/admin")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub mod storage;\npub mod admin;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/storage/mod.rs"),
+            "pub mod kv;\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/storage/kv.rs"), "pub fn kv() {}\n").unwrap();
+        fs::write(root.join("src/admin.rs"), "pub fn admin() {}\n").unwrap();
+
+        let lib = root.join("src/lib.rs");
+        let (paths, files_skipped) = collect_rust_paths(&lib, &[], &[]).unwrap();
+        assert_eq!(files_skipped, 0);
+        let names: HashSet<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names.len(), 4, "expected lib, storage/mod, kv, admin: {names:?}");
+        assert!(names.contains("lib.rs"));
+        assert!(names.contains("mod.rs"));
+        assert!(names.contains("kv.rs"));
+        assert!(names.contains("admin.rs"));
+
+        // A single-file scan must report the same file count as a directory scan.
+        let (_, file_scanned, _, _) = scan_directory(&lib, &[], &[]).unwrap();
+        let (_, dir_scanned, _, _) = scan_directory(&root.join("src"), &[], &[]).unwrap();
+        assert_eq!(file_scanned, dir_scanned);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn single_file_scan_honours_path_attribute_and_cycles() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-modpath-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "#[path = \"custom.rs\"]\npub mod renamed;\npub mod a;\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/custom.rs"), "pub fn c() {}\n").unwrap();
+        // `a` and `b` declare each other: the visited set must stop the cycle.
+        fs::write(root.join("src/a.rs"), "pub mod b;\n").unwrap();
+        fs::write(root.join("src/b.rs"), "pub mod a;\n").unwrap();
+
+        let lib = root.join("src/lib.rs");
+        let (paths, _) = collect_rust_paths(&lib, &[], &[]).unwrap();
+        let names: HashSet<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names.len(), 4, "expected lib, custom, a, b: {names:?}");
+        assert!(names.contains("custom.rs"));
+        assert!(names.contains("a.rs"));
+        assert!(names.contains("b.rs"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn single_file_scan_warns_on_missing_module_and_respects_excludes() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-modmissing-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub mod present;\npub mod missing;\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/present.rs"), "pub fn p() {}\n").unwrap();
+
+        // A missing module file must not abort the scan.
+        let (paths, _) = collect_rust_paths(&root.join("src/lib.rs"), &[], &[]).unwrap();
+        assert_eq!(paths.len(), 2, "lib + present, missing skipped: {paths:?}");
+
+        // Excludes apply to modules reached from a single file.
+        let (paths, _) = collect_rust_paths(
+            &root.join("src/lib.rs"),
+            &["src/present.rs".to_string()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(paths.len(), 1, "present.rs excluded: {paths:?}");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

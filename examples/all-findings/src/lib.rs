@@ -222,4 +222,11 @@ impl AllFindingsContract {
         env.require_auth();
         env.storage().instance().set(&symbol_short!("payload"), &payload);
     }
+
+    // Triggers `unchecked-negation-or-abs`: unary `-` and `.abs()` on a runtime `i128`
+    // panic when the value is `i128::MIN`.
+    pub fn negate_amount(_env: Env, amount: i128) -> i128 {
+        let _magnitude = amount.abs();
+        -amount
+    }
 }
