@@ -198,4 +198,36 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 - When you change severity or rule IDs, update `docs/checks.md` in the same change.
 - Run `cargo fmt --all` before pushing so CI's `cargo fmt --all -- --check` step passes.
 
+---
+
+## Mutation testing
+
+Line coverage cannot catch tests that can never fail (tautological assertions) or checks
+with no negative cases. Mutation testing can: [`cargo-mutants`](https://mutants.rs/) rewrites
+small parts of the code and reports which mutants survive the test suite.
+
+Install it once:
+
+```bash
+cargo install cargo-mutants --locked
+```
+
+Run it against the checks crate:
+
+```bash
+cargo mutants -p soroban-guard-checks
+```
+
+To focus on a single check while iterating, pass `--file` with the check's source path:
+
+```bash
+cargo mutants -p soroban-guard-checks --file crates/checks/src/<check>.rs
+```
+
+Results are written to `mutants.out/` (`missed.txt` lists surviving mutants). A scheduled
+workflow (`.github/workflows/mutants.yml`) runs the same command weekly and on manual
+`workflow_dispatch`; it is **non-gating** and never blocks PRs. When you add or change a
+check, run mutation testing locally and list any notable survivors in your PR description
+so reviewers can judge whether the tests need strengthening.
+
 Thank you for contributing.

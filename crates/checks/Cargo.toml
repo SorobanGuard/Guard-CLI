@@ -18,3 +18,4 @@ serde.workspace = true
 
 [dev-dependencies]
 walkdir = "2"
+proptest = "1"
