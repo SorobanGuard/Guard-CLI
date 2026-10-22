@@ -3,3 +3,7 @@
 .DS_Store
 test-contracts/**/target
 test-contracts/**/Cargo.lock
+
+# Proptest regression seeds must be persisted and committed so failing
+# cases are reproducible. Ensure no broader pattern hides them.
+!**/proptest-regressions/
