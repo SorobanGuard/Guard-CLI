@@ -19,6 +19,36 @@ fn clap_rejects_multiple_output_formats() {
 }
 
 #[test]
+fn clap_rejects_csv_with_json() {
+    let output = run(&["scan", ".", "--csv", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert!(stderr.contains("--csv"), "{stderr}");
+    assert!(stderr.contains("--json"), "{stderr}");
+}
+
+#[test]
+fn clap_rejects_csv_with_sarif() {
+    let output = run(&["scan", ".", "--csv", "--sarif"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert!(stderr.contains("--csv"), "{stderr}");
+    assert!(stderr.contains("--sarif"), "{stderr}");
+}
+
+#[test]
+fn clap_rejects_csv_with_markdown() {
+    let output = run(&["scan", ".", "--csv", "--markdown"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert!(stderr.contains("--csv"), "{stderr}");
+    assert!(stderr.contains("--markdown"), "{stderr}");
+}
+
+#[test]
 fn clap_rejects_output_without_structured_format() {
     let output = run(&["scan", ".", "--output", "findings.txt"]);
     assert_eq!(output.status.code(), Some(2));
