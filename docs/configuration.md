@@ -1,97 +1,30 @@
-# Configuration file
+# Configuration
 
-`soroban-guard` reads an optional `soroban-guard.toml`. It lets you pin
-project-wide defaults so contributors and CI don't have to repeat CLI flags.
+`soroban-guard` can be configured through CLI flags, environment variables, or a
+`soroban-guard.toml` file. When the same setting is provided in more than one
+place, the following precedence applies (highest first):
 
-- The search starts at the scan path (its parent directory, when the scan
-  path is a single file) and climbs through parent directories looking for
-  `soroban-guard.toml`, using the nearest one found. The search stops at the
-  filesystem root or at the first directory that itself contains `.git` — a
-  config file above your project's repository root is never picked up.
-  Pass `--verbose` to see which config file was used, or that none was found.
-- If no config file is found anywhere in that search, defaults are unchanged
-  (no min severity override, no disabled checks, no extra sensitive names).
-- If a config file is found but fails to parse — including an unknown key
-  anywhere in the file, see below — the scan exits with code `2` and an error
-  message pointing at the file and the offending key.
-- CLI flags always take precedence over the config file. `--fail-on` overrides
-  `[scan] min_severity`; `--disable-check` is merged with `[checks] disabled`;
-  a positional scan path overrides `[scan] path`.
+| Setting     | CLI flag    | Environment variable     | Config file key | Default |
+| ----------- | ----------- | ------------------------ | --------------- | ------- |
+| Config path | `--config`  | `SOROBAN_GUARD_CONFIG`   | —               | `soroban-guard.toml` discovery |
+| Fail on     | `--fail-on` | `SOROBAN_GUARD_FAIL_ON`  | `fail_on`       | `high`  |
 
-## Schema
+Precedence, from highest to lowest:
 
-Every table below rejects unknown keys: a typo (`disable` instead of
-`disabled`) or a misplaced section (`[check]` instead of `[checks]`) is
-treated as a malformed config — the scan exits `2` naming the offending key,
-rather than silently ignoring it.
+1. CLI flag (`--config`, `--fail-on`)
+2. Environment variable (`SOROBAN_GUARD_CONFIG`, `SOROBAN_GUARD_FAIL_ON`)
+3. `soroban-guard.toml` (explicit path or discovered)
+4. Built-in default
 
-```toml
-[scan]
-# Directory or file to scan when `soroban-guard scan` is run with no path
-# argument. Only read from the config found from the current directory, and a
-# relative value is resolved against the current directory.
-path = "contracts/token"
-
-# Severity threshold for the `--fail-on` exit gate. One of "high", "medium", "low".
-# Equivalent to the `--fail-on` flag; the flag wins if both are set.
-# Does not filter findings out of the printed output.
-min_severity = "medium"
-
-[checks]
-# Check names to skip entirely, by their `list-checks` name.
-disabled = ["unsafe-randomness", "reentrancy"]
-
-[checks.sensitive_names]
-# Extra function-name patterns to treat as sensitive (admin/privileged),
-# on top of the built-in list used exclusively by the `unprotected-admin` check.
-# Note: other checks that have their own sensitive-name lists do NOT currently
-# read this option. Today this includes `missing-zero-address-check`,
-# `unprotected-upgrade`, `unprotected-token-mint`, and
-# `unprotected-contract-deployment`.
-extra = ["drain", "sweep", "rescue_funds"]
-```
-
-## Field reference
-
-| Key | Type | Default | Effect |
-|-----|------|---------|--------|
-| `[scan] path` | string | unset | Scan path used when `scan` is given no positional path. The config is looked up from the current directory (same upward search as above), and a relative value is resolved against the current directory, not the config file's location. If neither a path argument nor this key is set, the scan exits `2`. |
-| `[scan] min_severity` | `"high"` \| `"medium"` \| `"low"` | unset | Same as `--fail-on`: exit `1` when a finding at or above this severity is present. |
-| `[checks] disabled` | list of strings | `[]` | Check names to skip, merged with any `--disable-check` flags. Unknown names cause the scan to exit `2`. |
-| `[checks.sensitive_names] extra` | list of strings | `[]` | Additional function-name patterns treated as privileged/admin-like, appended to the built-in list used **only** by `unprotected-admin`. Other checks (`missing-zero-address-check`, `unprotected-upgrade`, `unprotected-token-mint`, `unprotected-contract-deployment`) maintain their own separate hardcoded lists and are not affected by this option. |
+Unset or empty environment variables are treated as not set, so they fall
+through to the next layer. Invalid values supplied via an environment variable
+produce the same error as the equivalent flag.
 
 ## Example
 
-A contract crate that wants CI to fail on Medium findings, skip the
-randomness check (it uses an audited off-chain oracle instead), and flag a
-custom `drain` function as sensitive:
-
-```toml
-# soroban-guard.toml
-[scan]
-min_severity = "medium"
-
-[checks]
-disabled = ["unsafe-randomness"]
-
-[checks.sensitive_names]
-extra = ["drain"]
-```
-
-```bash
-soroban-guard scan .
-```
-
-To make a bare `soroban-guard scan` work from the repository root, set the
-default path as well:
-
-```toml
-[scan]
-path = "contracts/token"
-min_severity = "medium"
-```
-
-```bash
-soroban-guard scan            # scans contracts/token
-soroban-guard scan other/dir  # the argument wins over [scan] path
+```sh
+# CI systems that can only inject environment variables
+SOROBAN_GUARD_CONFIG=./ci/soroban-guard.toml \
+SOROBAN_GUARD_FAIL_ON=medium \
+  soroban-guard scan ./contracts
 ```
