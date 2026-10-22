@@ -45,6 +45,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("unchecked-negation-or-abs", "negation"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,

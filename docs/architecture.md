@@ -22,7 +22,14 @@ cli → analyzer → checks
    directory, is library API for embedders (pre-commit hooks scanning staged files, editor
    integrations). No CLI subcommand calls it, so its behavior is covered by
    `crates/analyzer/tests/scan_files_api.rs` rather than by the CLI tests.
-2. The analyzer walks the directory and filters it to applicable `.rs` files.
+2. The analyzer walks the directory and filters it to applicable `.rs` files. When the target is a
+   single `.rs` file instead of a directory, the analyzer follows its out-of-line `mod name;`
+   declarations recursively: each module is resolved relative to the declaring file as `name.rs` or
+   `name/mod.rs`, honouring `#[path = "..."]` attributes. Files reached this way are subject to the
+   same `--exclude` and generated-file filtering as directory walks, are de-duplicated against files
+   already scanned, and are protected against module cycles. A `mod` declaration whose file cannot
+   be found produces a warning rather than aborting the scan, so single-file and directory scans
+   report the same findings for the same contract.
 3. Each file is read and parsed with `syn::parse_file` into a `syn::File`.
 4. The analyzer calls `Check::run` for every check in `active_checks`.
 5. Findings from all files and checks are collected into a `Vec<Finding>`, assigned relative file

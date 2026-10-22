@@ -278,3 +278,8 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn negation_fixtures() {
+    assert_fixture_pair("negation", "unchecked-negation-or-abs");
+}

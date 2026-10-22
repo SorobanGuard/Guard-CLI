@@ -1,12 +1,16 @@
-//! Unchecked `+`, `-`, `*`, and compound assignments in contract methods.
+//! Unchecked `+`, `-`, `*`, and compound assignments in contract methods, plus
+//! unary negation / `.abs()` overflow.
 
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{BinOp, Expr, ExprBinary, ExprMethodCall, File};
+use syn::{BinOp, Expr, ExprBinary, ExprMethodCall, ExprUnary, File, UnOp};
 
 const CHECK_NAME: &str = "unchecked-arithmetic";
+const NEGATION_CHECK_NAME: &str = "unchecked-negation-or-abs";
+const NEGATION_RULE_URL: &str =
+    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-negation-or-abs-medium";
 
 /// Variable-name fragments that suggest index/counter math → downgrade to Low.
 const INDEX_NAMES: &[&str] = &["idx", "index", "count", "len", "offset", "pos", "step"];
@@ -222,6 +226,166 @@ impl Visit<'_> for ArithVisitor<'_> {
             });
         }
         visit::visit_expr_binary(self, i);
+    }
+}
+
+/// Flags unary `-` and `.abs()` on non-literal operands inside `#[contractimpl]` methods.
+///
+/// `-x` and `x.abs()` overflow (panic under `overflow-checks = true`) when `x == i128::MIN`,
+/// which a caller can trigger by passing `i128::MIN` as an amount. Findings are suppressed
+/// when the operand is guarded by a comparison against `MIN`/`0`, or when the value is
+/// produced via `checked_neg`, `checked_abs`, `unsigned_abs`, or `saturating_neg`.
+pub struct UncheckedNegationOrAbsCheck;
+
+impl Check for UncheckedNegationOrAbsCheck {
+    fn name(&self) -> &str {
+        NEGATION_CHECK_NAME
+    }
+
+    fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for method in contractimpl_functions_excluding_test(file) {
+            let fn_name = method.sig.ident.to_string();
+            let mut v = NegationVisitor {
+                fn_name: fn_name.clone(),
+                block: &method.block,
+                out: &mut out,
+            };
+            v.visit_block(&method.block);
+        }
+        out
+    }
+}
+
+/// Returns true if the operand is a compile-time literal (or a negated literal).
+fn is_literal_operand(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(_) => true,
+        Expr::Unary(u) => matches!(u.op, UnOp::Neg(_)) && is_literal_operand(&u.expr),
+        Expr::Paren(p) => is_literal_operand(&p.expr),
+        _ => false,
+    }
+}
+
+/// Returns true if `block` guards the operand with a comparison against `MIN` or `0`,
+/// or computes it via a safe negation/abs API.
+fn is_guarded(block: &syn::Block, operand: &Expr) -> bool {
+    let mut v = GuardScan {
+        operand,
+        found: false,
+    };
+    v.visit_block(block);
+    v.found
+}
+
+struct GuardScan<'a> {
+    operand: &'a Expr,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for GuardScan<'_> {
+    fn visit_expr_binary(&mut self, i: &'ast ExprBinary) {
+        if !self.found {
+            let is_cmp = matches!(
+                &i.op,
+                BinOp::Eq(_)
+                    | BinOp::Ne(_)
+                    | BinOp::Lt(_)
+                    | BinOp::Le(_)
+                    | BinOp::Gt(_)
+                    | BinOp::Ge(_)
+            );
+            if is_cmp {
+                let mentions_operand = &*i.left == self.operand || &*i.right == self.operand;
+                let mentions_bound = mentions_min_or_zero(&i.left) || mentions_min_or_zero(&i.right);
+                if mentions_operand && mentions_bound {
+                    self.found = true;
+                }
+            }
+        }
+        visit::visit_expr_binary(self, i);
+    }
+
+    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
+        if !self.found {
+            let name = i.method.to_string();
+            let safe = matches!(
+                name.as_str(),
+                "checked_neg" | "checked_abs" | "unsigned_abs" | "saturating_neg"
+            );
+            if safe && &*i.receiver == self.operand {
+                self.found = true;
+            }
+        }
+        visit::visit_expr_method_call(self, i);
+    }
+}
+
+/// True if the expression references `MIN` (e.g. `i128::MIN`) or the literal `0`.
+fn mentions_min_or_zero(expr: &Expr) -> bool {
+    match expr {
+        Expr::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident == "MIN")
+            .unwrap_or(false),
+        Expr::Lit(l) => matches!(&l.lit, syn::Lit::Int(i) if i.base10_digits() == "0"),
+        Expr::Paren(p) => mentions_min_or_zero(&p.expr),
+        Expr::Unary(u) => matches!(u.op, UnOp::Neg(_)) && mentions_min_or_zero(&u.expr),
+        _ => false,
+    }
+}
+
+struct NegationVisitor<'a> {
+    fn_name: String,
+    block: &'a syn::Block,
+    out: &'a mut Vec<Finding>,
+}
+
+impl NegationVisitor<'_> {
+    fn report(&mut self, span: proc_macro2::Span, form: &str, operand: &Expr) {
+        if is_literal_operand(operand) || is_guarded(self.block, operand) {
+            return;
+        }
+        let severity = operand_name(operand)
+            .and_then(|n| severity_for_operand_name(&n))
+            .unwrap_or(Severity::Medium);
+        self.out.push(Finding {
+            check_name: NEGATION_CHECK_NAME.to_string(),
+            severity,
+            file_path: String::new(),
+            line: span.start().line,
+            function_name: self.fn_name.clone(),
+            description: format!(
+                "Expression uses `{form}` on a signed integer in `{}`. This panics when the \
+                 operand is the minimum value (e.g. `i128::MIN`) under `overflow-checks = true`, \
+                 which a caller can trigger by passing `i128::MIN` as an amount.",
+                self.fn_name
+            ),
+            rule_url: Some(NEGATION_RULE_URL.to_string()),
+            suggestion: Some(
+                "Use `checked_neg`/`checked_abs` and handle `None`, or `unsigned_abs`/\
+                 `saturating_neg` if those semantics are acceptable."
+                    .to_string(),
+            ),
+        });
+    }
+}
+
+impl Visit<'_> for NegationVisitor<'_> {
+    fn visit_expr_unary(&mut self, i: &ExprUnary) {
+        if matches!(i.op, UnOp::Neg(_)) {
+            self.report(i.span(), "-", &i.expr);
+        }
+        visit::visit_expr_unary(self, i);
+    }
+
+    fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
+        if i.method == "abs" {
+            self.report(i.span(), ".abs()", &i.receiver);
+        }
+        visit::visit_expr_method_call(self, i);
     }
 }
 
@@ -505,6 +669,156 @@ impl C {
         let hits = UncheckedArithmeticCheck.run(&file, "");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].severity, Severity::Medium);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_unary_negation_of_parameter() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn negate(env: Env, amount: i128) -> i128 {
+        let _ = env;
+        -amount
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedNegationOrAbsCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].check_name, "unchecked-negation-or-abs");
+        assert_eq!(hits[0].severity, Severity::High);
+        assert!(hits[0].rule_url.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_abs_of_parameter() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn magnitude(env: Env, amount: i128) -> i128 {
+        let _ = env;
+        amount.abs()
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedNegationOrAbsCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].severity, Severity::High);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_negation_of_literal() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env) -> i128 {
+        let _ = env;
+        -1
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedNegationOrAbsCheck.run(&file, "");
+        assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_guarded_by_min_comparison() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn negate(env: Env, amount: i128) -> i128 {
+        let _ = env;
+        if amount == i128::MIN {
+            return 0;
+        }
+        -amount
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedNegationOrAbsCheck.run(&file, "");
+        assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_guarded_by_zero_comparison() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn magnitude(env: Env, amount: i128) -> i128 {
+        let _ = env;
+        if amount < 0 {
+            return -amount;
+        }
+        amount
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedNegationOrAbsCheck.run(&file, "");
+        assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_checked_neg_and_abs() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env, amount: i128) -> Option<i128> {
+        let _ = env;
+        let _ = amount.checked_neg();
+        amount.checked_abs()
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedNegationOrAbsCheck.run(&file, "");
+        assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_non_contractimpl_negation() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::Env;
+pub struct C;
+impl C {
+    pub fn negate(env: Env, amount: i128) -> i128 {
+        let _ = env;
+        -amount
+    }
+}
+"#,
+        )?;
+        let hits = UncheckedNegationOrAbsCheck.run(&file, "");
+        assert!(hits.is_empty());
         Ok(())
     }
 }

@@ -804,3 +804,43 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+---
+
+## `unchecked-negation-or-abs` (Medium)
+
+**What it detects**
+
+Inside `#[contractimpl]` methods (excluding `#[cfg(test)]` code): unary negation (`-x`) and `.abs()` calls applied to a non-literal value. Literal operands such as `-1` or `(-5).abs()` are ignored.
+
+The finding is suppressed when the operand is guarded by a comparison against `MIN` or `0` (e.g. `if amount == i128::MIN { … }` or `if amount > 0 { … }`), or when the value is produced by `checked_neg`, `checked_abs`, `unsigned_abs`, or `saturating_neg`.
+
+**Why it matters**
+
+For signed integers, `-x` and `x.abs()` overflow when `x` is the type's minimum value (`i128::MIN` has no positive counterpart). Soroban release profiles commonly set `overflow-checks = true`, so this overflow becomes a trap that a caller can trigger simply by passing `i128::MIN` as an amount — a denial-of-service vector. Use `checked_neg` / `checked_abs` (and handle `None`), `unsigned_abs`, or `saturating_neg` instead.
+
+**Example**
+
+```rust
+#[contractimpl]
+impl Contract {
+	pub fn debit(env: Env, amount: i128) {
+		// Finding: traps when amount == i128::MIN.
+		let delta = -amount;
+		env.storage().instance().set(&symbol_short!("delta"), &delta);
+	}
+
+	pub fn debit_safely(env: Env, amount: i128) {
+		let delta = amount.checked_neg().expect("overflow");
+		env.storage().instance().set(&symbol_short!("delta"), &delta);
+	}
+}
+```
+
+**Limitations**
+
+- Syntactic only: it does not analyze types, so it cannot confirm the operand is a signed integer.
+- Guard detection is structural (presence of a `MIN`/`0` comparison in the function body); complex guard logic may not be recognized.
+- Negation or `abs` performed inside a helper function called by the flagged method is not visible to this check.
+
+**Fixture:** `test-contracts/negation-vulnerable/`, `test-contracts/negation-safe/`
