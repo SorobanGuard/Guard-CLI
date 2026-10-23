@@ -1,4 +1,4 @@
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{contractimpl_functions_excluding_test, is_storage_mutation_call};
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
 use syn::FnArg;
@@ -61,11 +61,7 @@ struct StorageWriteVisitor {
 
 impl<'ast> Visit<'ast> for StorageWriteVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if matches!(
-            node.method.to_string().as_str(),
-            "set" | "remove" | "append" | "push" | "push_back"
-        ) && receiver_chain_contains_storage(&node.receiver)
-        {
+        if is_storage_mutation_call(node) {
             self.found_write = true;
         }
         visit::visit_expr_method_call(self, node);
@@ -337,7 +333,8 @@ impl C {
         let findings = check.run(&file, src);
         assert!(
             findings.is_empty(),
-            "tx_nonce should be recognised as nonce protection, got: {:?}", findings
+            "tx_nonce should be recognised as nonce protection, got: {:?}",
+            findings
         );
         Ok(())
     }

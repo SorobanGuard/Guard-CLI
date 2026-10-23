@@ -249,7 +249,12 @@ impl<'ast> Visit<'ast> for AuthGateScan {
     fn visit_expr_if(&mut self, i: &'ast ExprIf) {
         let had_tracked_var = !self.storage_read_vars.is_empty();
         visit::visit_expr_if(self, i);
-        if had_tracked_var && !self.storage_read_and_conditional {
+        let branch_diverges = block_diverges(&i.then_branch)
+            || i
+                .else_branch
+                .as_ref()
+                .is_some_and(|(_, branch)| expr_diverges(branch));
+        if had_tracked_var && branch_diverges && !self.storage_read_and_conditional {
             let all_names: Vec<String> = self
                 .storage_read_vars
                 .iter()
