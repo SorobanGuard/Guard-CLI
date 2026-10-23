@@ -7,7 +7,7 @@ use crate::util::{
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, ExprIf, ExprMethodCall, File, Visibility};
+use syn::{Block, Expr, ExprIf, ExprMethodCall, File, Visibility};
 
 const CHECK_NAME: &str = "unprotected-admin";
 
@@ -131,7 +131,10 @@ fn expr_diverges(expr: &Expr) -> bool {
         Expr::Return(_) => true,
         Expr::Macro(expr) => expr.mac.path.is_ident("panic"),
         Expr::MethodCall(expr) => {
-            matches!(expr.method.to_string().as_str(), "require_auth" | "require_auth_for_args")
+            matches!(
+                expr.method.to_string().as_str(),
+                "require_auth" | "require_auth_for_args"
+            )
         }
         Expr::Block(expr) => block_diverges(&expr.block),
         Expr::If(expr) => {
@@ -197,7 +200,12 @@ impl<'ast> Visit<'ast> for AuthGateScan {
     fn visit_expr_if(&mut self, i: &'ast ExprIf) {
         let had_tracked_var = !self.storage_read_vars.is_empty();
         visit::visit_expr_if(self, i);
-        if had_tracked_var && !self.storage_read_and_conditional {
+        let branch_diverges = block_diverges(&i.then_branch)
+            || i
+                .else_branch
+                .as_ref()
+                .is_some_and(|(_, branch)| expr_diverges(branch));
+        if had_tracked_var && branch_diverges && !self.storage_read_and_conditional {
             let all_names: Vec<String> = self
                 .storage_read_vars
                 .iter()
@@ -230,7 +238,10 @@ fn expr_references_any(expr: &syn::Expr, names: &std::collections::HashSet<Strin
             visit::visit_expr_path(self, node);
         }
     }
-    let mut v = RefVisitor { names, found: false };
+    let mut v = RefVisitor {
+        names,
+        found: false,
+    };
     visit::visit_expr(&mut v, expr);
     v.found
 }

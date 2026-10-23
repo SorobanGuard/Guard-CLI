@@ -656,7 +656,7 @@ Soroban contracts run under a fixed compute-budget cap. An unbounded loop can ex
 Public methods in `#[contractimpl]` that:
 
 1. Accept at least one `Address` parameter, and
-2. Perform a storage write (`set`, `remove`, `append`, `push`, or `push_back`), and
+2. Perform a storage write (`set`, `remove`, or `append`), and
 3. Contain no reference to a nonce or replay-protection identifier — specifically, no identifier matching `nonce`, `sequence`, `seq_num`, or `replay` in the function body.
 
 **Why it matters**
