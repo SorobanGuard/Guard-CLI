@@ -278,3 +278,19 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn cdylib_missing_fixtures() {
+    assert_fixture_pair("cdylib-missing", "missing-cdylib-crate-type");
+}
+
+#[test]
+fn wasm_incompatible_deps_fixtures() {
+    assert_fixture_pair("wasm-incompatible-deps", "wasm-incompatible-dependency");
+}
+
+#[test]
+fn debug_output_fixtures() {
+    assert_fixture_pair("debug-output", "debug-output-in-contract");
+}
+

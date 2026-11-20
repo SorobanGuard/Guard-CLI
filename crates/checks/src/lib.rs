@@ -34,8 +34,14 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod missing_cdylib_crate_type;
+pub mod wasm_incompatible_dependency;
+pub mod debug_output_in_contract;
 pub mod util;
 
+pub use debug_output_in_contract::DebugOutputInContract;
+pub use missing_cdylib_crate_type::MissingCdylibCrateType;
+pub use wasm_incompatible_dependency::WasmIncompatibleDependency;
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
@@ -130,6 +136,19 @@ pub struct Finding {
 pub trait Check {
     fn name(&self) -> &str;
     fn run(&self, file: &File, source: &str) -> Vec<Finding>;
+
+    fn scans_manifest(&self) -> bool {
+        false
+    }
+
+    fn run_on_manifest(
+        &self,
+        _manifest_source: &str,
+        _lib_file: Option<&File>,
+        _lib_source: Option<&str>,
+    ) -> Vec<Finding> {
+        Vec::new()
+    }
 }
 
 /// Group a flat findings slice by `file_path`.
@@ -230,6 +249,9 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(DebugOutputInContract),
+        Box::new(WasmIncompatibleDependency),
+        Box::new(MissingCdylibCrateType),
     ]
 }
 

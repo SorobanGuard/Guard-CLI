@@ -461,6 +461,8 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.118",
+ "toml",
+ "walkdir",
 ]
 
 [[package]]
