@@ -75,7 +75,9 @@ fn is_persistent_chain(m: &ExprMethodCall) -> bool {
 }
 
 fn is_persistent_mutation(m: &ExprMethodCall) -> bool {
-    matches!(m.method.to_string().as_str(), "set" | "remove" | "append") && is_persistent_chain(m)
+    // Only value-writing calls need a TTL bump. `remove` deletes the entry, so extending the
+    // TTL of a key that was just removed is meaningless (issue #955).
+    matches!(m.method.to_string().as_str(), "set" | "append") && is_persistent_chain(m)
 }
 
 fn is_persistent_extend_ttl(m: &ExprMethodCall) -> bool {
@@ -115,7 +117,7 @@ fn key_repr(expr: &Expr) -> Option<String> {
 }
 
 struct TtlVisitor {
-    /// Each element is `(key_repr, source_line)` for a persistent `.set`/`.remove`/`.append`.
+    /// Each element is `(key_repr, source_line)` for a persistent `.set`/`.append`.
     mutations: Vec<(String, usize)>,
     /// Textual key representations seen in `extend_ttl` calls within this function.
     extended_keys: HashSet<String>,
@@ -124,8 +126,7 @@ struct TtlVisitor {
 impl Visit<'_> for TtlVisitor {
     fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
         if is_persistent_mutation(i) {
-            // First argument to `.set(&key, &value)` / `.remove(&key)` / `.append(&key, &value)`
-            // is the storage key.
+            // First argument to `.set(&key, &value)` / `.append(&key, &value)` is the storage key.
             if let Some(first_arg) = i.args.first() {
                 if let Some(repr) = key_repr(first_arg) {
                     self.mutations.push((repr, i.span().start().line));
@@ -227,6 +228,29 @@ impl C {
         )?;
         let hits = MissingTtlExtensionCheck.run(&file, "");
         assert!(hits.is_empty(), "{hits:?}");
+        Ok(())
+    }
+
+    /// Regression test for issue #955: removing a persistent entry deletes it, so no TTL
+    /// extension is required and no finding should be emitted.
+    #[test]
+    fn ignores_persistent_remove() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env, Symbol};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn clear(env: Env, k: Symbol) {
+        env.storage().persistent().remove(&k);
+    }
+}
+"#,
+        )?;
+        let hits = MissingTtlExtensionCheck.run(&file, "");
+        assert!(hits.is_empty(), "remove should not require extend_ttl: {hits:#?}");
         Ok(())
     }
 

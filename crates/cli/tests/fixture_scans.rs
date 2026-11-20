@@ -278,3 +278,8 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn testutils_in_deps_fixtures() {
+    assert_fixture_pair("testutils-in-deps", "testutils-feature-in-dependencies");
+}

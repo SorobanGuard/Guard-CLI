@@ -22,6 +22,7 @@ pub mod reentrancy;
 pub mod reinit;
 pub mod std_imports;
 pub mod storage;
+pub mod testutils_feature_in_dependencies;
 pub mod transfer;
 pub mod ttl;
 pub mod unchecked_divisor;
@@ -58,6 +59,7 @@ pub use reentrancy::ReentrancyRiskCheck;
 pub use reinit::ReInitializationRiskCheck;
 pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
+pub use testutils_feature_in_dependencies::TestutilsFeatureInDependenciesCheck;
 pub use transfer::SelfTransferCheck;
 pub use ttl::MissingTtlExtensionCheck;
 pub use unchecked_divisor::UncheckedDivisorCheck;
@@ -230,6 +232,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(TestutilsFeatureInDependenciesCheck),
     ]
 }
 

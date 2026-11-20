@@ -582,15 +582,19 @@ Panics abort the transaction with an unhelpful, generic error and can leave the 
 
 **What it detects**
 
-In `#[contractimpl]` methods, writes to persistent storage (`env.storage().persistent().set(...)`, `remove(...)`, or `append(...)`) that are not followed by an `env.storage().persistent().extend_ttl(...)` call in the same function.
+In `#[contractimpl]` methods, writes to persistent storage (`env.storage().persistent().set(...)` or `append(...)`) that are not followed by an `env.storage().persistent().extend_ttl(...)` call in the same function.
 
 **Why it matters**
 
 Persistent contract storage entries eventually expire. Without an explicit TTL extension, the ledger can archive the data and later reads may fail or behave unexpectedly.
 
+**`remove` is not a TTL-relevant write**
+
+`env.storage().persistent().remove(&key)` deletes the ledger entry outright. There is no surviving entry whose TTL could be extended, so extending the TTL of a key that was just removed is meaningless. The check therefore does **not** flag `remove` calls; only value-writing calls such as `set` and `append` require a subsequent `extend_ttl`.
+
 **Limitations**
 
-- Only checks for direct persistent writes and TTL extension calls in the same function body.
+- Only checks for direct persistent writes (`set`, `append`) and TTL extension calls in the same function body; `remove` is intentionally excluded.
 - Does not analyze helper functions or control-flow paths that extend TTL elsewhere.
 
 **Fixture:** `test-contracts/ttl-vulnerable/`, `test-contracts/ttl-safe/`
@@ -804,3 +808,42 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+---
+
+## `testutils-feature-in-dependencies` (High)
+
+**What it detects**
+
+In the `Cargo.toml` manifest next to the scanned sources, a `soroban-sdk` dependency that enables the `testutils` feature outside of `[dev-dependencies]`:
+
+- `soroban-sdk = { features = ["testutils", ...] }` under `[dependencies]` (or `[build-dependencies]`), and
+- `testutils` listed in a `[features] default = [...]` entry.
+
+Enabling `testutils` under `[dev-dependencies]` is allowed and not flagged. Code inside `#[cfg(test)]` modules is skipped.
+
+**Why it matters**
+
+The `testutils` feature of `soroban-sdk` is intended for tests only. Enabling it in `[dependencies]` (or in a `[features] default`) compiles test helpers into the contract, bloating the deployed WASM and exposing non-production code paths. This is an easy misconfiguration to ship and is invisible in Rust source — it only shows in `Cargo.toml`.
+
+**How to fix**
+
+Move the `testutils` feature out of `[dependencies]` and into `[dev-dependencies]`:
+
+```toml
+[dependencies]
+soroban-sdk = "22.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+```
+
+If `testutils` appears in `[features] default = [...]`, remove it from the default set and enable it only for tests.
+
+**Limitations**
+
+- Workspace-inherited dependencies are not flagged unless the workspace root enables `testutils` for `[workspace.dependencies]` *and* the member uses it in `[dependencies]` without overriding `features`.
+- Only the `Cargo.toml` next to the scanned sources is inspected; manifests in other directories are not resolved.
+- Suppress a finding with `// soroban-guard: allow(testutils-feature-in-dependencies)` where a deliberate non-test use is intended.
+
+**Fixture:** `test-contracts/testutils-in-deps-vulnerable/`, `test-contracts/testutils-in-deps-safe/`
