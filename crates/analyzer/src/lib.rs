@@ -514,10 +514,16 @@ fn collect_rust_paths(
         if !file_type.is_file() && !(file_type.is_symlink() && path.is_file()) {
             continue;
         }
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+        let is_rs = path.extension().and_then(|e| e.to_str()) == Some("rs");
+        let is_manifest = path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml");
+        if !is_rs && !is_manifest {
             continue;
         }
         if is_ignored_path(path) {
+            continue;
+        }
+        if is_manifest {
+            paths.push(path.to_path_buf());
             continue;
         }
         let label = path.strip_prefix(root).unwrap_or(path);
@@ -562,16 +568,76 @@ fn run_checks_for_file(
         path: path.to_path_buf(),
         source: e,
     })?;
-    let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
+    let is_manifest = path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml");
+    let syn_file = if is_manifest {
+        syn::File {
+            shebang: None,
+            attrs: vec![],
+            items: vec![],
+        }
+    } else {
+        syn::parse_file(&content).map_err(|e| ScanError::Parse {
         path: path.to_path_buf(),
         message: e.to_string(),
-    })?;
+    })?
+    };
     let file_label = file_label(path, root);
     let fn_spans = build_fn_spans(&syn_file);
     let suppressions = parse_suppressions(&content, &fn_spans);
 
     let mut findings: Vec<Finding> = Vec::new();
     let mut check_panics: Vec<ScanError> = Vec::new();
+
+    if is_manifest {
+        let lib_path = path.parent().map(|p| p.join("src/lib.rs"));
+        let (lib_file, lib_source): (Option<syn::File>, Option<String>) = lib_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| {
+                let f = syn::parse_file(&s).ok();
+                (f, Some(s))
+            })
+            .unwrap_or((None, None));
+        for check in checks {
+            if !check.scans_manifest() {
+                continue;
+            }
+            let check_name = check.name().to_string();
+            let lib_ref = lib_file.as_ref();
+            let lib_src_ref = lib_source.as_deref();
+            match catch_unwind(AssertUnwindSafe(|| {
+                check.run_on_manifest(&content, lib_ref, lib_src_ref)
+            })) {
+                Ok(mut hits) => {
+                    for finding in &mut hits {
+                        finding.file_path.clone_from(&file_label);
+                    }
+                    findings.extend(
+                        hits.into_iter()
+                            .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans)),
+                    );
+                }
+                Err(payload) => {
+                    let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                        msg.to_string()
+                    } else if let Some(msg) = payload.downcast_ref::<String>() {
+                        msg.clone()
+                    } else {
+                        "panic payload was not a string".to_string()
+                    };
+                    check_panics.push(ScanError::CheckPanic {
+                        check: check_name,
+                        path: path.to_path_buf(),
+                        message,
+                    });
+                }
+            }
+        }
+        findings.sort_by_key(|f| f.line);
+        suppress_redundant_division_finding(&mut findings);
+        dedup_findings(&mut findings);
+        return Ok((findings, check_panics));
+    }
     for check in checks {
         let check_name = check.name().to_string();
         match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content))) {
@@ -700,44 +766,6 @@ pub fn scan_directory_with_checks(
         .collect();
 
     Ok((results, files_scanned, files_skipped, check_panics))
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
 }
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.

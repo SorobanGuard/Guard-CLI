@@ -989,6 +989,30 @@ const CHECK_METADATA: &[CheckMeta] = &[
         rule: "Input collection used without a length bound check",
         long: Some("Reports input collection parameters used without checking their length against an upper bound."),
     },
+
+CheckMeta {
+    name: "missing-cdylib-crate-type",
+    severity: "medium",
+    short: "missing cdylib crate type",
+    rule: "missing cdylib crate type",
+    long: Some("missing cdylib crate type"),
+},
+
+CheckMeta {
+    name: "wasm-incompatible-dependency",
+    severity: "medium",
+    short: "wasm incompatible dependency",
+    rule: "wasm incompatible dependency",
+    long: Some("wasm incompatible dependency"),
+},
+
+CheckMeta {
+    name: "debug-output-in-contract",
+    severity: "low",
+    short: "debug output in contract",
+    rule: "debug output in contract",
+    long: Some("debug output in contract"),
+},
     CheckMeta {
         name: "auth-after-storage-write",
         severity: "high",

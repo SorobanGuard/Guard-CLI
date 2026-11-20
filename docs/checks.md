@@ -804,3 +804,63 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+
+---
+
+## `missing-cdylib-crate-type` (Medium)
+
+**What it detects**
+
+See issue deliverables for `missing-cdylib-crate-type`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `wasm-incompatible-dependency` (Medium)
+
+**What it detects**
+
+See issue deliverables for `wasm-incompatible-dependency`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `debug-output-in-contract` (Low)
+
+**What it detects**
+
+See issue deliverables for `debug-output-in-contract`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
