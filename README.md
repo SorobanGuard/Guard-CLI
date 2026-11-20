@@ -158,15 +158,42 @@ Create a commented starter configuration file:
 cargo run -p soroban-guard-cli -- init
 ```
 
+Point the scan at an explicit config file, or disable config discovery entirely:
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --config ./ci/soroban-guard.toml
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --no-config
+```
+
+`--config <PATH>` must point at an existing file (a missing path exits `2` and names the
+path); `--no-config` skips discovery and is mutually exclusive with `--config`. Both flags
+are global and also apply to `list-checks` and `explain`. Lookup order is
+`--config` > discovery in the scan path > current directory > none — see
+[docs/configuration.md](docs/configuration.md).
+
+Accept existing findings as a baseline, then only fail on findings introduced since:
+
+```bash
+# Record the current findings' fingerprints
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --write-baseline guard-baseline.json
+
+# Later: hide baselined findings; exit 0 if only baselined findings remain
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --baseline guard-baseline.json
+```
+
+`--baseline <FILE>` hides baselined findings and reports the hidden count in the
+pretty, JSON and SARIF summaries (`hidden_count` in the JSON `summary`). A missing or
+corrupt baseline file exits `2` with a clear message.
+
 > Run `cargo run -p soroban-guard-cli -- scan --help` for the full, always-up-to-date flag reference.
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | No High severity findings — safe to proceed |
+| `0` | No High severity findings — safe to proceed (also when only baselined findings remain) |
 | `1` | At least one High finding — **do not deploy** |
-| `2` | Scan error (I/O or parse failure) |
+| `2` | Scan error (I/O or parse failure, missing `--config` path, missing/corrupt `--baseline` file) |
 
 ### Configuration file
 
@@ -284,6 +311,10 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
 from `all_checks_base()`, so custom checks should not be registered in either
 wrapper directly.
 
+For a full worked example — visitor skeleton, `util.rs` helpers, `Finding` fields,
+unit tests, safe/vulnerable fixtures, `fixture_scans.rs`, docs and the registry
+consistency test — see [docs/writing-a-check.md](docs/writing-a-check.md).
+
 ---
 
 ## Stellar Integration
@@ -345,7 +376,7 @@ stellar contract deploy \
 | `crates/analyzer` | Walk `.rs` files, parse with `syn`, run checks |
 | `crates/checks` | `Check` trait + individual detectors |
 
-See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--json` output schema, `docs/integrations.md` for pre-commit / CI / editor snippets, `docs/configuration.md` for the `soroban-guard.toml` project config file, and `CONTRIBUTING.md` to add a check.
+See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--json` output schema, `docs/integrations.md` for pre-commit / CI / editor snippets, `docs/configuration.md` for the `soroban-guard.toml` project config file, `docs/writing-a-check.md` for an end-to-end "Write your first check" tutorial, and `CONTRIBUTING.md` to add a check.
 
 ---
 

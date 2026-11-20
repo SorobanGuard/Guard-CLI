@@ -3,12 +3,28 @@
 `soroban-guard` reads an optional `soroban-guard.toml`. It lets you pin
 project-wide defaults so contributors and CI don't have to repeat CLI flags.
 
-- The search starts at the scan path (its parent directory, when the scan
-  path is a single file) and climbs through parent directories looking for
-  `soroban-guard.toml`, using the nearest one found. The search stops at the
-  filesystem root or at the first directory that itself contains `.git` — a
-  config file above your project's repository root is never picked up.
-  Pass `--verbose` to see which config file was used, or that none was found.
+### Lookup order
+
+The config file is resolved in this order:
+
+1. `--config <PATH>` — use exactly this file. It must exist and parse; if it
+   is missing or malformed the command exits `2` with a message naming the
+   path. No discovery is performed.
+2. Discovery starting at the scan path (its parent directory, when the scan
+   path is a single file), climbing through parent directories looking for
+   `soroban-guard.toml`, using the nearest one found. The search stops at the
+   filesystem root or at the first directory that itself contains `.git` — a
+   config file above your project's repository root is never picked up.
+3. Discovery starting at the current working directory (same upward search as
+   above). This is what applies to `list-checks`, `explain`, and a bare
+   `scan` with no positional path.
+4. None — defaults are used.
+
+`--no-config` disables discovery entirely (steps 2 and 3), so no config file
+is read. It is mutually exclusive with `--config`; passing both exits `2`.
+Both flags are global and are honoured by `scan`, `list-checks` and `explain`.
+
+Pass `--verbose` to see which config file was used, or that none was found.
 - If no config file is found anywhere in that search, defaults are unchanged
   (no min severity override, no disabled checks, no extra sensitive names).
 - If a config file is found but fails to parse — including an unknown key
@@ -17,6 +33,25 @@ project-wide defaults so contributors and CI don't have to repeat CLI flags.
 - CLI flags always take precedence over the config file. `--fail-on` overrides
   `[scan] min_severity`; `--disable-check` is merged with `[checks] disabled`;
   a positional scan path overrides `[scan] path`.
+
+## Baselines
+
+`scan` can record known findings and later hide them, so CI only fails on
+newly introduced issues.
+
+- `--write-baseline <FILE>` writes the fingerprints of the current findings to
+  `<FILE>` (JSON). The scan still reports and exits as usual.
+- `--baseline <FILE>` reads a previously written baseline and hides any
+  finding whose fingerprint matches. Hidden findings are counted and reported
+  as `hidden_count` in the summary (pretty output, JSON `summary` object, and
+  SARIF properties). If only baselined findings remain, the scan exits `0`.
+- A missing or corrupt baseline file exits `2` with a clear message naming the
+  path.
+
+```bash
+soroban-guard scan . --write-baseline .soroban-guard-baseline.json
+soroban-guard scan . --baseline .soroban-guard-baseline.json
+```
 
 ## Schema
 
