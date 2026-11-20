@@ -2,7 +2,7 @@
 //! Detection of state-changing functions (storage writes) without event emission.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_events,
+    contractimpl_functions_excluding_test, is_constructor, receiver_chain_contains_events,
     receiver_chain_contains_storage,
 };
 use crate::{Check, Finding, Severity};
@@ -23,6 +23,9 @@ impl Check for MissingEventEmissionCheck {
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
+            if is_constructor(&method.sig.ident.to_string()) {
+                continue;
+            }
             let mut scan = FuncBodyScan::default();
             scan.visit_block(&method.block);
             if !scan.storage_write || scan.event_emitted {
@@ -131,6 +134,25 @@ impl Contract {
         let findings = MissingEventEmissionCheck.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn passes_for_constructor() {
+        let src = r#"
+use soroban_sdk::{contractimpl, Symbol, Env};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn __constructor(env: Env, admin: i128) {
+        env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = MissingEventEmissionCheck.run(&file, src);
+        assert!(findings.is_empty());
     }
 
     #[test]

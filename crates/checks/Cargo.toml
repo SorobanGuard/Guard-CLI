@@ -9,6 +9,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 publish = true
+exclude = ["docs/pr/**", "docs-maintainer-notes/**", "FIXES_DOCUMENTATION.md"]
 
 [dependencies]
 syn.workspace = true

@@ -68,6 +68,28 @@ Common causes:
 
 ---
 
+## Checks and `__constructor`
+
+Soroban's `__constructor` runs exactly once, invoked by the deployer as part of contract
+creation. It cannot be re-invoked afterwards, and arbitrary users cannot call it. Checks that
+reason about "who can call this entrypoint" or "does this entrypoint emit an event / consume a
+nonce" therefore produce false positives on constructors, and are skipped for functions named
+`__constructor`.
+
+| Check | Runs on `__constructor`? | Rationale |
+|---|---|---|
+| `missing-require-auth` | No | The constructor is only callable by the deployer during creation; there is no untrusted caller to authenticate. |
+| `missing-event-emission` | No | A deploy-time event has no observer to act on it, and the constructor cannot be replayed. |
+| `missing-nonce` | No | The constructor cannot be re-invoked, so replay protection is meaningless. |
+| `missing-zero-address-check` | Yes | A zero/invalid address stored at deploy time is still a real bug. |
+| `re-initialization-risk` | Yes | A constructor that unconditionally overwrites state is still worth reviewing. |
+
+Other checks are not currently special-cased for constructors. If you see a finding on a
+`__constructor` that is noise, suppress it with an inline annotation (see below) and consider
+reporting it.
+
+---
+
 ## Intentional overlap between checks
 
 Some findings are reported by more than one check by design. This is **not** a false positive — the

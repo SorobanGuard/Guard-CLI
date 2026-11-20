@@ -56,6 +56,16 @@ Release managers should follow the [crates.io release process](docs/release.md).
 
 Prefer **small, focused commits** (one logical change per commit): a single check, a doc section, or a test fixture pair. This makes review and `git bisect` straightforward. Aim for **clear commit messages** in [Conventional Commits](https://www.conventionalcommits.org/) style (`feat(checks): …`, `fix(cli): …`, `docs: …`).
 
+### PR descriptions belong in the pull request
+
+Write the description of your change **in the pull request itself**, not in the repository. Do **not** commit:
+
+- per-PR description files under `docs/pr/`;
+- maintainer notes under `docs-maintainer-notes/`;
+- a root-level `FIXES_DOCUMENTATION.md`.
+
+These scratch files go stale and would otherwise ship in the published crate/docs tree. CI enforces this with a guard that runs `git ls-files docs/pr docs-maintainer-notes FIXES_DOCUMENTATION.md` and fails if the output is not empty, so remove any such files before pushing.
+
 ---
 
 ## Mini tutorial: `syn` and the AST (with code examples)
