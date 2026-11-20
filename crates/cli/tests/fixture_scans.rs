@@ -278,3 +278,24 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn signature_replay_fixtures() {
+    assert_fixture_pair("signature-replay", "signature-replay");
+}
+
+#[test]
+fn arbitrary_token_address_fixtures() {
+    assert_fixture_pair("arbitrary-token-address", "arbitrary-token-address");
+}
+
+#[test]
+fn pause_guard_fixtures() {
+    assert_fixture_pair("pause-guard", "missing-pause-guard");
+}
+
+#[test]
+fn initialize_frontrun_fixtures() {
+    assert_fixture_pair("initialize-frontrun", "unprotected-initialize-frontrun");
+}
+

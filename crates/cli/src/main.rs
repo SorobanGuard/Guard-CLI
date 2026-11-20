@@ -989,6 +989,38 @@ const CHECK_METADATA: &[CheckMeta] = &[
         rule: "Input collection used without a length bound check",
         long: Some("Reports input collection parameters used without checking their length against an upper bound."),
     },
+
+CheckMeta {
+    name: "signature-replay",
+    severity: "high",
+    short: "signature replay",
+    rule: "signature replay",
+    long: Some("signature replay"),
+},
+
+CheckMeta {
+    name: "arbitrary-token-address",
+    severity: "high",
+    short: "arbitrary token address",
+    rule: "arbitrary token address",
+    long: Some("arbitrary token address"),
+},
+
+CheckMeta {
+    name: "missing-pause-guard",
+    severity: "medium",
+    short: "missing pause guard",
+    rule: "missing pause guard",
+    long: Some("missing pause guard"),
+},
+
+CheckMeta {
+    name: "unprotected-initialize-frontrun",
+    severity: "high",
+    short: "unprotected initialize frontrun",
+    rule: "unprotected initialize frontrun",
+    long: Some("unprotected initialize frontrun"),
+},
     CheckMeta {
         name: "auth-after-storage-write",
         severity: "high",

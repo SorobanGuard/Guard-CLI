@@ -45,6 +45,10 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("signature-replay", "signature-replay"),
+    ("arbitrary-token-address", "arbitrary-token-address"),
+    ("missing-pause-guard", "pause-guard"),
+    ("unprotected-initialize-frontrun", "initialize-frontrun"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,

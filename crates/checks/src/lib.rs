@@ -34,8 +34,16 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod signature_replay;
+pub mod arbitrary_token_address;
+pub mod missing_pause_guard;
+pub mod unprotected_initialize_frontrun;
 pub mod util;
 
+pub use arbitrary_token_address::ArbitraryTokenAddress;
+pub use missing_pause_guard::MissingPauseGuard;
+pub use signature_replay::SignatureReplay;
+pub use unprotected_initialize_frontrun::UnprotectedInitializeFrontrun;
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
@@ -230,6 +238,10 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(UnprotectedInitializeFrontrun),
+        Box::new(MissingPauseGuard),
+        Box::new(ArbitraryTokenAddress),
+        Box::new(SignatureReplay),
     ]
 }
 
