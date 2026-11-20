@@ -446,4 +446,67 @@ impl Token {
             "the outer token.transfer after the nested block must be flagged; got lines: {lines:?}"
         );
     }
+
+    /// Regression test for #683: a shadowing `let token = ...` inside an `if` arm (a nested
+    /// block) must not hide the outer token-client binding once the arm exits. The outer
+    /// `token.transfer` after the `if` must still be flagged.
+    #[test]
+    fn shadow_in_if_arm_does_not_suppress_outer_token_binding() {
+        let src = r#"
+#[contractimpl]
+impl Token {
+    pub fn send(env: Env, cond: bool) {
+        let token = token::Client::new(&env, &id);
+        if cond {
+            let token = SomeOtherType::new();
+            token.transfer(&x, &y);   // unrelated, should not be tracked
+        } else {
+            let token = AnotherType::new();
+            token.transfer(&x, &y);   // unrelated, should not be tracked
+        }
+        // After the if/else arms, the outer `token` (a real token::Client) is live again.
+        token.transfer(&sender, &recv, &amount);
+    }
+}
+"#;
+        let lines = finding_lines(src);
+        assert_eq!(
+            lines.len(),
+            1,
+            "the outer token.transfer after the if arms must be flagged; got lines: {lines:?}"
+        );
+    }
+
+    /// Regression test for #683: a shadowing `let token = ...` inside a `match` arm (a nested
+    /// block) must not hide the outer token-client binding once the arm exits. The outer
+    /// `token.transfer` after the `match` must still be flagged.
+    #[test]
+    fn shadow_in_match_arm_does_not_suppress_outer_token_binding() {
+        let src = r#"
+#[contractimpl]
+impl Token {
+    pub fn send(env: Env, kind: u32) {
+        let token = token::Client::new(&env, &id);
+        match kind {
+            0 => {
+                let token = SomeOtherType::new();
+                token.transfer(&x, &y);   // unrelated, should not be tracked
+            }
+            _ => {
+                let token = AnotherType::new();
+                token.transfer(&x, &y);   // unrelated, should not be tracked
+            }
+        }
+        // After the match arms, the outer `token` (a real token::Client) is live again.
+        token.transfer(&sender, &recv, &amount);
+    }
+}
+"#;
+        let lines = finding_lines(src);
+        assert_eq!(
+            lines.len(),
+            1,
+            "the outer token.transfer after the match arms must be flagged; got lines: {lines:?}"
+        );
+    }
 }

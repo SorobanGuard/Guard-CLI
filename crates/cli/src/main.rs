@@ -996,6 +996,13 @@ const CHECK_METADATA: &[CheckMeta] = &[
         rule: "Authorization check occurs after a storage write",
         long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
     },
+    CheckMeta {
+        name: "testutils-feature-in-dependencies",
+        severity: "high",
+        short: "Flags soroban-sdk testutils enabled outside dev-dependencies",
+        rule: "soroban-sdk testutils feature enabled in production dependencies",
+        long: Some("Reports Cargo.toml manifests that enable the soroban-sdk `testutils` feature under [dependencies] or a [features] default, which compiles test-only helpers into the deployed WASM. Move the feature to [dev-dependencies]."),
+    },
 ];
 
 fn check_meta(name: &str) -> Option<&'static CheckMeta> {

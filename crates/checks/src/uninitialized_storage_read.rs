@@ -43,51 +43,6 @@ fn is_storage_has(expr: &Expr) -> bool {
     }
 }
 
-/// Returns `true` when the block contains a `.has(&key)` call on a storage
-/// receiver where the key argument token-text matches `read_key_text` AND
-/// the `.has()` call appears **before** the line of the unsafe read
-/// (`read_line`).
-fn block_has_storage_has_guard(block: &syn::Block, read_key_text: &str, read_line: usize) -> bool {
-    let mut v = StorageHasGuardVisitor {
-        read_key_text,
-        read_line,
-        found: false,
-    };
-    v.visit_block(block);
-    v.found
-}
-
-struct StorageHasGuardVisitor<'a> {
-    read_key_text: &'a str,
-    read_line: usize,
-    found: bool,
-}
-
-impl<'ast> Visit<'ast> for StorageHasGuardVisitor<'ast> {
-    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
-        if self.found {
-            return;
-        }
-        if i.method == "has" && receiver_chain_contains_storage(&i.receiver) {
-            // The .has() call must appear before the unwrap site.
-            let has_line = i.method.span().start().line;
-            if has_line < self.read_line {
-                // And the key argument must match the read key.
-                if let Some(arg) = i.args.first() {
-                    use quote::ToTokens;
-                    let arg_text = arg.to_token_stream().to_string();
-                    // Compare stripping whitespace for robustness (&KEY vs & KEY).
-                    if arg_text.replace(' ', "") == self.read_key_text.replace(' ', "") {
-                        self.found = true;
-                        return;
-                    }
-                }
-            }
-        }
-        visit::visit_expr_method_call(self, i);
-    }
-}
-
 /// Returns true when the receiver chain contains `.storage()` followed by a
 /// `.get(…)` call — i.e. this is a raw storage read that returns `Option<T>`.
 /// Also returns the first argument (the key) as a token string when found.
@@ -107,6 +62,15 @@ fn is_storage_get(expr: &Expr) -> Option<String> {
             }
             is_storage_get(&m.receiver)
         }
+        _ => None,
+    }
+}
+
+/// Returns the argument expression passed to a `.get(…)`/`.get_unchecked(…)`
+/// call, if any.
+fn get_key_arg(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::MethodCall(m) if m.method == "get" || m.method == "get_unchecked" => m.args.first(),
         _ => None,
     }
 }
@@ -159,22 +123,11 @@ impl<'ast> Visit<'ast> for GatingHasGuardVisitor<'_> {
         // A guard gates the read when the `if` condition is a `.has(&key)`
         // check on the same key and the branch diverges (returns/panics),
         // so control only reaches the read when the key is present.
-        if let Expr::MethodCall(m) = &*i.cond {
-            if is_storage_has(&i.cond) {
-                if let Some(arg) = has_key_arg(&i.cond) {
-                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
-                        self.found = true;
-                        return;
-                    }
-                }
-            }
-            // Also handle the negated form `if !has(&key) { return …; }`.
-            if m.method == "has" {
-                if let Some(arg) = has_key_arg(&i.cond) {
-                    if same_key(arg, self.key) && block_diverges(&i.then_branch) {
-                        self.found = true;
-                        return;
-                    }
+        if is_storage_has(&i.cond) {
+            if let Some(arg) = has_key_arg(&i.cond) {
+                if same_key(arg, self.key) && block_diverges(&i.then_branch) {
+                    self.found = true;
+                    return;
                 }
             }
         }
@@ -235,7 +188,11 @@ impl Visit<'_> for StorageReadVisitor<'_> {
         if method == "unwrap" || method == "expect" {
             if let Some(key_text) = is_storage_get(&i.receiver) {
                 let read_line = i.span().start().line;
-                if !block_has_storage_has_guard(self.block, &key_text, read_line) {
+                let guarded = match get_key_arg(&i.receiver) {
+                    Some(key) => block_has_gating_has_guard(self.block, key),
+                    None => false,
+                };
+                if !guarded {
                     self.out.push(Finding {
                         check_name: CHECK_NAME.to_string(),
                         severity: Severity::High,
@@ -434,6 +391,62 @@ impl C {
             hits.len(),
             1,
             "has() guard after the read must not suppress the finding"
+        );
+        Ok(())
+    }
+
+    /// A negated `.has(&K)` guard in a diverging branch gates the read.
+    #[test]
+    fn ignores_negated_has_guard_with_early_return() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+const K: soroban_sdk::Symbol = symbol_short!("k");
+#[contractimpl]
+impl C {
+    pub fn get_val(env: Env) -> u32 {
+        if !env.storage().persistent().has(&K) {
+            return 0;
+        }
+        env.storage().persistent().get(&K).unwrap()
+    }
+}
+"#,
+        )?;
+        let hits = UninitializedStorageReadCheck.run(&file, "");
+        assert!(
+            hits.is_empty(),
+            "diverging has() guard should suppress finding"
+        );
+        Ok(())
+    }
+
+    /// A negated `.has(&OTHER)` guard must not suppress a read of `&K`.
+    #[test]
+    fn flags_negated_has_guard_for_wrong_key() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+const K: soroban_sdk::Symbol = symbol_short!("k");
+const OTHER: soroban_sdk::Symbol = symbol_short!("other");
+#[contractimpl]
+impl C {
+    pub fn get_val(env: Env) -> u32 {
+        if !env.storage().persistent().has(&OTHER) {
+            return 0;
+        }
+        env.storage().persistent().get(&K).unwrap()
+    }
+}
+"#,
+        )?;
+        let hits = UninitializedStorageReadCheck.run(&file, "");
+        assert_eq!(
+            hits.len(),
+            1,
+            "wrong-key diverging has() guard must not suppress the finding"
         );
         Ok(())
     }
