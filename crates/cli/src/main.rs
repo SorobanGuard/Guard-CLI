@@ -989,6 +989,38 @@ const CHECK_METADATA: &[CheckMeta] = &[
         rule: "Input collection used without a length bound check",
         long: Some("Reports input collection parameters used without checking their length against an upper bound."),
     },
+
+CheckMeta {
+    name: "storage-write-in-loop",
+    severity: "medium",
+    short: "storage write in loop",
+    rule: "storage write in loop",
+    long: Some("storage write in loop"),
+},
+
+CheckMeta {
+    name: "prng-for-high-value-decision",
+    severity: "medium",
+    short: "prng for high value decision",
+    rule: "prng for high value decision",
+    long: Some("prng for high value decision"),
+},
+
+CheckMeta {
+    name: "missing-instance-ttl-extension",
+    severity: "medium",
+    short: "missing instance ttl extension",
+    rule: "missing instance ttl extension",
+    long: Some("missing instance ttl extension"),
+},
+
+CheckMeta {
+    name: "authorize-as-current-contract-broad",
+    severity: "high",
+    short: "authorize as current contract broad",
+    rule: "authorize as current contract broad",
+    long: Some("authorize as current contract broad"),
+},
     CheckMeta {
         name: "auth-after-storage-write",
         severity: "high",

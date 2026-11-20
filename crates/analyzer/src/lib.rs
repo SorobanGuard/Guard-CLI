@@ -702,44 +702,6 @@ pub fn scan_directory_with_checks(
     Ok((results, files_scanned, files_skipped, check_panics))
 }
 
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
-
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
 ///
 /// Applies the same per-file filter as [`scan_directory`] via [`classify_rust_path`]:

@@ -804,3 +804,83 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+
+---
+
+## `storage-write-in-loop` (Medium)
+
+**What it detects**
+
+See issue deliverables for `storage-write-in-loop`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `prng-for-high-value-decision` (Medium)
+
+**What it detects**
+
+See issue deliverables for `prng-for-high-value-decision`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `missing-instance-ttl-extension` (Medium)
+
+**What it detects**
+
+See issue deliverables for `missing-instance-ttl-extension`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `authorize-as-current-contract-broad` (High)
+
+**What it detects**
+
+See issue deliverables for `authorize-as-current-contract-broad`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
