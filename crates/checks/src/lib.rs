@@ -34,8 +34,16 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod internal_helper_exposed_as_entrypoint;
+pub mod unchecked_collection_access;
+pub mod event_before_state_change;
+pub mod self_invocation_via_current_contract_address;
 pub mod util;
 
+pub use event_before_state_change::EventBeforeStateChange;
+pub use internal_helper_exposed_as_entrypoint::InternalHelperExposedAsEntrypoint;
+pub use self_invocation_via_current_contract_address::SelfInvocationViaCurrentContractAddress;
+pub use unchecked_collection_access::UncheckedCollectionAccess;
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
@@ -230,6 +238,10 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(SelfInvocationViaCurrentContractAddress),
+        Box::new(EventBeforeStateChange),
+        Box::new(UncheckedCollectionAccess),
+        Box::new(InternalHelperExposedAsEntrypoint),
     ]
 }
 

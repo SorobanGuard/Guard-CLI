@@ -45,6 +45,10 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("internal-helper-exposed-as-entrypoint", "exposed-helper"),
+    ("unchecked-collection-access", "unchecked-collection"),
+    ("event-before-state-change", "event-ordering"),
+    ("self-invocation-via-current-contract-address", "self-invoke"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,

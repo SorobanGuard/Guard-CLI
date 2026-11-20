@@ -278,3 +278,24 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn exposed_helper_fixtures() {
+    assert_fixture_pair("exposed-helper", "internal-helper-exposed-as-entrypoint");
+}
+
+#[test]
+fn unchecked_collection_fixtures() {
+    assert_fixture_pair("unchecked-collection", "unchecked-collection-access");
+}
+
+#[test]
+fn event_ordering_fixtures() {
+    assert_fixture_pair("event-ordering", "event-before-state-change");
+}
+
+#[test]
+fn self_invoke_fixtures() {
+    assert_fixture_pair("self-invoke", "self-invocation-via-current-contract-address");
+}
+

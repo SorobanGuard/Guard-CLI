@@ -989,6 +989,38 @@ const CHECK_METADATA: &[CheckMeta] = &[
         rule: "Input collection used without a length bound check",
         long: Some("Reports input collection parameters used without checking their length against an upper bound."),
     },
+
+CheckMeta {
+    name: "internal-helper-exposed-as-entrypoint",
+    severity: "medium",
+    short: "internal helper exposed as entrypoint",
+    rule: "internal helper exposed as entrypoint",
+    long: Some("internal helper exposed as entrypoint"),
+},
+
+CheckMeta {
+    name: "unchecked-collection-access",
+    severity: "medium",
+    short: "unchecked collection access",
+    rule: "unchecked collection access",
+    long: Some("unchecked collection access"),
+},
+
+CheckMeta {
+    name: "event-before-state-change",
+    severity: "low",
+    short: "event before state change",
+    rule: "event before state change",
+    long: Some("event before state change"),
+},
+
+CheckMeta {
+    name: "self-invocation-via-current-contract-address",
+    severity: "medium",
+    short: "self invocation via current contract address",
+    rule: "self invocation via current contract address",
+    long: Some("self invocation via current contract address"),
+},
     CheckMeta {
         name: "auth-after-storage-write",
         severity: "high",
