@@ -16,6 +16,16 @@ fn path_is_contractimpl(path: &syn::Path) -> bool {
         .is_some_and(|s| s.ident == "contractimpl")
 }
 
+/// Is `fn_name` a Soroban contract constructor (`__constructor`)?
+///
+/// Constructors run exactly once, invoked by the deployer during contract
+/// creation, and cannot be re-invoked by arbitrary users. Checks that flag
+/// missing authorization / events / nonces on state-mutating entry points
+/// should therefore skip them.
+pub fn is_constructor(fn_name: &str) -> bool {
+    fn_name == "__constructor"
+}
+
 /// Does `attrs` contain a `#[cfg(...)]` predicate that gates its item to test
 /// builds? Recognizes a bare `#[cfg(test)]` as well as `test` appearing
 /// alongside other predicates inside `all(...)` / `any(...)`, e.g.
@@ -181,6 +191,15 @@ mod integration {
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].sig.ident.to_string(), "live");
         Ok(())
+    }
+
+    #[test]
+    fn is_constructor_recognizes_only_the_constructor() {
+        assert!(is_constructor("__constructor"));
+        assert!(!is_constructor("constructor"));
+        assert!(!is_constructor("__init"));
+        assert!(!is_constructor("initialize"));
+        assert!(!is_constructor("transfer"));
     }
 
     #[test]

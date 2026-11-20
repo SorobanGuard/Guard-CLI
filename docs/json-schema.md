@@ -171,6 +171,11 @@ value identically (i.e. use an optional/nullable field type, not a required one)
 
 ```json
 {
+  "tool": {
+    "name": "soroban-guard",
+    "version": "0.1.0"
+  },
+  "schema_version": 1,
   "summary": {
     "total": 2,
     "high": 1,

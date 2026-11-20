@@ -12,7 +12,20 @@ fn workspace_root() -> PathBuf {
 }
 
 fn normalise(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\\', "/")
+    // Normalise line endings and path separators so goldens match on every OS.
+    let text = text.replace("\r\n", "\n").replace('\\', "/");
+    // Strip trailing whitespace on each line (editors/OSes differ) and any
+    // trailing blank lines at end of file.
+    let mut out = String::with_capacity(text.len());
+    for line in text.split('\n') {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    // Collapse the trailing newline(s) we just added into a single one.
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    out
 }
 
 fn scan_vulnerable(format_flag: &str) -> String {

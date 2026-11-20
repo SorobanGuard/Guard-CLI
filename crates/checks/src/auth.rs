@@ -2,7 +2,7 @@
 
 use crate::util::{
     address_param_names, contractimpl_functions_excluding_test, env_param_name,
-    is_storage_mutation_call, receiver_is_auth_gate, type_is_address,
+    is_constructor, is_storage_mutation_call, receiver_is_auth_gate, type_is_address,
 };
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
@@ -24,6 +24,9 @@ impl Check for MissingRequireAuthCheck {
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
+            if is_constructor(&method.sig.ident.to_string()) {
+                continue;
+            }
             let env_param = env_param_name(&method.sig);
             let address_params = address_param_names(&method.sig);
             let mut scan = FuncBodyScan::new(env_param.as_deref(), address_params);
@@ -243,6 +246,29 @@ impl Contract {
         assert!(
             hits.is_empty(),
             "`user.require_auth()` should satisfy the check when user is an Address"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn passes_on_constructor_without_require_auth() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn __constructor(env: Env, admin: Address) {
+        env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
+    }
+}
+"#,
+        )?;
+        assert!(
+            hits.is_empty(),
+            "`__constructor` runs once at deploy time and must not be flagged"
         );
         Ok(())
     }

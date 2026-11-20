@@ -1,4 +1,6 @@
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{
+    contractimpl_functions_excluding_test, is_constructor, receiver_chain_contains_storage,
+};
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
 use syn::FnArg;
@@ -16,6 +18,9 @@ impl Check for MissingNonceCheck {
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
+            if is_constructor(&method.sig.ident.to_string()) {
+                continue;
+            }
             if matches!(method.vis, syn::Visibility::Public(_)) {
                 let has_storage_write = contains_storage_write(&method.block);
                 let has_address_param = contains_address_param(&method.sig.inputs);
@@ -338,6 +343,28 @@ impl C {
         assert!(
             findings.is_empty(),
             "tx_nonce should be recognised as nonce protection, got: {:?}", findings
+        );
+        Ok(())
+    }
+
+    /// Regression test for #956: `__constructor` runs once at deploy time and
+    /// cannot be invoked by arbitrary users, so it needs no nonce protection.
+    #[test]
+    fn ignores_constructor() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn __constructor(env: Env, admin: Address) {
+        env.storage().instance().set(&symbol_short!("admin"), &admin);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = MissingNonceCheck;
+        let findings = check.run(&file, src);
+        assert!(
+            findings.is_empty(),
+            "__constructor should not be flagged, got: {:?}", findings
         );
         Ok(())
     }
