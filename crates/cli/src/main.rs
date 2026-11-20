@@ -1,4 +1,4 @@
-use soroban_guard_cli::config;
+use soroban_guard_cli::{baseline, config};
 
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -19,6 +19,12 @@ use std::sync::mpsc;
     version
 )]
 struct Cli {
+    /// Path to an explicit soroban-guard.toml (must exist)
+    #[arg(long, global = true, value_name = "PATH", conflicts_with = "no_config")]
+    config: Option<PathBuf>,
+    /// Skip soroban-guard.toml discovery entirely
+    #[arg(long, global = true, conflicts_with = "config")]
+    no_config: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -76,6 +82,12 @@ enum Commands {
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
+        /// Hide findings whose fingerprints are recorded in this baseline file
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<PathBuf>,
+        /// Write the current findings' fingerprints to this baseline file
+        #[arg(long, value_name = "FILE")]
+        write_baseline: Option<PathBuf>,
     },
     /// List the checks that are enabled by default
     ListChecks {
@@ -119,6 +131,8 @@ struct ScanOptions {
     exclude: Vec<String>,
     includes: Vec<String>,
     max_findings: usize,
+    baseline_fingerprints: Option<HashSet<String>>,
+    write_baseline: Option<PathBuf>,
 }
 
 /// Whether scan results should be printed. `--quiet` suppresses output only while the
@@ -137,7 +151,34 @@ fn run_scan(
 ) -> i32 {
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
         Ok((results, files_scanned, files_skipped, _check_panics)) => {
-            let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
+            let all_findings: Vec<Finding> =
+                results.into_iter().flat_map(|r| r.findings).collect();
+
+            // Write the baseline (if requested) from the complete, unfiltered set.
+            if let Some(ref baseline_path) = opts.write_baseline {
+                let fingerprints = baseline::fingerprints(&all_findings);
+                if let Err(e) = baseline::write(baseline_path, &fingerprints) {
+                    eprintln!("{} {}", "error:".red().bold(), e);
+                    return 2;
+                }
+                if opts.verbose {
+                    eprintln!(
+                        "Wrote {} fingerprint(s) to {}",
+                        fingerprints.len(),
+                        baseline_path.display()
+                    );
+                }
+            }
+
+            // Filter out baselined findings, tracking how many were hidden.
+            let (findings, hidden_count) = match &opts.baseline_fingerprints {
+                Some(known) => {
+                    let (kept, hidden) = baseline::filter_findings(all_findings, known);
+                    (kept, hidden)
+                }
+                None => (all_findings, 0),
+            };
+
             let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
 
             // Produce the serialized payload for the selected structured format,
@@ -145,13 +186,17 @@ fn run_scan(
             // All three formats use println! (trailing newline) as the convention.
             let structured_payload: Option<Result<String, String>> = if opts.json {
                 Some(
-                    json_payload(&findings, files_scanned, files_skipped)
+                    json_payload(&findings, files_scanned, files_skipped, hidden_count)
                         .map_err(|e| e.to_string()),
                 )
             } else if opts.sarif {
                 Some(
-                    serde_json::to_string_pretty(&build_sarif(&findings, files_skipped))
-                        .map_err(|e| e.to_string()),
+                    serde_json::to_string_pretty(&build_sarif(
+                        &findings,
+                        files_skipped,
+                        hidden_count,
+                    ))
+                    .map_err(|e| e.to_string()),
                 )
             } else if opts.markdown {
                 Some(Ok(render_markdown(&findings)))
@@ -188,6 +233,7 @@ fn run_scan(
                     files_scanned,
                     opts.path.display().to_string(),
                     truncated,
+                    hidden_count,
                 );
             }
 
@@ -296,6 +342,21 @@ fn parse_fail_on(value: &str) -> Result<Severity, &str> {
 
 fn main() {
     let cli = Cli::parse();
+    let explicit_config = cli.config.clone();
+    let no_config = cli.no_config;
+
+    // An explicit --config path must exist; otherwise fail fast naming the path.
+    if let Some(ref cfg_path) = explicit_config {
+        if !cfg_path.exists() {
+            eprintln!(
+                "{} config file not found: {}",
+                "error:".red().bold(),
+                cfg_path.display()
+            );
+            std::process::exit(2);
+        }
+    }
+
     match cli.command {
         Commands::Scan {
             path,
@@ -313,6 +374,8 @@ fn main() {
             watch,
             no_clear,
             max_findings,
+            baseline,
+            write_baseline,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
@@ -326,7 +389,11 @@ fn main() {
                 p
             } else {
                 // Try to load soroban-guard.toml from current directory to get default path.
-                let config_for_default = match config::load(&PathBuf::from(".")) {
+                let config_for_default = match config::resolve(
+                    &PathBuf::from("."),
+                    explicit_config.as_deref(),
+                    no_config,
+                ) {
                     Ok((c, _)) => c.unwrap_or_default(),
                     Err(e) => {
                         eprintln!("{} {}", "error:".red().bold(), e);
@@ -344,8 +411,8 @@ fn main() {
                 }
             };
 
-            // Load soroban-guard.toml, searching upward from the scan path.
-            let cfg = match config::load(&scan_path) {
+            // Load soroban-guard.toml honouring --config / --no-config.
+            let cfg = match config::resolve(&scan_path, explicit_config.as_deref(), no_config) {
                 Ok((c, config_path)) => {
                     if verbose {
                         match &config_path {
@@ -358,6 +425,18 @@ fn main() {
                 Err(e) => {
                     emit_setup_error(&e.to_string(), json);
                 }
+            };
+
+            // Load the baseline file (if any) before scanning so a missing or
+            // corrupt baseline fails fast with exit code 2.
+            let baseline_fingerprints = match &baseline {
+                Some(baseline_path) => match baseline::read(baseline_path) {
+                    Ok(fingerprints) => Some(fingerprints),
+                    Err(e) => {
+                        emit_setup_error(&e.to_string(), json);
+                    }
+                },
+                None => None,
             };
 
             // CLI --fail-on takes precedence over config min_severity.
@@ -425,6 +504,8 @@ fn main() {
                 exclude: exclude.clone(),
                 includes: include.clone(),
                 max_findings,
+                baseline_fingerprints,
+                write_baseline,
             };
 
             // Run the initial scan.
@@ -553,6 +634,13 @@ fn main() {
             }
         }
         Commands::ListChecks { json } => {
+            // Honour --config / --no-config so a bad explicit config fails here too.
+            if let Err(e) =
+                config::resolve(&PathBuf::from("."), explicit_config.as_deref(), no_config)
+            {
+                eprintln!("{} {}", "error:".red().bold(), e);
+                std::process::exit(2);
+            }
             if json {
                 match list_checks_json() {
                     Ok(payload) => println!("{payload}"),
@@ -603,6 +691,13 @@ fn main() {
             println!("Wrote {}", config_path.display());
         }
         Commands::Explain { check_name } => {
+            // Honour --config / --no-config so a bad explicit config fails here too.
+            if let Err(e) =
+                config::resolve(&PathBuf::from("."), explicit_config.as_deref(), no_config)
+            {
+                eprintln!("{} {}", "error:".red().bold(), e);
+                std::process::exit(2);
+            }
             let known = default_checks();
             if !known.iter().any(|c| c.name() == check_name) {
                 eprintln!(
@@ -662,7 +757,11 @@ fn truncate(findings: &[Finding], max: usize) -> (&[Finding], usize) {
     }
 }
 
-fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value {
+fn build_sarif(
+    findings: &[Finding],
+    files_skipped: usize,
+    hidden_count: usize,
+) -> serde_json::Value {
     // Collect the highest severity observed for each check name so that
     // defaultConfiguration.level reflects the worst-case rule level rather than
     // whichever finding happens to appear first in the slice.
@@ -723,7 +822,8 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
             "invocations": [{
                 "executionSuccessful": true,
                 "properties": {
-                    "files_skipped": files_skipped
+                    "files_skipped": files_skipped,
+                    "hidden_count": hidden_count
                 }
             }],
             "results": results
@@ -1062,6 +1162,7 @@ fn json_payload(
     findings: &[Finding],
     files_scanned: usize,
     files_skipped: usize,
+    hidden_count: usize,
 ) -> Result<String, serde_json::Error> {
     let (high, medium, low) = severity_counts(findings);
 
@@ -1077,7 +1178,8 @@ fn json_payload(
             "medium": medium,
             "low": low,
             "files_scanned": files_scanned,
-            "files_skipped": files_skipped
+            "files_skipped": files_skipped,
+            "hidden_count": hidden_count
         },
         "findings": findings
     });
@@ -1173,6 +1275,7 @@ fn print_pretty(
     files_scanned: usize,
     root_label: String,
     truncated_count: usize,
+    hidden_count: usize,
 ) {
     println!();
     println!(
@@ -1229,6 +1332,12 @@ fn print_pretty(
     }
 
     println!("  {}", summary_text(findings, files_scanned));
+    if hidden_count > 0 {
+        println!(
+            "  {}",
+            format!("({} baselined finding(s) hidden)", hidden_count).dimmed()
+        );
+    }
     println!();
 }
 
@@ -1264,7 +1373,7 @@ mod tests {
             suggestion: None,
         }];
 
-        let payload = build_sarif(&findings, 0);
+        let payload = build_sarif(&findings, 0, 0);
         assert_eq!(payload["version"], "2.1.0");
         assert_eq!(
             payload["runs"][0]["tool"]["driver"]["name"],
@@ -1300,7 +1409,7 @@ mod tests {
         }];
 
         let payload: serde_json::Value =
-            serde_json::from_str(&json_payload(&findings, 1, 0).unwrap()).unwrap();
+            serde_json::from_str(&json_payload(&findings, 1, 0, 0).unwrap()).unwrap();
         assert_eq!(payload["findings"][0]["rule_url"], rule_url);
     }
 
@@ -1330,7 +1439,7 @@ mod tests {
         ];
 
         let payload: serde_json::Value =
-            serde_json::from_str(&json_payload(&findings, 3, 2).unwrap()).unwrap();
+            serde_json::from_str(&json_payload(&findings, 3, 2, 0).unwrap()).unwrap();
         assert_eq!(payload["summary"]["total"], 2);
         assert_eq!(payload["summary"]["high"], 1);
         assert_eq!(payload["summary"]["medium"], 1);
@@ -1353,7 +1462,7 @@ mod tests {
         }];
 
         let payload: serde_json::Value =
-            serde_json::from_str(&json_payload(&findings, 1, 0).unwrap()).unwrap();
+            serde_json::from_str(&json_payload(&findings, 1, 0, 0).unwrap()).unwrap();
         assert_eq!(payload["tool"]["name"], "soroban-guard");
         assert_eq!(payload["tool"]["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(payload["schema_version"], 1);
@@ -1397,7 +1506,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let payload = serde_json::to_string_pretty(&build_sarif(&findings, 1)).unwrap();
+        let payload = serde_json::to_string_pretty(&build_sarif(&findings, 1, 0)).unwrap();
         write_output(&path, &payload).unwrap();
         assert!(path.exists());
         let contents = fs::read_to_string(&path).unwrap();

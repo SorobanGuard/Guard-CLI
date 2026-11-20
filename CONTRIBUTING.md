@@ -123,6 +123,12 @@ Drive the visitor with `visit::visit_file(&mut v, &file)` or `v.visit_block(&fun
 
 ## How to add a new check (copy `auth.rs` as a template)
 
+> **New to writing checks?** Start with the worked end-to-end tutorial,
+> [`docs/writing-a-check.md`](docs/writing-a-check.md). It builds one small check from
+> scratch — visitor skeleton, `util.rs` helpers, `Finding` fields, unit tests, the
+> safe/vulnerable fixture pair, `fixture_scans.rs`, docs, and the registry consistency
+> test — and complements the step-by-step checklist below.
+
 Use [`crates/checks/src/auth.rs`](crates/checks/src/auth.rs) as the canonical layout: a `const CHECK_NAME`, a unit struct, `impl Check`, private helpers, and a `#[cfg(test)]` module using `syn::parse_file` with `Result`-returning tests.
 
 ### Step-by-step
