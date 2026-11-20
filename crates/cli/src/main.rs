@@ -1,4 +1,4 @@
-use soroban_guard_cli::config;
+use soroban_guard_cli::{config, rfc3339_now};
 
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -237,19 +237,6 @@ fn run_scan(
             2
         }
     }
-}
-
-/// Returns a UTC time string like "23:09:36 UTC" without any external date crate.
-fn chrono_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    format!("{h:02}:{m:02}:{s:02} UTC")
 }
 
 fn effective_fail_on(cli_value: Option<&str>, config_value: Option<&str>) -> String {
@@ -534,7 +521,7 @@ fn main() {
                             }
 
                             // Print a timestamped re-scan header.
-                            let now = chrono_timestamp();
+                            let now = rfc3339_now();
                             eprintln!(
                                 "{}",
                                 format!("[{}] File changed — re-scanning...", now)
@@ -995,6 +982,13 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags authorization checks after storage writes",
         rule: "Authorization check occurs after a storage write",
         long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
+    },
+    CheckMeta {
+        name: "divide-before-multiply",
+        severity: "medium",
+        short: "Flags `a / b * c` where truncation happens before scaling",
+        rule: "Integer division result is multiplied, losing precision",
+        long: Some("Reports multiplications whose operand is an integer division (`a / b * c`). Integer division truncates before the result is scaled, silently discarding the fractional part and often rounding to zero. Reorder to `a * c / b` and use checked/saturating arithmetic. See https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#divide-before-multiply-medium"),
     },
 ];
 
@@ -1590,20 +1584,67 @@ mod tests {
         );
     }
 
+    /// RAII guard that restores the global `colored` override on drop, so a panic
+    /// inside a styling test cannot leak the override into parallel tests.
+    struct ColorOverrideGuard;
+
+    impl ColorOverrideGuard {
+        fn set(enabled: bool) -> Self {
+            control::set_override(enabled);
+            ColorOverrideGuard
+        }
+    }
+
+    impl Drop for ColorOverrideGuard {
+        fn drop(&mut self) {
+            control::unset_override();
+        }
+    }
+
     #[test]
     fn check_name_styling_is_bold_for_high_and_dimmed_for_low() {
-        control::set_override(true);
-        let high = style_check_name("high-check", Severity::High);
-        let low = style_check_name("low-check", Severity::Low);
+        // Assert on behaviour rather than exact escape bytes: the `colored` crate
+        // may emit combined/different sequences (see #619, #951).
+        {
+            let _guard = ColorOverrideGuard::set(true);
+            let high = style_check_name("high-check", Severity::High);
+            let low = style_check_name("low-check", Severity::Low);
 
-        assert!(
-            high.contains("\u{1b}[1;31m"),
-            "high check name should be bold red"
-        );
-        assert!(
-            low.contains("\u{1b}[2;37m"),
-            "low check name should be dimmed white"
-        );
+            assert_ne!(
+                high, "high-check",
+                "high check name should be styled when color is enabled"
+            );
+            assert!(
+                high.contains("high-check"),
+                "styled high check name should still contain the original name"
+            );
+            assert_ne!(
+                high, low,
+                "high and low check names should render differently"
+            );
+            assert_ne!(
+                low, "low-check",
+                "low check name should be styled when color is enabled"
+            );
+            assert!(
+                low.contains("low-check"),
+                "styled low check name should still contain the original name"
+            );
+        }
+
+        {
+            let _guard = ColorOverrideGuard::set(false);
+            assert_eq!(
+                style_check_name("high-check", Severity::High),
+                "high-check",
+                "high check name should be plain when color is disabled"
+            );
+            assert_eq!(
+                style_check_name("low-check", Severity::Low),
+                "low-check",
+                "low check name should be plain when color is disabled"
+            );
+        }
     }
 
     #[test]
@@ -1766,7 +1807,7 @@ mod tests {
 
     #[test]
     fn watch_timestamp_is_time_only_and_explicitly_utc() {
-        let timestamp = chrono_timestamp();
+        let timestamp = rfc3339_now();
         assert_eq!(timestamp.len(), "00:00:00 UTC".len());
         assert!(timestamp.ends_with(" UTC"));
         assert_eq!(timestamp.bytes().filter(|byte| *byte == b':').count(), 2);

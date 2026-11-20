@@ -121,6 +121,7 @@ fn body_has_auth_gate(block: &Block, env_name: Option<&str>, address_names: &[St
     v.found || v.storage_read_and_conditional
 }
 
+/// Whether a block always diverges (never falls through to the code after it).
 fn block_diverges(block: &Block) -> bool {
     block.stmts.iter().any(|stmt| match stmt {
         syn::Stmt::Expr(expr, _) => expr_diverges(expr),
@@ -129,16 +130,13 @@ fn block_diverges(block: &Block) -> bool {
     })
 }
 
+/// Whether an expression always diverges: `return`, `panic!`, `?`, or an `if` whose
+/// both branches diverge.
 fn expr_diverges(expr: &Expr) -> bool {
     match expr {
         Expr::Return(_) => true,
         Expr::Macro(expr) => expr.mac.path.is_ident("panic"),
-        Expr::MethodCall(expr) => {
-            matches!(
-                expr.method.to_string().as_str(),
-                "require_auth" | "require_auth_for_args"
-            )
-        }
+        Expr::Try(_) => true,
         Expr::Block(expr) => block_diverges(&expr.block),
         Expr::If(expr) => {
             block_diverges(&expr.then_branch)
@@ -257,11 +255,23 @@ impl<'ast> Visit<'ast> for AuthGateScan {
                 .chain(self.address_names.clone())
                 .collect();
             let name_set: std::collections::HashSet<String> = all_names.iter().cloned().collect();
-            if expr_references_any(&i.cond, &name_set) {
+            if expr_references_any(&i.cond, &name_set) && if_guards_privileged_action(i) {
                 self.storage_read_and_conditional = true;
             }
         }
     }
+}
+
+/// An `if` only acts as an auth gate when at least one branch diverges (e.g. `return`,
+/// `panic!`, `?`), so the guarded privileged action is unreachable for unauthorized
+/// callers. A no-op `if` (both branches fall through) does not gate anything.
+fn if_guards_privileged_action(i: &ExprIf) -> bool {
+    if block_diverges(&i.then_branch) {
+        return true;
+    }
+    i.else_branch
+        .as_ref()
+        .is_some_and(|(_, branch)| expr_diverges(branch))
 }
 
 fn expr_references_any(expr: &syn::Expr, names: &std::collections::HashSet<String>) -> bool {

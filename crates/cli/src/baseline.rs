@@ -125,6 +125,7 @@ pub fn filter_findings(findings: &[Finding], baseline: &Baseline) -> FilterResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rfc3339_now;
 
     fn finding(check: &str, file: &str, function: &str, description: &str) -> Finding {
         Finding {
