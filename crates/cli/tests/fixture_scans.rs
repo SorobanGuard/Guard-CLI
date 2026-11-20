@@ -278,3 +278,8 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn divide_before_multiply_fixtures() {
+    assert_fixture_pair("divide-before-multiply", "divide-before-multiply");
+}

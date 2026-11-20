@@ -6,6 +6,7 @@ pub mod auth;
 pub mod auth_order;
 pub mod balance;
 pub mod delegate;
+pub mod divide_before_multiply;
 pub mod division;
 pub mod events;
 pub mod global_state;
@@ -42,6 +43,7 @@ pub use auth::MissingRequireAuthCheck;
 pub use auth_order::AuthAfterStorageWriteCheck;
 pub use balance::MissingBalanceCheck;
 pub use delegate::DelegateCallRiskCheck;
+pub use divide_before_multiply::DivideBeforeMultiplyCheck;
 pub use division::IntegerDivisionTruncationCheck;
 pub use events::MissingEventEmissionCheck;
 pub use global_state::MutableGlobalStateCheck;
@@ -207,6 +209,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(UnsafeCrossContractInputCheck),
         Box::new(MissingContractAnnotationCheck),
         Box::new(DelegateCallRiskCheck),
+        Box::new(DivideBeforeMultiplyCheck),
         Box::new(IntegerDivisionTruncationCheck),
         Box::new(MissingEventEmissionCheck),
         Box::new(SymbolKeyCollisionCheck),

@@ -804,3 +804,32 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+---
+
+## `divide-before-multiply` (Medium)
+
+**What it detects**
+
+Inside `#[contractimpl]` methods: a multiplication (`*`) whose operand is a division (`/`) — either directly (`a / b * c`), through a parenthesised expression (`(a / b) * c`), or through an immediately-bound local (`let q = a / b; q * c`). The finding is reported on the line of the division and names both operands.
+
+**Why it matters**
+
+Integer division truncates. Writing `amount / total * price` instead of `amount * price / total` silently discards the fractional part *before* it is scaled, which is the classic source of rounding-to-zero in fee, share and reward maths on Soroban. Reordering the operations keeps the full precision until the single final division.
+
+**How to fix**
+
+- Reorder to multiply first: `amount * price / total`.
+- Or use checked arithmetic (`checked_mul` / `checked_div`) and handle the `None` case explicitly.
+
+**Suppression**
+
+Annotate the quotient with `// soroban-guard: allow(divide-before-multiply)` to acknowledge an intentional truncation.
+
+**Limitations**
+
+- Only detects the division when it is a direct operand, wrapped in parentheses, or bound to an immediately-preceding local; deeper dataflow is not tracked.
+- Skips multiplication by a literal `1` and division by a literal power of two used as a shift (`/ 2`, `/ 4`, …). Division by `100` for basis points is still flagged.
+- Code inside `#[cfg(test)]` modules is skipped.
+
+**Fixture:** `test-contracts/divide-before-multiply-vulnerable/`, `test-contracts/divide-before-multiply-safe/`
