@@ -45,6 +45,10 @@ const FIXTURES: &[(&str, &str)] = &[
     ("reentrancy-risk", "reentrancy"),
     ("missing-event-for-admin-change", "admin-event"),
     ("missing-input-length-bound", "input-length"),
+    ("storage-write-in-loop", "storage-write-loop"),
+    ("prng-for-high-value-decision", "prng-high-value"),
+    ("missing-instance-ttl-extension", "instance-ttl"),
+    ("authorize-as-current-contract-broad", "auth-current-contract"),
 ];
 
 /// Checks allowed to have no `// Triggers` comment in examples/all-findings,

@@ -34,8 +34,16 @@ pub mod uninitialized_storage_read;
 pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
+pub mod storage_write_in_loop;
+pub mod prng_for_high_value_decision;
+pub mod missing_instance_ttl_extension;
+pub mod authorize_as_current_contract_broad;
 pub mod util;
 
+pub use authorize_as_current_contract_broad::AuthorizeAsCurrentContractBroad;
+pub use missing_instance_ttl_extension::MissingInstanceTtlExtension;
+pub use prng_for_high_value_decision::PrngForHighValueDecision;
+pub use storage_write_in_loop::StorageWriteInLoop;
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;
@@ -230,6 +238,10 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(AuthorizeAsCurrentContractBroad),
+        Box::new(MissingInstanceTtlExtension),
+        Box::new(PrngForHighValueDecision),
+        Box::new(StorageWriteInLoop),
     ]
 }
 

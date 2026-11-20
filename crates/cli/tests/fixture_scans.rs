@@ -278,3 +278,24 @@ fn input_length_fixtures() {
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
 }
+
+#[test]
+fn storage_write_loop_fixtures() {
+    assert_fixture_pair("storage-write-loop", "storage-write-in-loop");
+}
+
+#[test]
+fn prng_high_value_fixtures() {
+    assert_fixture_pair("prng-high-value", "prng-for-high-value-decision");
+}
+
+#[test]
+fn instance_ttl_fixtures() {
+    assert_fixture_pair("instance-ttl", "missing-instance-ttl-extension");
+}
+
+#[test]
+fn auth_current_contract_fixtures() {
+    assert_fixture_pair("auth-current-contract", "authorize-as-current-contract-broad");
+}
+
