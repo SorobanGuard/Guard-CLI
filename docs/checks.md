@@ -804,3 +804,83 @@ Passing a zero or negative token amount to a transfer or mint call can result in
 - Validation performed inside a helper function called by the flagged method is not visible to this check.
 
 **Fixture:** tests in `crates/checks/src/unchecked_token_amount.rs`
+
+
+---
+
+## `signature-replay` (High)
+
+**What it detects**
+
+See issue deliverables for `signature-replay`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `arbitrary-token-address` (High)
+
+**What it detects**
+
+See issue deliverables for `arbitrary-token-address`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `missing-pause-guard` (Medium)
+
+**What it detects**
+
+See issue deliverables for `missing-pause-guard`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
+
+
+---
+
+## `unprotected-initialize-frontrun` (High)
+
+**What it detects**
+
+See issue deliverables for `unprotected-initialize-frontrun`.
+
+**Why it matters**
+
+Soroban contract security and deployability.
+
+**Limitations**
+
+Static analysis heuristics; review suppressions for intentional patterns.
+
+**Fixture:** `test-contracts/` pair for this check.
+
