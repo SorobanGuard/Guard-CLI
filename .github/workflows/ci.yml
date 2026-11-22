@@ -80,3 +80,26 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/examples
         run: cargo check --manifest-path examples/all-findings/Cargo.toml
+
+  # Build the VS Code extension .vsix to verify it packages correctly (closes #999).
+  vscode-extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package .vsix
+        run: npm run package -- --no-dependencies

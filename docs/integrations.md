@@ -194,6 +194,63 @@ args = ["build", "--target", "wasm32-unknown-unknown", "--release"]
 
 ---
 
+## SonarQube / SonarCloud
+
+Import Soroban Guard findings into SonarQube or SonarCloud via the
+[Generic Issue Data](https://docs.sonarsource.com/sonarqube/latest/analyzing-source-code/importing-external-issues/generic-issue-import-format/)
+format.
+
+```bash
+# Generate the report file.
+soroban-guard scan . --sonarqube --output soroban-guard-sonarqube.json
+
+# Pass the report path to the scanner (Gradle / Maven / sonar-scanner CLI).
+sonar-scanner \
+  -Dsonar.externalIssuesReportPaths=soroban-guard-sonarqube.json \
+  -Dsonar.sources=.
+```
+
+In a GitHub Actions workflow:
+
+```yaml
+- name: Soroban Guard scan
+  run: soroban-guard scan . --sonarqube --output soroban-guard-sonarqube.json
+
+- name: SonarCloud Scan
+  uses: SonarSource/sonarcloud-github-action@master
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  with:
+    args: >
+      -Dsonar.externalIssuesReportPaths=soroban-guard-sonarqube.json
+```
+
+---
+
+## Checkstyle XML (Jenkins, IDEs, Bamboo, TeamCity)
+
+`--checkstyle` emits [Checkstyle XML](https://checkstyle.sourceforge.io/),
+which is consumed by Jenkins' Warnings NG plugin, IntelliJ IDEA, Bamboo,
+TeamCity, and many other CI/CD and IDE tools.
+
+```bash
+soroban-guard scan . --checkstyle --output soroban-guard.xml
+```
+
+In a Jenkins pipeline:
+
+```groovy
+stage('Soroban Guard') {
+    steps {
+        sh 'soroban-guard scan . --checkstyle --output soroban-guard.xml'
+        recordIssues(tools: [checkStyle(pattern: 'soroban-guard.xml')])
+    }
+}
+```
+
+---
+
 ## Exit codes quick reference
 
 | Code | Meaning | Recommended action |
