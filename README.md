@@ -67,6 +67,19 @@ The binary is `target/release/soroban-guard` (package `soroban-guard-cli`).
 
 ## Install
 
+### Homebrew (macOS arm64/x86_64 and Linux)
+
+```bash
+brew install SorobanGuard/tap/soroban-guard
+soroban-guard --version
+```
+
+The formula downloads the release tarball, verifies its checksum, and installs
+shell completions for Bash, Zsh, and Fish. The tap is bumped automatically on
+every release.
+
+### Prebuilt binaries
+
 Prebuilt binaries for each release are published on the
 [Releases page](https://github.com/SorobanGuard/Guard-CLI/releases). Every release
 ships supply-chain artifacts so you can verify a download before running it:
@@ -196,26 +209,6 @@ cargo run -p soroban-guard-cli -- init
 
 ### Configuration file
 
-Drop a `soroban-guard.toml` in the scan root to set defaults without CLI flags — min severity, disabled checks, and extra sensitive-name patterns. See [docs/configuration.md](docs/configuration.md) for the full schema and an example file.
+Drop a `soroban-guard.toml` in the scan root to set defaults without CLI flags — min severity, disabled checks, and extra sensitive-name patterns. See [docs/configuration.md](docs/configuratio
 
----
-
-## Workspace Scaffold
-
-See [Architecture](docs/architecture.md) for the crate dependency graph, scan data flow, key
-types, and extension points.
-
-```
-Guard-CLI/
-├── Cargo.toml                  # workspace root
-├── crates/
-│   ├── cli/                    # clap entrypoint & reporting
-│   │   └── src/main.rs
-│   ├── analyzer/               # walks .rs files, parses with syn, runs checks
-│   │   └── src/lib.rs
-│   └── checks/                 # Check trait + individual detectors
-│       └── src/
-│           ├── lib.rs          # trait definition, Finding, Severity, default_checks()
-│           └── ...             # one module per detector; see docs/checks.md for the full list
-└── test-contracts/             # 68 standalone Soroban fixture crates (excluded from workspace)
-    ├── vulnerable/             # triggers missing-require-a
+/* … truncated 892 chars — edit only what you need near the top … */

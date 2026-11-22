@@ -80,3 +80,15 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/examples
         run: cargo check --manifest-path examples/all-findings/Cargo.toml
+
+  homebrew-formula:
+    name: Homebrew formula
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate formula syntax
+        run: ruby -c packaging/homebrew/soroban-guard.rb
+
+      - name: Check formula references completions
+        run: grep -q 'completions' packaging/homebrew/soroban-guard.rb
