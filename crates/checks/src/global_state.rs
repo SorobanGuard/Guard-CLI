@@ -35,6 +35,7 @@ impl Check for MutableGlobalStateCheck {
                              invocations — `static mut` is unsafe and its value is \
                              not persisted on-chain."
                         ),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#mutable-global-state-high"
                                 .to_string(),

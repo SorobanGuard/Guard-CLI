@@ -45,6 +45,7 @@ impl Check for UnprotectedUpgradeCheck {
                             "Upgrade/migrate method `{}` lacks valid require_auth protection before the sensitive operation",
                             name
                         ),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-upgrade-high"
                                 .to_string(),

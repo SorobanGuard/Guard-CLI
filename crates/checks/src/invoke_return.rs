@@ -48,6 +48,7 @@ impl InvokeReturnScan {
                  leaving the contract in an inconsistent state.",
                 m.method, self.fn_name
             ),
+            confidence: None,
             rule_url: Some(
                 "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-invoke-return-medium"
                     .to_string(),

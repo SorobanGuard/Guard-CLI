@@ -83,6 +83,7 @@ impl Check for MissingContractAnnotationCheck {
                          struct exists in this file. This is likely a copy-paste error; \
                          add `#[contract]` to the struct definition."
                     ),
+                    confidence: None,
                     rule_url: Some(
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-contract-annotation-low"
                             .to_string(),

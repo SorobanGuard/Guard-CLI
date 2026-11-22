@@ -54,6 +54,7 @@ impl<'ast> Visit<'ast> for DivisorExprVisitor<'ast> {
                     line: node.span().start().line,
                     function_name: self.current_function_name.clone(),
                     description,
+                    confidence: None,
                     rule_url: Some(
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-divisor-high"
                             .to_string(),

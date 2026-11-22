@@ -45,6 +45,7 @@ impl Check for HardcodedAddressCheck {
                          Pass addresses in as contract parameters or configuration instead of \
                          baking them into source."
                     ),
+                    confidence: None,
                     rule_url: Some(
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#hardcoded-address-medium"
                             .to_string(),

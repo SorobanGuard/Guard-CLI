@@ -44,6 +44,7 @@ impl Check for SelfTransferCheck {
                      to guard against `from == to`. In fee-on-transfer or rebasing designs, \
                      self-transfers can artificially inflate volume or extract fees."
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#self-transfer-medium"
                         .to_string(),

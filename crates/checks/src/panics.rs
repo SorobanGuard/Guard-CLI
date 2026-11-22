@@ -76,6 +76,7 @@ impl PanicVisitor<'_> {
                  Use `env.panic_with_error` or return a `Result` with a typed error instead.",
                 self.fn_name
             ),
+            confidence: None,
             rule_url: Some(
                 "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#panic-in-contract-medium"
                     .to_string(),

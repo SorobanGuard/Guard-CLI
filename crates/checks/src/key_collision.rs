@@ -108,6 +108,7 @@ fn emit_findings(symbol_keys: &KeyMap, findings: &mut Vec<Finding>) {
                         "Duplicate symbol key `{}` found at position {}",
                         key, pos
                     ),
+                    confidence: None,
                     rule_url: Some(
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#symbol-key-collision-medium"
                             .to_string(),

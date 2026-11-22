@@ -143,6 +143,7 @@ impl Visit<'_> for StorageVisitor<'_> {
                      If the entry has expired the call will panic at runtime.",
                     self.fn_name
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
                         .to_string(),
@@ -166,6 +167,7 @@ impl Visit<'_> for StorageVisitor<'_> {
                      long-lived balances or ownership.",
                     self.fn_name
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
                         .to_string(),
@@ -196,6 +198,7 @@ impl Visit<'_> for StorageVisitor<'_> {
                      fixed literals or a namespaced encoding you control.",
                     self.fn_name
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
                         .to_string(),

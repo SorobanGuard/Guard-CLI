@@ -1,6 +1,6 @@
 //! Shared helpers for walking `#[contractimpl]` impl blocks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use syn::{Expr, FnArg, ImplItem, Item, ItemImpl, Pat, Signature, Type};
 
 pub fn is_contractimpl(item_impl: &ItemImpl) -> bool {
@@ -453,5 +453,208 @@ fn collect_contractimpl_fns_with_type<'a>(
             }
             _ => {}
         }
+    }
+}
+
+// ── Function summaries (issue #982) ─────────────────────────────────────────
+
+/// A single-pass summary of what a non-`pub` (private) helper function does.
+///
+/// **Limitation**: resolution is same-file only.
+#[derive(Debug, Clone, Default)]
+pub struct FnSummary {
+    /// The function calls `require_auth` or `require_auth_for_args` directly.
+    pub requires_auth: bool,
+    /// The function writes to any `env.storage()` bucket directly.
+    pub writes_storage: bool,
+    /// The function calls `env.events().publish` directly.
+    pub publishes_event: bool,
+    /// Idents of same-file functions that this function calls directly.
+    pub calls: Vec<String>,
+}
+
+/// Build a `FnSummary` for every non-`pub` function in `file`.
+///
+/// Resolution depth is bounded at 3 to remain cycle-safe.
+///
+/// **Limitation**: same-file resolution only.
+pub fn summarize(file: &syn::File) -> HashMap<String, FnSummary> {
+    let mut direct: HashMap<String, FnSummary> = HashMap::new();
+    collect_fn_summaries_direct(&file.items, &mut direct);
+
+    let names: Vec<String> = direct.keys().cloned().collect();
+    let mut resolved: HashMap<String, FnSummary> = direct.clone();
+
+    for _ in 0..3 {
+        let snapshot = resolved.clone();
+        for name in &names {
+            if let Some(summary) = resolved.get_mut(name) {
+                for callee in &summary.calls.clone() {
+                    if callee == name {
+                        continue;
+                    }
+                    if let Some(callee_summary) = snapshot.get(callee) {
+                        summary.requires_auth |= callee_summary.requires_auth;
+                        summary.writes_storage |= callee_summary.writes_storage;
+                        summary.publishes_event |= callee_summary.publishes_event;
+                    }
+                }
+            }
+        }
+    }
+
+    resolved
+}
+
+fn collect_fn_summaries_direct(items: &[Item], out: &mut HashMap<String, FnSummary>) {
+    for item in items {
+        match item {
+            Item::Fn(f) => {
+                if matches!(f.vis, syn::Visibility::Inherited) {
+                    let summary = fn_summary_from_stmts(&f.block.stmts);
+                    out.insert(f.sig.ident.to_string(), summary);
+                }
+            }
+            Item::Impl(item_impl) => {
+                for impl_item in &item_impl.items {
+                    if let ImplItem::Fn(m) = impl_item {
+                        if matches!(m.vis, syn::Visibility::Inherited) {
+                            let summary = fn_summary_from_stmts(&m.block.stmts);
+                            out.insert(m.sig.ident.to_string(), summary);
+                        }
+                    }
+                }
+            }
+            Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_fn_summaries_direct(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn fn_summary_from_stmts(stmts: &[syn::Stmt]) -> FnSummary {
+    use syn::visit::Visit;
+
+    struct Visitor(FnSummary);
+
+    impl Visit<'_> for Visitor {
+        fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            match method.as_str() {
+                "require_auth" | "require_auth_for_args" => {
+                    self.0.requires_auth = true;
+                }
+                "set" | "remove" => {
+                    if is_storage_method_chain(&node.receiver) {
+                        self.0.writes_storage = true;
+                    }
+                }
+                "publish" => {
+                    if is_events_chain(&node.receiver) {
+                        self.0.publishes_event = true;
+                    }
+                }
+                _ => {}
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let mut v = Visitor(FnSummary::default());
+    for stmt in stmts {
+        v.visit_stmt(stmt);
+    }
+    v.0
+}
+
+fn is_storage_method_chain(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(mc) => {
+            let method = mc.method.to_string();
+            matches!(
+                method.as_str(),
+                "persistent" | "instance" | "temporary" | "storage"
+            ) || is_storage_method_chain(&mc.receiver)
+        }
+        _ => false,
+    }
+}
+
+fn is_events_chain(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(mc) => {
+            let method = mc.method.to_string();
+            method == "events" || is_events_chain(&mc.receiver)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod summarize_tests {
+    use super::summarize;
+    use syn::parse_file;
+
+    #[test]
+    fn private_fn_with_require_auth_is_detected() {
+        let src = r#"
+            fn check_caller(caller: soroban_sdk::Address) {
+                caller.require_auth();
+            }
+        "#;
+        let file = parse_file(src).unwrap();
+        let summaries = summarize(&file);
+        assert!(summaries["check_caller"].requires_auth);
+    }
+
+    #[test]
+    fn private_fn_with_storage_write_is_detected() {
+        let src = r#"
+            fn write_val(env: Env) {
+                env.storage().persistent().set(&"k", &1u32);
+            }
+        "#;
+        let file = parse_file(src).unwrap();
+        let summaries = summarize(&file);
+        assert!(summaries["write_val"].writes_storage);
+    }
+
+    #[test]
+    fn private_fn_with_event_publish_is_detected() {
+        let src = r#"
+            fn emit(env: Env) {
+                env.events().publish(("ev",), 1u32);
+            }
+        "#;
+        let file = parse_file(src).unwrap();
+        let summaries = summarize(&file);
+        assert!(summaries["emit"].publishes_event);
+    }
+
+    #[test]
+    fn recursion_does_not_cause_infinite_loop() {
+        let src = r#"
+            fn recurse(n: u32) -> u32 {
+                if n > 0 { recurse(n - 1) } else { 0 }
+            }
+        "#;
+        let file = parse_file(src).unwrap();
+        let _ = summarize(&file);
+    }
+
+    #[test]
+    fn pub_fns_are_not_included_in_summaries() {
+        let src = r#"
+            pub fn public_fn() {}
+        "#;
+        let file = parse_file(src).unwrap();
+        let summaries = summarize(&file);
+        assert!(
+            !summaries.contains_key("public_fn"),
+            "public functions should not appear in fn summaries"
+        );
     }
 }

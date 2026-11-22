@@ -93,6 +93,7 @@ impl Check for UnprotectedAdminCheck {
                      `require_auth()` or `require_auth_for_args()` call in its body. \
                      Anyone may invoke this entrypoint."
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-admin-high"
                         .to_string(),

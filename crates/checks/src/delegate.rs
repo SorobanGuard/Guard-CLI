@@ -49,6 +49,7 @@ impl Check for DelegateCallRiskCheck {
                              poisoned (e.g., via upgrade or temp-storage race), the call \
                              can be redirected to an attacker-controlled contract.",
                         ),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#delegate-call-risk-high"
                                 .to_string(),

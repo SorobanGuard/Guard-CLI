@@ -32,6 +32,7 @@ impl Check for MissingEventForAdminChangeCheck {
                         line: method.sig.fn_token.span().start().line,
                         function_name: name.clone(),
                         description: format!("Admin change function `{}` lacks event emission", name),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-event-for-admin-change-medium"
                                 .to_string(),

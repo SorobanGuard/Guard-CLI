@@ -210,6 +210,7 @@ impl Visit<'_> for ArithVisitor<'_> {
                      `checked_mul`, or `saturating_*` to avoid silent overflow.",
                     self.fn_name
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-arithmetic-high--medium--low"
                         .to_string(),

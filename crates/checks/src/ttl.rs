@@ -55,6 +55,7 @@ impl Check for MissingTtlExtensionCheck {
                          `extend_ttl` on it in the same function. Without a TTL extension the \
                          entry can expire and be archived off the ledger."
                     ),
+                    confidence: None,
                     rule_url: Some(
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-ttl-extension-low"
                             .to_string(),

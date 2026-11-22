@@ -87,6 +87,7 @@ fn push_finding(out: &mut Vec<Finding>, idx: usize, trimmed: &str) {
              `std::` import or path reference will break the WASM build.",
             trimmed.trim_end_matches(';')
         ),
+        confidence: None,
         rule_url: Some(
             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#forbidden-std-imports-high"
                 .to_string(),

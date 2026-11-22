@@ -217,6 +217,7 @@ impl Check for MissingZeroAddressCheck {
                      address to an admin function can lock the contract permanently.",
                     addr_params.join(", ")
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-zero-address-check-medium"
                         .to_string(),
