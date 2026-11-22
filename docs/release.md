@@ -30,3 +30,32 @@ Use this checklist when publishing Soroban Guard crates to crates.io.
 5. Create a GitHub release from the tag and include the changelog notes.
 
 Publish order matters because `soroban-guard-analyzer` depends on `soroban-guard-checks`, and `soroban-guard-cli` depends on both library crates.
+
+## Release supply-chain artifacts
+
+The release workflow attaches the following assets to every GitHub release so
+users can verify a downloaded binary was built from the tagged source by CI:
+
+- `SHA256SUMS` — checksums covering every released artifact.
+- `soroban-guard-<version>.cdx.json` — a CycloneDX SBOM of the dependency tree.
+- Build-provenance attestations generated with `actions/attest-build-provenance`.
+
+### Verifying a release
+
+1. Verify the checksum of the downloaded binary:
+
+   ```bash
+   sha256sum --check SHA256SUMS --ignore-missing
+   ```
+
+2. Verify the build provenance attestation with the GitHub CLI:
+
+   ```bash
+   gh attestation verify soroban-guard-<target> --repo <owner>/soroban-guard
+   ```
+
+3. Inspect the SBOM to review the dependency inventory:
+
+   ```bash
+   cat soroban-guard-<version>.cdx.json
+   ```
