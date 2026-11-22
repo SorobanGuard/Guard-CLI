@@ -37,6 +37,7 @@ fn build_fn_spans(file: &syn::File) -> Vec<FnSpan> {
         .collect()
 }
 
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum ScanError {
     #[error("IO error: {0}")]
@@ -76,6 +77,7 @@ pub enum ScanError {
 
 /// The panic payload recovered from a [`Check`] that aborted mid-scan, in
 /// serializable form so it can be surfaced to CI consumers via `--json`/`--sarif`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckPanic {
@@ -301,23 +303,6 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
         lookup_fn_name.to_string(),
         finding.check_name.clone(),
     ))
-}
-
-/// The path relative to `root` shown in findings: the bare file name when `root`
-/// itself is a single file, otherwise the path stripped of the `root` prefix.
-/// Shared by every scan entry point so the copies of this logic can't drift (issue #630).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    }
 }
 
 /// Drop only findings that are identical in everything a reader would use to tell
@@ -608,6 +593,7 @@ fn run_checks_for_file(
 }
 
 /// Findings for a single source file.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct FileScanResult {
     pub file_path: String,
@@ -700,25 +686,6 @@ pub fn scan_directory_with_checks(
         .collect();
 
     Ok((results, files_scanned, files_skipped, check_panics))
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
 }
 
 /// Report-friendly path: lossy UTF-8 with `/` separators on every platform.

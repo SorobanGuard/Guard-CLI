@@ -80,6 +80,10 @@ use syn::File;
 ///
 /// The `PartialOrd`/`Ord` implementation orders variants High → Medium → Low so
 /// that `BTreeMap<Severity, _>` naturally sorts from most to least severe.
+///
+/// Marked `#[non_exhaustive]` so that adding a new severity level (e.g. `Critical`)
+/// is not a semver-breaking change for downstream crates that match on it.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -109,6 +113,11 @@ impl Ord for Severity {
 }
 
 /// One issue reported by a check.
+///
+/// Marked `#[non_exhaustive]` so that adding new fields (e.g. `column`, `cwe`)
+/// is not a semver-breaking change for downstream crates that construct or
+/// destructure it. Use [`Finding::new`] to construct instances.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Finding {
     pub check_name: String,
@@ -124,6 +133,53 @@ pub struct Finding {
     /// One-liner fix hint shown in pretty output and included in `--json`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+}
+
+impl Finding {
+    /// Construct a new `Finding` with the required fields.
+    ///
+    /// Optional fields (`rule_url`, `suggestion`) default to `None`.
+    ///
+    /// # Example
+    /// ```
+    /// use soroban_guard_checks::{Finding, Severity};
+    ///
+    /// let f = Finding::new("my-check", Severity::High, "src/lib.rs", 10, "transfer", "Missing auth");
+    /// assert_eq!(f.check_name, "my-check");
+    /// assert_eq!(f.line, 10);
+    /// assert!(f.suggestion.is_none());
+    /// ```
+    pub fn new(
+        check_name: impl Into<String>,
+        severity: Severity,
+        file_path: impl Into<String>,
+        line: usize,
+        function_name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            check_name: check_name.into(),
+            severity,
+            file_path: file_path.into(),
+            line,
+            function_name: function_name.into(),
+            description: description.into(),
+            rule_url: None,
+            suggestion: None,
+        }
+    }
+
+    /// Set the `rule_url` field.
+    pub fn with_rule_url(mut self, url: impl Into<String>) -> Self {
+        self.rule_url = Some(url.into());
+        self
+    }
+
+    /// Set the `suggestion` field.
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.suggestion = Some(suggestion.into());
+        self
+    }
 }
 
 /// A static analyzer check implemented against a parsed `syn::File`.
@@ -143,12 +199,7 @@ pub trait Check {
 /// use soroban_guard_checks::{Finding, Severity, group_by_file};
 ///
 /// let findings = vec![
-///     Finding {
-///         check_name: "a".into(), severity: Severity::High,
-///         file_path: "src/foo.rs".into(), line: 1,
-///         function_name: "f".into(), description: "d".into(),
-///         rule_url: None, suggestion: None,
-///     },
+///     Finding::new("a", Severity::High, "src/foo.rs", 1, "f", "d"),
 /// ];
 /// let grouped = group_by_file(&findings);
 /// assert!(grouped.contains_key("src/foo.rs"));
@@ -171,12 +222,7 @@ pub fn group_by_file<'a>(findings: &'a [Finding]) -> BTreeMap<&'a str, Vec<&'a F
 /// use soroban_guard_checks::{Finding, Severity, group_by_severity};
 ///
 /// let findings = vec![
-///     Finding {
-///         check_name: "a".into(), severity: Severity::Low,
-///         file_path: "src/lib.rs".into(), line: 1,
-///         function_name: "f".into(), description: "d".into(),
-///         rule_url: None, suggestion: None,
-///     },
+///     Finding::new("a", Severity::Low, "src/lib.rs", 1, "f", "d"),
 /// ];
 /// let grouped = group_by_severity(&findings);
 /// assert!(grouped.contains_key(&Severity::Low));

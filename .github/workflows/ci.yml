@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same PR branch; keep main runs (closes #988).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least-privilege default; jobs that need more request it explicitly (closes #988).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,11 +26,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca  # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -39,11 +46,9 @@ jobs:
     name: MSRV (1.74)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.74
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: dtolnay/rust-toolchain@bc08dc4b70663a2a03134b65e0d12fa3bd037224  # 1.74
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
         with:
           shared-key: msrv
 
@@ -53,11 +58,9 @@ jobs:
   fixture-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca  # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
         with:
           shared-key: fixture-contracts
 
@@ -80,3 +83,33 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/examples
         run: cargo check --manifest-path examples/all-findings/Cargo.toml
+
+  # Verify that all three workspace crates can be packaged without errors
+  # (closes #994). Publish order: checks → analyzer → cli. The two dependents
+  # use --no-verify because their path dependencies are not yet on crates.io.
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca  # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
+        with:
+          shared-key: publish-dry-run
+
+      - name: Dry-run publish soroban-guard-checks
+        run: |
+          cargo publish --dry-run -p soroban-guard-checks
+          echo "--- packaged files ---"
+          cargo package --list -p soroban-guard-checks
+
+      - name: Dry-run publish soroban-guard-analyzer
+        run: |
+          cargo publish --dry-run --no-verify -p soroban-guard-analyzer
+          echo "--- packaged files ---"
+          cargo package --list -p soroban-guard-analyzer
+
+      - name: Dry-run publish soroban-guard-cli
+        run: |
+          cargo publish --dry-run --no-verify -p soroban-guard-cli
+          echo "--- packaged files ---"
+          cargo package --list -p soroban-guard-cli
