@@ -6,22 +6,31 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Cancel superseded runs on the same PR branch (closes #988).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least-privilege default (closes #988).
+permissions:
+  contents: read
+
 jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca  # stable
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
 
       - name: Install security tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c  # v2
         with:
           tool: cargo-audit,cargo-deny
 

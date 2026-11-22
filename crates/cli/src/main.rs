@@ -736,6 +736,7 @@ fn severity_to_sarif_level(severity: Severity) -> &'static str {
         Severity::High => "error",
         Severity::Medium => "warning",
         Severity::Low => "note",
+        _ => "note",
     }
 }
 
@@ -1053,6 +1054,7 @@ fn severity_counts(findings: &[Finding]) -> (usize, usize, usize) {
             Severity::High => high += 1,
             Severity::Medium => medium += 1,
             Severity::Low => low += 1,
+            _ => {}
         }
     }
     (high, medium, low)
@@ -1099,6 +1101,7 @@ fn render_markdown(findings: &[Finding]) -> String {
             Severity::High => "**HIGH**",
             Severity::Medium => "MEDIUM",
             Severity::Low => "LOW",
+            _ => "UNKNOWN",
         };
         // Link the check name to rule_url when available, else plain text.
         let check_cell = if let Some(ref url) = f.rule_url {
@@ -1164,6 +1167,7 @@ fn style_check_name(check_name: &str, severity: Severity) -> String {
         Severity::High => check_name.red().bold().to_string(),
         Severity::Medium => check_name.magenta().to_string(),
         Severity::Low => check_name.dimmed().to_string(),
+        _ => check_name.to_string(),
     }
 }
 
@@ -1194,6 +1198,7 @@ fn print_pretty(
                 Severity::High => "HIGH".red().bold(),
                 Severity::Medium => "MEDIUM".magenta().bold(),
                 Severity::Low => "LOW".white(),
+                _ => "UNKNOWN".white(),
             };
             let check = style_check_name(&f.check_name, f.severity);
             println!(
