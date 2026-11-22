@@ -65,6 +65,32 @@ The binary is `target/release/soroban-guard` (package `soroban-guard-cli`).
 
 ---
 
+## Install
+
+Prebuilt binaries for each release are published on the
+[Releases page](https://github.com/SorobanGuard/Guard-CLI/releases). Every release
+ships supply-chain artifacts so you can verify a download before running it:
+
+- `SHA256SUMS` — checksums for every release asset
+- `soroban-guard.cdx.json` — CycloneDX SBOM of the build
+- a build-provenance attestation verifiable with `gh attestation verify`
+
+```bash
+# 1. Download the binary and SHA256SUMS for your platform, then verify the checksum
+sha256sum --check --ignore-missing SHA256SUMS
+
+# 2. Verify the build provenance attestation against the tagged source
+gh attestation verify soroban-guard-x86_64-unknown-linux-gnu.tar.gz \
+  --repo SorobanGuard/Guard-CLI
+
+# 3. Inspect the SBOM for the dependency inventory
+cat soroban-guard.cdx.json
+```
+
+See [docs/release.md](docs/release.md) for the full verification walkthrough.
+
+---
+
 ## Usage
 
 Scan a Soroban contract crate before deploying to Stellar:
@@ -192,163 +218,4 @@ Guard-CLI/
 │           ├── lib.rs          # trait definition, Finding, Severity, default_checks()
 │           └── ...             # one module per detector; see docs/checks.md for the full list
 └── test-contracts/             # 68 standalone Soroban fixture crates (excluded from workspace)
-    ├── vulnerable/             # triggers missing-require-auth
-    ├── safe/                   # passes missing-require-auth
-    ├── arithmetic-vulnerable/
-    ├── arithmetic-safe/
-    ├── admin-vulnerable/
-    ├── admin-safe/
-    ├── storage-vulnerable/
-    ├── storage-safe/
-    └── ...                     # paired safe/vulnerable fixtures for each implemented check
-```
-
----
-
-## Code Snippets
-
-### Vulnerable contract — triggers `missing-require-auth`
-
-```rust
-#![no_std]
-use soroban_sdk::{contract, contractimpl, symbol_short, Env, Symbol};
-
-#[contract]
-pub struct VulnerableContract;
-
-const KEY: Symbol = symbol_short!("counter");
-
-#[contractimpl]
-impl VulnerableContract {
-    // ❌ No env.require_auth() — anyone on Stellar can call this
-    pub fn bump(env: Env) {
-        let mut n: u32 = env.storage().instance().get(&KEY).unwrap_or(0);
-        n += 1;
-        env.storage().instance().set(&KEY, &n);
-    }
-}
-```
-
-### Safe contract — passes `missing-require-auth`
-
-```rust
-#![no_std]
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol};
-
-#[contract]
-pub struct SafeContract;
-
-const KEY: Symbol = symbol_short!("owner");
-
-#[contractimpl]
-impl SafeContract {
-    // ✅ Caller must be the authorized Address on Stellar
-    pub fn set_owner(env: Env, owner: Address, new_owner: Address) {
-        owner.require_auth();
-        env.storage().instance().set(&KEY, &new_owner);
-    }
-}
-```
-
-### Adding a custom check
-
-Implement the `Check` trait in `crates/checks/src/`, export it from the module, and register it in `all_checks_base()`:
-
-```rust
-use crate::{Check, Finding};
-use syn::File;
-
-pub struct MyCustomCheck;
-
-impl Check for MyCustomCheck {
-    fn name(&self) -> &str { "my-custom-check" }
-
-    fn run(&self, file: &File, source: &str) -> Vec<Finding> {
-        // inspect the syn AST and return any findings
-        vec![]
-    }
-}
-```
-
-```rust
-// crates/checks/src/lib.rs — register it once here
-fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
-    vec![
-        // ...(existing checks)...
-        Box::new(MyCustomCheck),   // 👈 add your check
-    ]
-}
-```
-
-`default_checks()` and `default_checks_with_config()` both derive their lists
-from `all_checks_base()`, so custom checks should not be registered in either
-wrapper directly.
-
----
-
-## Stellar Integration
-
-Guard CLI is designed to sit at the gate of your Stellar deployment pipeline. Soroban contracts are compiled to WASM and deployed to the Stellar network — Guard CLI catches vulnerabilities at the source level before any of that happens.
-
-### How it fits in
-
-```
-[Source code] → Guard CLI scan → [WASM build] → [Stellar deploy]
-```
-
-- Runs purely on Rust source — no Stellar SDK, no network connection, no wallet required.
-- Exit code `1` on High findings lets CI block a deploy automatically.
-- `--json` output can be piped into any dashboard or audit log.
-- `--sarif` emits SARIF 2.1.0 for GitHub Advanced Security and other code scanning integrations.
-- `--output findings.json` writes JSON output to disk for CI logs that should stay clean.
-
-### Deployment workflow
-
-```bash
-# 1. Scan before building — fails fast on High findings (exit 1)
-cargo run -p soroban-guard-cli -- scan ./my-contract --json > findings.json
-
-# 2. Build the WASM artifact only if scan passed
-cargo build --target wasm32-unknown-unknown --release
-
-# 3. Deploy to Stellar Testnet
-stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
-  --source <account-name> \
-  --network testnet
-
-# 4. Or deploy to Mainnet
-stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
-  --source <account-name> \
-  --network mainnet
-```
-
-### CI example (GitHub Actions)
-
-```yaml
-- name: Guard CLI scan
-  run: cargo run -p soroban-guard-cli -- scan ./my-contract --sarif --output findings.sarif
-  # exits 1 on High findings — blocks the workflow
-
-- name: Build WASM
-  run: cargo build --target wasm32-unknown-unknown --release
-```
-
----
-
-## Workspace layout
-
-| Crate | Role |
-|-------|------|
-| `crates/cli` | `clap` entrypoint, reporting |
-| `crates/analyzer` | Walk `.rs` files, parse with `syn`, run checks |
-| `crates/checks` | `Check` trait + individual detectors |
-
-See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--json` output schema, `docs/integrations.md` for pre-commit / CI / editor snippets, `docs/configuration.md` for the `soroban-guard.toml` project config file, and `CONTRIBUTING.md` to add a check.
-
----
-
-## License
-
-MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+    ├── vulnerable/             # triggers missing-require-a
