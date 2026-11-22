@@ -1,4 +1,4 @@
-use soroban_guard_cli::config;
+use soroban_guard_cli::{baseline, config};
 
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -76,6 +76,12 @@ enum Commands {
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
+        /// Path to a baseline JSON file; findings already in the baseline are hidden
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<PathBuf>,
+        /// With --baseline: exit 1 only for findings absent from the baseline at this severity
+        #[arg(long, requires = "baseline")]
+        fail_on_new: bool,
     },
     /// List the checks that are enabled by default
     ListChecks {
@@ -104,6 +110,28 @@ enum Commands {
     },
     /// Print version and build information
     Version,
+    /// Print diagnostics about the tool, config, and environment (closes #1004)
+    Doctor {
+        /// Directory to discover soroban-guard.toml from (defaults to current directory)
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare two soroban-guard --json reports and show new/fixed/unchanged findings (closes #1003)
+    Compare {
+        /// Path to the older JSON report
+        old: PathBuf,
+        /// Path to the newer JSON report
+        new: PathBuf,
+        /// Output format: pretty (default), json, or markdown
+        #[arg(long, default_value = "pretty")]
+        format: String,
+        /// Exit 1 when new findings at or above this severity are found (high|medium|low)
+        #[arg(long)]
+        fail_on_new: Option<String>,
+    },
 }
 
 /// Parameters passed to the core scan-and-print routine.
@@ -119,6 +147,9 @@ struct ScanOptions {
     exclude: Vec<String>,
     includes: Vec<String>,
     max_findings: usize,
+    /// When Some, findings matching the baseline are hidden; fail_on_new gates exit code.
+    baseline_path: Option<PathBuf>,
+    fail_on_new: bool,
 }
 
 /// Whether scan results should be printed. `--quiet` suppresses output only while the
@@ -137,8 +168,57 @@ fn run_scan(
 ) -> i32 {
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
         Ok((results, files_scanned, files_skipped, _check_panics)) => {
-            let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
-            let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
+            let all_findings: Vec<Finding> =
+                results.into_iter().flat_map(|r| r.findings).collect();
+
+            // Apply baseline filter when --baseline is provided (closes #1006).
+            let (findings, baseline_hidden) = if let Some(ref bp) = opts.baseline_path {
+                match load_baseline_from_json(bp) {
+                    Ok(bl) => {
+                        let baseline_findings: Vec<baseline::Finding> = all_findings
+                            .iter()
+                            .map(|f| baseline::Finding {
+                                check: f.check_name.clone(),
+                                file: f.file_path.clone(),
+                                function: f.function_name.clone(),
+                                description: f.description.clone(),
+                            })
+                            .collect();
+                        let result = baseline::filter_findings(&baseline_findings, &bl);
+                        let new_findings: Vec<Finding> = result
+                            .new_findings
+                            .iter()
+                            .map(|f| {
+                                all_findings
+                                    .iter()
+                                    .find(|af| {
+                                        af.check_name == f.check
+                                            && af.file_path == f.file
+                                            && af.function_name == f.function
+                                    })
+                                    .cloned()
+                                    .unwrap_or_else(|| all_findings[0].clone())
+                            })
+                            .collect();
+                        let hidden = result.hidden_count;
+                        (new_findings, hidden)
+                    }
+                    Err(e) => {
+                        eprintln!("{} reading baseline: {}", "error:".red().bold(), e);
+                        return 2;
+                    }
+                }
+            } else {
+                (all_findings, 0)
+            };
+
+            let should_fail = if opts.fail_on_new && opts.baseline_path.is_some() {
+                // Gate only on new findings when --fail-on-new is set.
+                findings.iter().any(|f| f.severity <= opts.fail_threshold)
+            } else {
+                (findings.iter().chain(std::iter::empty())).any(|f| f.severity <= opts.fail_threshold)
+            };
+            let _ = baseline_hidden; // used for verbose note below if desired
 
             // Produce the serialized payload for the selected structured format,
             // then emit it via a single shared write-or-print path (Issue #430).
@@ -313,6 +393,8 @@ fn main() {
             watch,
             no_clear,
             max_findings,
+            baseline,
+            fail_on_new,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
@@ -425,6 +507,8 @@ fn main() {
                 exclude: exclude.clone(),
                 includes: include.clone(),
                 max_findings,
+                baseline_path: baseline,
+                fail_on_new,
             };
 
             // Run the initial scan.
@@ -632,6 +716,20 @@ fn main() {
                 std::env::consts::ARCH,
                 std::env::consts::OS
             );
+        }
+        Commands::Doctor { path, json } => {
+            run_doctor(&path, json);
+        }
+        Commands::Compare {
+            old,
+            new,
+            format,
+            fail_on_new,
+        } => {
+            let exit = run_compare(&old, &new, &format, fail_on_new.as_deref());
+            if exit != 0 {
+                std::process::exit(exit);
+            }
         }
     }
 }
@@ -1230,6 +1328,261 @@ fn print_pretty(
 
     println!("  {}", summary_text(findings, files_scanned));
     println!();
+}
+
+/// Load a [`baseline::Baseline`] from a soroban-guard `--json` output file.
+fn load_baseline_from_json(path: &Path) -> Result<baseline::Baseline, String> {
+    let src = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&src).map_err(|e| e.to_string())?;
+    let mut bl = baseline::Baseline::new();
+    let findings = v["findings"]
+        .as_array()
+        .ok_or("missing 'findings' array in baseline JSON")?;
+    let baseline_findings: Vec<baseline::Finding> = findings
+        .iter()
+        .filter_map(|f| {
+            Some(baseline::Finding {
+                check: f["check_name"].as_str()?.to_string(),
+                file: f["file_path"].as_str()?.to_string(),
+                function: f["function_name"].as_str()?.to_string(),
+                description: f["description"].as_str()?.to_string(),
+            })
+        })
+        .collect();
+    for fp in baseline::fingerprint_findings(&baseline_findings) {
+        bl.insert(fp);
+    }
+    Ok(bl)
+}
+
+/// `soroban-guard doctor` — print diagnostics about version, config, and enabled checks.
+/// Closes #1004.
+fn run_doctor(path: &Path, as_json: bool) {
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+
+    let (cfg_path, effective_cfg) = match config::load(path) {
+        Ok((c, p)) => (p, c.unwrap_or_default()),
+        Err(_) => (None, Default::default()),
+    };
+
+    let checks = soroban_guard_checks::default_checks();
+    let disabled = &effective_cfg.checks.disabled;
+    let active: Vec<&str> = checks
+        .iter()
+        .filter(|c| !disabled.contains(&c.name().to_string()))
+        .map(|c| c.name())
+        .collect();
+    let disabled_names: Vec<&str> = disabled.iter().map(String::as_str).collect();
+
+    if as_json {
+        let doc = serde_json::json!({
+            "version": version,
+            "arch": arch,
+            "os": os,
+            "config_file": cfg_path.as_ref().map(|p: &PathBuf| p.display().to_string()),
+            "scan": {
+                "path": effective_cfg.scan.path,
+                "min_severity": effective_cfg.scan.min_severity
+            },
+            "checks": {
+                "active": active,
+                "disabled": disabled_names
+            },
+            "env": {
+                "NO_COLOR": std::env::var("NO_COLOR").ok(),
+                "RUST_LOG": std::env::var("RUST_LOG").ok()
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    } else {
+        println!("soroban-guard {version}");
+        println!("arch:   {arch}-{os}");
+        println!(
+            "config: {}",
+            cfg_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none found)".to_string())
+        );
+        println!(
+            "scan.path:         {}",
+            effective_cfg.scan.path.as_deref().unwrap_or("(not set)")
+        );
+        println!(
+            "scan.min_severity: {}",
+            effective_cfg.scan.min_severity.as_deref().unwrap_or("high")
+        );
+        println!("active checks ({}):", active.len());
+        for name in &active {
+            println!("  {name}");
+        }
+        if !disabled_names.is_empty() {
+            println!("disabled checks ({}):", disabled_names.len());
+            for name in &disabled_names {
+                println!("  {name}");
+            }
+        }
+    }
+}
+
+/// `soroban-guard compare <OLD.json> <NEW.json>` — diff two JSON reports.
+/// Closes #1003.
+fn run_compare(old_path: &Path, new_path: &Path, format: &str, fail_on_new: Option<&str>) -> i32 {
+    let load = |p: &Path| -> Result<Vec<serde_json::Value>, String> {
+        let src = fs::read_to_string(p).map_err(|e| e.to_string())?;
+        let v: serde_json::Value = serde_json::from_str(&src).map_err(|e| e.to_string())?;
+        let schema = v["schema_version"].as_u64().unwrap_or(0);
+        if schema != 1 {
+            return Err(format!(
+                "{}: unsupported schema_version {} (expected 1)",
+                p.display(),
+                schema
+            ));
+        }
+        Ok(v["findings"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    };
+
+    let (old_findings, new_findings) = match (load(old_path), load(new_path)) {
+        (Ok(o), Ok(n)) => (o, n),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("{} {}", "error:".red().bold(), e);
+            return 2;
+        }
+    };
+
+    // Fingerprint by (check_name, file_path, function_name) for matching.
+    let fingerprint = |f: &serde_json::Value| {
+        format!(
+            "{}:{}:{}",
+            f["check_name"].as_str().unwrap_or(""),
+            f["file_path"].as_str().unwrap_or(""),
+            f["function_name"].as_str().unwrap_or("")
+        )
+    };
+
+    let old_set: std::collections::HashSet<String> =
+        old_findings.iter().map(fingerprint).collect();
+    let new_set: std::collections::HashSet<String> =
+        new_findings.iter().map(fingerprint).collect();
+
+    let added: Vec<&serde_json::Value> = new_findings
+        .iter()
+        .filter(|f| !old_set.contains(&fingerprint(f)))
+        .collect();
+    let fixed: Vec<&serde_json::Value> = old_findings
+        .iter()
+        .filter(|f| !new_set.contains(&fingerprint(f)))
+        .collect();
+    let unchanged_count = new_findings
+        .iter()
+        .filter(|f| old_set.contains(&fingerprint(f)))
+        .count();
+
+    match format {
+        "json" => {
+            let out = serde_json::json!({
+                "new": added,
+                "fixed": fixed,
+                "unchanged_count": unchanged_count
+            });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        }
+        "markdown" => {
+            println!("## Soroban Guard Diff");
+            println!();
+            println!("**{} new**, **{} fixed**, {} unchanged", added.len(), fixed.len(), unchanged_count);
+            if !added.is_empty() {
+                println!();
+                println!("### New findings");
+                for f in &added {
+                    println!(
+                        "- `{}` {}:{} — {}",
+                        f["check_name"].as_str().unwrap_or(""),
+                        f["file_path"].as_str().unwrap_or(""),
+                        f["line"].as_u64().unwrap_or(0),
+                        f["description"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            if !fixed.is_empty() {
+                println!();
+                println!("### Fixed findings");
+                for f in &fixed {
+                    println!(
+                        "- `{}` {}:{} — {}",
+                        f["check_name"].as_str().unwrap_or(""),
+                        f["file_path"].as_str().unwrap_or(""),
+                        f["line"].as_u64().unwrap_or(0),
+                        f["description"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        _ => {
+            println!(
+                "{} new finding(s), {} fixed, {} unchanged",
+                added.len(),
+                fixed.len(),
+                unchanged_count
+            );
+            for f in &added {
+                println!(
+                    "  {} [{}] {}:{} {}",
+                    "NEW".green(),
+                    f["severity"].as_str().unwrap_or("").to_uppercase(),
+                    f["file_path"].as_str().unwrap_or(""),
+                    f["line"].as_u64().unwrap_or(0),
+                    f["check_name"].as_str().unwrap_or("")
+                );
+            }
+            for f in &fixed {
+                println!(
+                    "  {} [{}] {}:{} {}",
+                    "FIXED".dimmed(),
+                    f["severity"].as_str().unwrap_or("").to_uppercase(),
+                    f["file_path"].as_str().unwrap_or(""),
+                    f["line"].as_u64().unwrap_or(0),
+                    f["check_name"].as_str().unwrap_or("")
+                );
+            }
+        }
+    }
+
+    // Apply --fail-on-new threshold if requested.
+    if let Some(threshold) = fail_on_new {
+        let threshold_sev = match threshold.to_lowercase().as_str() {
+            "high" => Severity::High,
+            "medium" => Severity::Medium,
+            "low" => Severity::Low,
+            other => {
+                eprintln!(
+                    "{} unknown --fail-on-new value `{}`",
+                    "error:".red().bold(),
+                    other
+                );
+                return 2;
+            }
+        };
+        let has_new_at_threshold = added.iter().any(|f| {
+            let sev_str = f["severity"].as_str().unwrap_or("low").to_lowercase();
+            let sev = match sev_str.as_str() {
+                "high" => Severity::High,
+                "medium" => Severity::Medium,
+                _ => Severity::Low,
+            };
+            sev <= threshold_sev
+        });
+        if has_new_at_threshold {
+            return 1;
+        }
+    }
+
+    0
 }
 
 #[cfg(test)]

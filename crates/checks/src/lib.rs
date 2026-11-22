@@ -36,6 +36,7 @@ pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
 pub mod util;
 
+pub use util::ImportMap;
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
 pub use auth::MissingRequireAuthCheck;

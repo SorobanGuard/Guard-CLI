@@ -455,3 +455,158 @@ fn collect_contractimpl_fns_with_type<'a>(
         }
     }
 }
+
+use std::collections::HashMap;
+
+/// Centralised `use`-alias resolution for Soroban SDK imports (closes #981).
+///
+/// Builds a map from the *local* identifier (what appears in code) to the
+/// *canonical* Soroban SDK item name, handling:
+///
+/// - `use soroban_sdk::Env` → `"Env" → "Env"`
+/// - `use soroban_sdk::Env as E` → `"E" → "Env"`
+/// - `use soroban_sdk::{Env, Address as Addr}` → both resolved
+/// - `use soroban_sdk::*` → all known SDK items added under their canonical name
+/// - Nested group trees
+///
+/// Unknown paths are not added, so a query that returns `None` means no alias
+/// was found in this file.
+pub struct ImportMap {
+    /// local name → canonical SDK item name
+    map: HashMap<String, String>,
+}
+
+impl ImportMap {
+    const KNOWN_SDK_ITEMS: &'static [&'static str] = &[
+        "Env", "Address", "Symbol", "Bytes", "BytesN", "String", "Map", "Vec",
+        "TokenClient", "token",
+    ];
+
+    /// Build an `ImportMap` from a parsed file.
+    pub fn from_file(file: &syn::File) -> Self {
+        let mut map = HashMap::new();
+        for item in &file.items {
+            if let syn::Item::Use(u) = item {
+                Self::collect_use_tree(&u.tree, &[], &mut map);
+            }
+        }
+        ImportMap { map }
+    }
+
+    fn collect_use_tree(
+        tree: &syn::UseTree,
+        prefix: &[String],
+        map: &mut HashMap<String, String>,
+    ) {
+        match tree {
+            syn::UseTree::Path(p) => {
+                let mut new_prefix = prefix.to_vec();
+                new_prefix.push(p.ident.to_string());
+                Self::collect_use_tree(&p.tree, &new_prefix, map);
+            }
+            syn::UseTree::Name(n) => {
+                let local = n.ident.to_string();
+                let canonical = Self::canonical_from_prefix_and_local(prefix, &local);
+                if let Some(c) = canonical {
+                    map.insert(local, c);
+                }
+            }
+            syn::UseTree::Rename(r) => {
+                let original = r.ident.to_string();
+                let alias = r.rename.to_string();
+                let canonical = Self::canonical_from_prefix_and_local(prefix, &original);
+                if let Some(c) = canonical {
+                    map.insert(alias, c);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                // `use soroban_sdk::*` — add all known items if path ends with soroban_sdk.
+                if prefix.last().map(|s| s == "soroban_sdk").unwrap_or(false) {
+                    for item in Self::KNOWN_SDK_ITEMS {
+                        map.insert(item.to_string(), item.to_string());
+                    }
+                }
+            }
+            syn::UseTree::Group(g) => {
+                for tree in &g.items {
+                    Self::collect_use_tree(tree, prefix, map);
+                }
+            }
+        }
+    }
+
+    fn canonical_from_prefix_and_local(prefix: &[String], local: &str) -> Option<String> {
+        // Only resolve items from soroban_sdk.
+        if prefix.iter().any(|p| p == "soroban_sdk") {
+            if Self::KNOWN_SDK_ITEMS.contains(&local) {
+                return Some(local.to_string());
+            }
+        }
+        None
+    }
+
+    /// Return the canonical Soroban SDK name for a local identifier, if known.
+    ///
+    /// Returns `None` when the identifier wasn't imported from `soroban_sdk`.
+    pub fn canonical_name<'a>(&'a self, local: &str) -> Option<&'a str> {
+        self.map.get(local).map(String::as_str)
+    }
+
+    /// Returns `true` if `local` resolves to the given `canonical` SDK item.
+    pub fn is_soroban_item(&self, local: &str, canonical: &str) -> bool {
+        self.map.get(local).map(|c| c == canonical).unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod import_map_tests {
+    use super::*;
+    use syn::parse_file;
+
+    fn map(src: &str) -> ImportMap {
+        let file = parse_file(src).expect("parse");
+        ImportMap::from_file(&file)
+    }
+
+    #[test]
+    fn resolves_direct_import() {
+        let m = map("use soroban_sdk::Env;");
+        assert_eq!(m.canonical_name("Env"), Some("Env"));
+        assert!(m.is_soroban_item("Env", "Env"));
+    }
+
+    #[test]
+    fn resolves_rename() {
+        let m = map("use soroban_sdk::Env as E;");
+        assert_eq!(m.canonical_name("E"), Some("Env"));
+        assert!(m.is_soroban_item("E", "Env"));
+        assert_eq!(m.canonical_name("Env"), None, "original name not in scope");
+    }
+
+    #[test]
+    fn resolves_group_import() {
+        let m = map("use soroban_sdk::{Env, Address as Addr};");
+        assert_eq!(m.canonical_name("Env"), Some("Env"));
+        assert_eq!(m.canonical_name("Addr"), Some("Address"));
+        assert_eq!(m.canonical_name("Address"), None, "Address aliased to Addr only");
+    }
+
+    #[test]
+    fn resolves_glob_import() {
+        let m = map("use soroban_sdk::*;");
+        assert_eq!(m.canonical_name("Env"), Some("Env"));
+        assert_eq!(m.canonical_name("Address"), Some("Address"));
+    }
+
+    #[test]
+    fn non_soroban_import_not_resolved() {
+        let m = map("use std::collections::HashMap;");
+        assert_eq!(m.canonical_name("HashMap"), None);
+    }
+
+    #[test]
+    fn unknown_identifier_returns_none() {
+        let m = map("use soroban_sdk::Env;");
+        assert_eq!(m.canonical_name("Token"), None);
+    }
+}
