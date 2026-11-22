@@ -28,7 +28,7 @@ enum Commands {
     /// Scan a directory tree for vulnerability patterns
     #[command(group(
         ArgGroup::new("output_format")
-            .args(["json", "sarif", "markdown"])
+            .args(["json", "sarif", "markdown", "checkstyle", "sonarqube"])
             .multiple(false)
     ))]
     Scan {
@@ -43,7 +43,13 @@ enum Commands {
         /// Print findings as a Markdown table
         #[arg(long)]
         markdown: bool,
-        /// Write output to a file instead of stdout (applies to --json, --sarif, and --markdown)
+        /// Print findings as Checkstyle XML (compatible with Jenkins Warnings NG, IDEs, Bamboo)
+        #[arg(long)]
+        checkstyle: bool,
+        /// Print findings as SonarQube Generic Issue Data JSON
+        #[arg(long)]
+        sonarqube: bool,
+        /// Write output to a file instead of stdout (applies to --json, --sarif, --markdown, --checkstyle, and --sonarqube)
         #[arg(long, requires = "output_format")]
         output: Option<PathBuf>,
         /// Suppress all output unless a finding meets the --fail-on threshold
@@ -104,6 +110,8 @@ enum Commands {
     },
     /// Print version and build information
     Version,
+    /// Run as a Language Server Protocol server over stdio (closes #998)
+    Lsp,
 }
 
 /// Parameters passed to the core scan-and-print routine.
@@ -112,6 +120,8 @@ struct ScanOptions {
     json: bool,
     sarif: bool,
     markdown: bool,
+    checkstyle: bool,
+    sonarqube: bool,
     output: Option<PathBuf>,
     quiet: bool,
     verbose: bool,
@@ -155,6 +165,13 @@ fn run_scan(
                 )
             } else if opts.markdown {
                 Some(Ok(render_markdown(&findings)))
+            } else if opts.checkstyle {
+                Some(Ok(render_checkstyle(&findings)))
+            } else if opts.sonarqube {
+                Some(
+                    sonarqube_payload(&findings)
+                        .map_err(|e| e.to_string()),
+                )
             } else {
                 None
             };
@@ -302,6 +319,8 @@ fn main() {
             json,
             sarif,
             markdown,
+            checkstyle,
+            sonarqube,
             output,
             quiet,
             no_color,
@@ -418,6 +437,8 @@ fn main() {
                 json,
                 sarif,
                 markdown,
+                checkstyle,
+                sonarqube,
                 output: output.clone(),
                 quiet,
                 verbose,
@@ -632,6 +653,9 @@ fn main() {
                 std::env::consts::ARCH,
                 std::env::consts::OS
             );
+        }
+        Commands::Lsp => {
+            lsp::run();
         }
     }
 }
@@ -1143,6 +1167,276 @@ fn escape_md_cell(s: &str) -> String {
 fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
     let (high, medium, low) = severity_counts(findings);
     format!("{high} High, {medium} Medium, {low} Low — across {files_scanned} file(s)")
+}
+
+/// Emit Checkstyle XML compatible with Jenkins Warnings NG, IDE checkers, Bamboo, and TeamCity.
+/// Paths and messages are XML-escaped; non-UTF-8 path bytes are lossily converted.
+fn render_checkstyle(findings: &[Finding]) -> String {
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    }
+
+    // Group findings by file path so each <file> element is emitted once.
+    let mut by_file: std::collections::BTreeMap<&str, Vec<&Finding>> =
+        std::collections::BTreeMap::new();
+    for f in findings {
+        by_file.entry(f.file_path.as_str()).or_default().push(f);
+    }
+
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str(&format!(
+        "<checkstyle version=\"{}\">\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+
+    for (file_path, file_findings) in &by_file {
+        out.push_str(&format!("  <file name=\"{}\">\n", xml_escape(file_path)));
+        for f in file_findings {
+            let sev = match f.severity {
+                Severity::High => "error",
+                Severity::Medium => "warning",
+                Severity::Low => "info",
+            };
+            let msg = if let Some(ref s) = f.suggestion {
+                format!("{} — {}", f.description, s)
+            } else {
+                f.description.clone()
+            };
+            out.push_str(&format!(
+                "    <error line=\"{}\" severity=\"{}\" message=\"{}\" source=\"soroban-guard.{}\"/>\n",
+                f.line,
+                sev,
+                xml_escape(&msg),
+                xml_escape(&f.check_name)
+            ));
+        }
+        out.push_str("  </file>\n");
+    }
+
+    out.push_str("</checkstyle>\n");
+    out
+}
+
+/// Emit SonarQube Generic Issue Data JSON (10.x format with `rules` + `issues`).
+fn sonarqube_payload(findings: &[Finding]) -> Result<String, serde_json::Error> {
+    // Collect unique rules first.
+    let mut seen_rules: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for f in findings {
+        seen_rules.insert(f.check_name.as_str());
+    }
+
+    let rules: Vec<serde_json::Value> = seen_rules
+        .iter()
+        .map(|name| {
+            let (_, desc) = describe_check(name);
+            serde_json::json!({
+                "id": format!("soroban-guard:{}", name),
+                "name": name,
+                "description": desc,
+                "engineId": "soroban-guard",
+                "cleanCodeAttribute": "LOGICAL",
+                "impacts": [
+                    {
+                        "softwareQuality": "SECURITY",
+                        "severity": "HIGH"
+                    }
+                ]
+            })
+        })
+        .collect();
+
+    let issues: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            let sonar_sev = match f.severity {
+                Severity::High => "CRITICAL",
+                Severity::Medium => "MAJOR",
+                Severity::Low => "MINOR",
+            };
+            let effort = match f.severity {
+                Severity::High => 30,
+                Severity::Medium => 15,
+                Severity::Low => 5,
+            };
+            serde_json::json!({
+                "ruleId": format!("soroban-guard:{}", f.check_name),
+                "primaryLocation": {
+                    "message": f.description,
+                    "filePath": f.file_path,
+                    "textRange": {
+                        "startLine": f.line
+                    }
+                },
+                "severity": sonar_sev,
+                "type": "VULNERABILITY",
+                "effortMinutes": effort
+            })
+        })
+        .collect();
+
+    let envelope = serde_json::json!({
+        "rules": rules,
+        "issues": issues
+    });
+    serde_json::to_string_pretty(&envelope)
+}
+
+/// Minimal LSP server over stdio (closes #998).
+/// Speaks the Language Server Protocol 3.17 initialize/textDocument/didOpen/didSave
+/// handshake and publishes diagnostics by scanning the opened file.
+mod lsp {
+    use soroban_guard_checks::{default_checks, Finding, Severity};
+    use std::io::{self, BufRead, Read, Write};
+
+    pub fn run() {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+
+        for line in stdin.lock().lines() {
+            let header = match line {
+                Ok(h) => h,
+                Err(_) => break,
+            };
+            if header.is_empty() {
+                continue;
+            }
+            // Parse Content-Length header.
+            let content_length: usize = if let Some(rest) = header
+                .strip_prefix("Content-Length: ")
+            {
+                rest.trim().parse().unwrap_or(0)
+            } else {
+                // Skip non-Content-Length headers and their blank separator.
+                continue;
+            };
+            // Consume the blank line after the header block.
+            let mut blank = String::new();
+            let _ = stdin.lock().read_line(&mut blank);
+            // Read the JSON body.
+            let mut body = vec![0u8; content_length];
+            if stdin.lock().read_exact(&mut body).is_err() {
+                break;
+            }
+            let msg: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(response) = handle_message(&msg) {
+                let text = serde_json::to_string(&response).unwrap_or_default();
+                let _ = write!(
+                    out,
+                    "Content-Length: {}\r\n\r\n{}",
+                    text.len(),
+                    text
+                );
+                let _ = out.flush();
+            }
+        }
+    }
+
+    fn handle_message(msg: &serde_json::Value) -> Option<serde_json::Value> {
+        let method = msg.get("method")?.as_str()?;
+        match method {
+            "initialize" => {
+                let id = msg.get("id")?.clone();
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "capabilities": {
+                            "textDocumentSync": 1,
+                            "codeActionProvider": true
+                        },
+                        "serverInfo": {
+                            "name": "soroban-guard",
+                            "version": env!("CARGO_PKG_VERSION")
+                        }
+                    }
+                }))
+            }
+            "initialized" => None,
+            "textDocument/didOpen" => {
+                let uri = msg["params"]["textDocument"]["uri"].as_str()?.to_string();
+                let text = msg["params"]["textDocument"]["text"].as_str()?.to_string();
+                Some(diagnostics_notification(&uri, &text))
+            }
+            "textDocument/didSave" => {
+                let uri = msg["params"]["textDocument"]["uri"].as_str()?.to_string();
+                let text = msg["params"]["text"].as_str().unwrap_or("").to_string();
+                Some(diagnostics_notification(&uri, &text))
+            }
+            "textDocument/didChange" => {
+                let uri = msg["params"]["textDocument"]["uri"].as_str()?.to_string();
+                let text = msg["params"]["contentChanges"]
+                    .as_array()?
+                    .last()?["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                Some(diagnostics_notification(&uri, &text))
+            }
+            "shutdown" => {
+                let id = msg.get("id")?.clone();
+                Some(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": null
+                }))
+            }
+            "exit" => std::process::exit(0),
+            _ => None,
+        }
+    }
+
+    fn diagnostics_notification(uri: &str, source: &str) -> serde_json::Value {
+        let findings = scan_source(source);
+        let diagnostics: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|f| {
+                let lsp_sev: u8 = match f.severity {
+                    Severity::High => 1,
+                    Severity::Medium => 2,
+                    Severity::Low => 3,
+                };
+                let line = f.line.saturating_sub(1) as u64;
+                serde_json::json!({
+                    "range": {
+                        "start": { "line": line, "character": 0 },
+                        "end":   { "line": line, "character": 0 }
+                    },
+                    "severity": lsp_sev,
+                    "code": f.check_name,
+                    "codeDescription": f.rule_url.as_ref().map(|u| serde_json::json!({ "href": u })),
+                    "source": "soroban-guard",
+                    "message": f.description
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": uri,
+                "diagnostics": diagnostics
+            }
+        })
+    }
+
+    fn scan_source(source: &str) -> Vec<Finding> {
+        let checks = default_checks();
+        match syn::parse_file(source) {
+            Ok(ast) => checks
+                .iter()
+                .flat_map(|c| c.run(&ast, source))
+                .collect(),
+            Err(_) => vec![],
+        }
+    }
 }
 
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
@@ -1826,5 +2120,103 @@ mod tests {
             stderr.contains("unknown --fail-on value"),
             "stderr should contain 'unknown --fail-on value', got: {stderr}"
         );
+    }
+
+    #[test]
+    fn checkstyle_output_is_valid_xml_and_contains_expected_fields() {
+        use quick_xml::Reader;
+        let findings = vec![
+            Finding {
+                check_name: "missing-require-auth".to_string(),
+                severity: Severity::High,
+                file_path: "src/lib.rs".to_string(),
+                line: 10,
+                function_name: "transfer".to_string(),
+                description: "Missing require_auth".to_string(),
+                rule_url: None,
+                suggestion: None,
+            },
+            Finding {
+                check_name: "unchecked-arithmetic".to_string(),
+                severity: Severity::Medium,
+                file_path: "src/lib.rs".to_string(),
+                line: 20,
+                function_name: "calc".to_string(),
+                description: "Unchecked arithmetic".to_string(),
+                rule_url: None,
+                suggestion: None,
+            },
+        ];
+
+        let xml = render_checkstyle(&findings);
+
+        // Must parse as well-formed XML.
+        let mut reader = Reader::from_str(&xml);
+        reader.config_mut().check_end_names = true;
+        let mut buf = Vec::new();
+        loop {
+            use quick_xml::events::Event;
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Eof) => break,
+                Err(e) => panic!("Checkstyle output is not valid XML: {e}"),
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        // Structural checks.
+        assert!(xml.contains("<checkstyle"), "should contain <checkstyle>");
+        assert!(xml.contains("</checkstyle>"), "should close </checkstyle>");
+        assert!(xml.contains("src/lib.rs"), "should contain the file path");
+        assert!(xml.contains("severity=\"error\""), "High → error");
+        assert!(xml.contains("severity=\"warning\""), "Medium → warning");
+        assert!(
+            xml.contains("source=\"soroban-guard.missing-require-auth\""),
+            "source attribute should contain the check name"
+        );
+    }
+
+    #[test]
+    fn checkstyle_escapes_special_xml_characters() {
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/a&b.rs".to_string(),
+            line: 1,
+            function_name: "f".to_string(),
+            description: "Use <env>.require_auth() — \"always\"".to_string(),
+            rule_url: None,
+            suggestion: None,
+        }];
+        let xml = render_checkstyle(&findings);
+        assert!(xml.contains("a&amp;b.rs"), "& in path must be escaped");
+        assert!(xml.contains("&lt;env&gt;"), "< > must be escaped in message");
+        assert!(xml.contains("&quot;always&quot;"), "quotes must be escaped");
+    }
+
+    #[test]
+    fn sonarqube_payload_has_expected_shape() {
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/lib.rs".to_string(),
+            line: 5,
+            function_name: "mint".to_string(),
+            description: "Missing auth check".to_string(),
+            rule_url: None,
+            suggestion: None,
+        }];
+        let json_str = sonarqube_payload(&findings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(v["rules"].is_array(), "must have rules array");
+        assert!(v["issues"].is_array(), "must have issues array");
+        assert_eq!(
+            v["issues"][0]["ruleId"],
+            "soroban-guard:missing-require-auth"
+        );
+        assert_eq!(v["issues"][0]["severity"], "CRITICAL");
+        assert_eq!(v["issues"][0]["type"], "VULNERABILITY");
+        assert_eq!(v["issues"][0]["primaryLocation"]["textRange"]["startLine"], 5);
     }
 }

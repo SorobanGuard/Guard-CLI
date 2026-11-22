@@ -1,0 +1,66 @@
+{
+  "name": "soroban-guard",
+  "displayName": "Soroban Guard",
+  "description": "Static security analysis for Soroban smart contracts. Shows inline diagnostics via soroban-guard lsp (or scan --json fallback).",
+  "version": "0.1.0",
+  "publisher": "SorobanGuard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SorobanGuard/Guard-CLI"
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": ["Linters"],
+  "keywords": ["soroban", "stellar", "rust", "security", "smart-contract"],
+  "activationEvents": [
+    "workspaceContains:**/soroban-guard.toml",
+    "onLanguage:rust"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Soroban Guard",
+      "properties": {
+        "sorobanGuard.path": {
+          "type": "string",
+          "default": "soroban-guard",
+          "description": "Path to the soroban-guard binary. Defaults to the binary on PATH."
+        },
+        "sorobanGuard.failOn": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "default": "high",
+          "description": "Minimum severity level that the LSP/scan treats as an error."
+        },
+        "sorobanGuard.disabledChecks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Check names to disable (same as --disable-check)."
+        },
+        "sorobanGuard.useLsp": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use soroban-guard lsp for persistent diagnostics. Falls back to scan --json on save when false or when the binary does not support lsp."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.82.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
