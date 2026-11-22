@@ -172,6 +172,8 @@ struct Suppressions {
     /// Keyed on `(impl_type, function_name, check_name)` so a suppression above one
     /// `#[contractimpl]` method doesn't also silence a same-named method on a different type.
     function_checks: HashSet<(String, String, String)>,
+    /// Maps `(target_line_or_fn_start, check_name)` to `(annotation_line, reason)`.
+    annotation_meta: std::collections::HashMap<(usize, String), (usize, Option<String>)>,
 }
 
 fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
@@ -196,22 +198,30 @@ fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
     Ok(false)
 }
 
-/// Parses `// soroban-guard: allow(a, b)`. Whitespace is optional after `//` and on
-/// either side of `:` (`//soroban-guard:allow(x)` and `//  soroban-guard : allow(x)` are
-/// accepted); `///` and `//!` doc comments are not suppressions.
-fn parse_allow_checks(line: &str) -> Option<Vec<String>> {
+/// Parses `// soroban-guard: allow(a, b) optional reason`. Whitespace is optional after
+/// `//` and on either side of `:` (`//soroban-guard:allow(x)` are accepted);
+/// `///` and `//!` doc comments are not suppressions.
+/// Returns `(checks, optional_reason)`.
+fn parse_allow_checks(line: &str) -> Option<(Vec<String>, Option<String>)> {
     let rest = line.trim_start().strip_prefix("//")?.trim_start();
     let rest = rest.strip_prefix("soroban-guard")?.trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
     let rest = rest.strip_prefix("allow(")?;
-    let (inside, _) = rest.split_once(')')?;
+    let (inside, after) = rest.split_once(')')?;
     let checks: Vec<String> = inside
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
         .collect();
-    (!checks.is_empty()).then_some(checks)
+    if checks.is_empty() {
+        return None;
+    }
+    let reason = {
+        let r = after.trim();
+        if r.is_empty() { None } else { Some(r.to_owned()) }
+    };
+    Some((checks, reason))
 }
 
 /// Index of the first line at or after `from` that carries actual code, skipping the
@@ -230,9 +240,10 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
     let mut suppressions = Suppressions::default();
 
     for (idx, line) in lines.iter().enumerate() {
-        let Some(checks) = parse_allow_checks(line) else {
+        let Some((checks, reason)) = parse_allow_checks(line) else {
             continue;
         };
+        let annotation_line = idx + 1;
         let Some(target_idx) = next_substantive_line(&lines, idx + 1) else {
             continue;
         };
@@ -245,12 +256,20 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
                 suppressions.function_checks.insert((
                     span.impl_type.clone(),
                     span.function_name.clone(),
-                    check,
+                    check.clone(),
                 ));
+                suppressions.annotation_meta.insert(
+                    (span.start_line, check),
+                    (annotation_line, reason.clone()),
+                );
             }
         } else {
             for check in checks {
-                suppressions.line_checks.insert((target_line_number, check));
+                suppressions.line_checks.insert((target_line_number, check.clone()));
+                suppressions.annotation_meta.insert(
+                    (target_line_number, check),
+                    (annotation_line, reason.clone()),
+                );
             }
         }
     }
@@ -306,20 +325,6 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
 /// The path relative to `root` shown in findings: the bare file name when `root`
 /// itself is a single file, otherwise the path stripped of the `root` prefix.
 /// Shared by every scan entry point so the copies of this logic can't drift (issue #630).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    }
-}
-
 /// Drop only findings that are identical in everything a reader would use to tell
 /// them apart. Keying on `(file, line, check_name)` alone collapsed distinct
 /// same-line findings from checks that legitimately report more than once per line
@@ -553,6 +558,36 @@ fn warn_skipping_unreadable(path: &Path, e: ScanError) {
     eprintln!("warning: {err}, skipping file");
 }
 
+/// Look up annotation metadata for a suppressed finding.
+fn annotation_for(
+    finding: &Finding,
+    suppressions: &Suppressions,
+    fn_spans: &[FnSpan],
+) -> (usize, Option<String>) {
+    // Try line-level key first.
+    if let Some(meta) = suppressions
+        .annotation_meta
+        .get(&(finding.line, finding.check_name.clone()))
+    {
+        return meta.clone();
+    }
+    // Try function-level key (keyed on function start line).
+    let fn_start = fn_spans
+        .iter()
+        .find(|s| {
+            (finding.function_name.is_empty() || s.function_name == finding.function_name)
+                && s.start_line <= finding.line
+                && finding.line <= s.end_line
+        })
+        .map(|s| s.start_line)
+        .unwrap_or(finding.line);
+    suppressions
+        .annotation_meta
+        .get(&(fn_start, finding.check_name.clone()))
+        .cloned()
+        .unwrap_or((0, None))
+}
+
 fn run_checks_for_file(
     path: &Path,
     root: &Path,
@@ -607,11 +642,85 @@ fn run_checks_for_file(
     Ok((findings, check_panics))
 }
 
+/// Like `run_checks_for_file` but also returns findings that were suppressed by
+/// `// soroban-guard: allow(...)` annotations.
+fn run_checks_for_file_with_suppressed(
+    path: &Path,
+    root: &Path,
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<Finding>, Vec<SuppressedFinding>, Vec<ScanError>), ScanError> {
+    let content = std::fs::read_to_string(path).map_err(|e| ScanError::IoRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let file_label = file_label(path, root);
+    let fn_spans = build_fn_spans(&syn_file);
+    let suppressions = parse_suppressions(&content, &fn_spans);
+
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut suppressed: Vec<SuppressedFinding> = Vec::new();
+    let mut check_panics: Vec<ScanError> = Vec::new();
+    for check in checks {
+        let check_name = check.name().to_string();
+        match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content))) {
+            Ok(mut hits) => {
+                for finding in &mut hits {
+                    finding.file_path.clone_from(&file_label);
+                }
+                for finding in hits {
+                    if is_suppressed(&finding, &suppressions, &fn_spans) {
+                        let (annotation_line, reason) =
+                            annotation_for(&finding, &suppressions, &fn_spans);
+                        suppressed.push(SuppressedFinding {
+                            finding,
+                            annotation_line,
+                            reason,
+                        });
+                    } else {
+                        findings.push(finding);
+                    }
+                }
+            }
+            Err(payload) => {
+                let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    msg.to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "panic payload was not a string".to_string()
+                };
+                check_panics.push(ScanError::CheckPanic {
+                    check: check_name,
+                    path: path.to_path_buf(),
+                    message,
+                });
+            }
+        }
+    }
+
+    findings.sort_by_key(|f| f.line);
+    suppress_redundant_division_finding(&mut findings);
+    dedup_findings(&mut findings);
+    Ok((findings, suppressed, check_panics))
+}
+
 /// Findings for a single source file.
 #[derive(Debug, Clone)]
 pub struct FileScanResult {
     pub file_path: String,
     pub findings: Vec<Finding>,
+}
+
+/// A finding that was silenced by a `// soroban-guard: allow(...)` annotation.
+#[derive(Debug, Clone, Serialize)]
+pub struct SuppressedFinding {
+    pub finding: Finding,
+    pub annotation_line: usize,
+    pub reason: Option<String>,
 }
 
 /// Recursively scan `.rs` files under `root` and aggregate findings from every default check.
@@ -702,23 +811,57 @@ pub fn scan_directory_with_checks(
     Ok((results, files_scanned, files_skipped, check_panics))
 }
 
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
+/// Like [`scan_directory_with_checks`] but also returns findings suppressed by
+/// `// soroban-guard: allow(...)` annotations alongside the active findings.
+///
+/// Returns `(results, suppressed, files_scanned, files_skipped, check_panics)`.
+pub fn scan_directory_with_checks_full(
+    root: &Path,
+    excludes: &[String],
+    includes: &[String],
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<FileScanResult>, Vec<SuppressedFinding>, usize, usize, Vec<ScanError>), ScanError>
+{
+    let root = canonicalize_root(root)?;
+    let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
+    let files_scanned = paths.len();
 
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
+    let per_file = paths
+        .par_iter()
+        .map(|path| {
+            let (findings, suppressed, check_panics) =
+                run_checks_for_file_with_suppressed(path, &root, checks)?;
+            let file_label = file_label(path, &root);
+            Ok((
+                FileScanResult {
+                    file_path: file_label,
+                    findings,
+                },
+                suppressed,
+                check_panics,
+            ))
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?;
+
+    let mut results: Vec<FileScanResult> =
+        per_file.iter().map(|(r, _, _)| r.clone()).collect();
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
+    let mut suppressed: Vec<SuppressedFinding> =
+        per_file.iter().flat_map(|(_, s, _)| s.clone()).collect();
+    suppressed.sort_by(|a, b| {
+        a.finding
+            .file_path
+            .cmp(&b.finding.file_path)
+            .then_with(|| a.finding.line.cmp(&b.finding.line))
+    });
+
+    let check_panics: Vec<ScanError> = per_file
+        .into_iter()
+        .flat_map(|(_, _, panics)| panics)
+        .collect();
+
+    Ok((results, suppressed, files_scanned, files_skipped, check_panics))
 }
 
 /// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
@@ -1561,7 +1704,7 @@ mod suppression_tests {
 
     #[test]
     fn suppression_comment_whitespace_variants_are_accepted() {
-        let expected = Some(vec!["missing-require-auth".to_string()]);
+        let expected_checks = vec!["missing-require-auth".to_string()];
         for line in [
             "// soroban-guard: allow(missing-require-auth)",
             "//soroban-guard: allow(missing-require-auth)",
@@ -1571,8 +1714,20 @@ mod suppression_tests {
             "//\tsoroban-guard:\tallow(missing-require-auth)",
             "    // soroban-guard: allow(missing-require-auth)",
         ] {
-            assert_eq!(parse_allow_checks(line), expected, "line: {line:?}");
+            let result = parse_allow_checks(line);
+            assert!(result.is_some(), "line: {line:?}");
+            let (checks, _reason) = result.unwrap();
+            assert_eq!(checks, expected_checks, "line: {line:?}");
         }
+    }
+
+    #[test]
+    fn suppression_comment_with_reason_is_parsed() {
+        let result = parse_allow_checks("// soroban-guard: allow(missing-require-auth) intentional");
+        assert!(result.is_some());
+        let (checks, reason) = result.unwrap();
+        assert_eq!(checks, vec!["missing-require-auth".to_string()]);
+        assert_eq!(reason, Some("intentional".to_string()));
     }
 
     #[test]
