@@ -78,6 +78,25 @@ The formula downloads the release tarball, verifies its checksum, and installs
 shell completions for Bash, Zsh, and Fish. The tap is bumped automatically on
 every release.
 
+### cargo-binstall (prebuilt binaries, no compile)
+
+If you have [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall)
+installed, you can skip compiling `syn` and friends entirely — `cargo binstall`
+fetches the prebuilt release binary for your platform:
+
+```bash
+cargo binstall soroban-guard-cli
+soroban-guard --version
+```
+
+This resolves the release asset for your target (`.tar.gz` on Linux/macOS,
+`.zip` on Windows) from the GitHub Releases page. To preview the resolved URL
+without downloading, run:
+
+```bash
+cargo binstall --dry-run soroban-guard-cli
+```
+
 ### Prebuilt binaries
 
 Prebuilt binaries for each release are published on the
@@ -203,12 +222,6 @@ cargo run -p soroban-guard-cli -- init
 
 | Code | Meaning |
 |------|---------|
-| `0` | No High severity findings — safe to proceed |
-| `1` | At least one High finding — **do not deploy** |
-| `2` | Scan error (I/O or parse failure) |
+| `0` | No High severity findings — safe to proce
 
-### Configuration file
-
-Drop a `soroban-guard.toml` in the scan root to set defaults without CLI flags — min severity, disabled checks, and extra sensitive-name patterns. See [docs/configuration.md](docs/configuratio
-
-/* … truncated 892 chars — edit only what you need near the top … */
+/* … truncated 393 chars — edit only what you need near the top … */
