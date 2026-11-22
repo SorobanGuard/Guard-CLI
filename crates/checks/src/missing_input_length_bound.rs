@@ -31,6 +31,7 @@ impl Check for MissingInputLengthBoundCheck {
                                 "Parameter `{}` (Bytes/Vec) lacks length validation",
                                 param_name
                             ),
+                            confidence: None,
                             rule_url: Some(
                                 "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-input-length-bound-medium"
                                     .to_string(),

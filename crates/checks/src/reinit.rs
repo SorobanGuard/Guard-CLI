@@ -38,6 +38,7 @@ impl Check for ReInitializationRiskCheck {
                      re-initialization. An attacker can call it again to overwrite the owner \
                      or reset critical contract state."
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#re-initialization-risk-high"
                         .to_string(),

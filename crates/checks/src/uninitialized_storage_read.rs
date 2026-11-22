@@ -247,6 +247,7 @@ impl Visit<'_> for StorageReadVisitor<'_> {
                              If the key has never been written the contract will panic on uninitialized storage.",
                             self.fn_name,
                         ),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#uninitialized-storage-read-high"
                                 .to_string(),

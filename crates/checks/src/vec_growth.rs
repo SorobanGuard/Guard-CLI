@@ -59,6 +59,7 @@ impl Check for UnboundedVecGrowthCheck {
                          it back without a length cap. The ledger entry will eventually exceed \
                          Soroban's size limit, bricking the contract."
                     ),
+                    confidence: None,
                     rule_url: Some(
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unbounded-vec-growth-medium"
                             .to_string(),

@@ -37,6 +37,7 @@ impl Check for ReentrancyRiskCheck {
                          before state is finalised. Perform all external calls before writing \
                          storage (checks-effects-interactions) or re-read state after the call."
                     ),
+                    confidence: None,
                     rule_url: Some(
                         "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#reentrancy-risk-high"
                             .to_string(),

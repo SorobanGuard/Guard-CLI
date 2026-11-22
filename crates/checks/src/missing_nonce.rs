@@ -32,7 +32,8 @@ impl Check for MissingNonceCheck {
                         description:
                             "State-mutating method with Address parameter lacks nonce/replay protection"
                                 .to_string(),
-                        rule_url: Some(
+                                confidence: None,
+                                rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-nonce-medium"
                                 .to_string(),
                         ),

@@ -60,6 +60,7 @@ impl Check for MissingBalanceCheck {
                              preceding `balance()` or `authorized()` check. An invalid transfer may \
                              cause a runtime panic that disrupts multi-step atomic operations."
                         ),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-balance-check-high"
                                 .to_string(),

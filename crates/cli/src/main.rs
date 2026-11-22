@@ -681,13 +681,34 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
     let rules: Vec<serde_json::Value> = rule_severity
         .iter()
         .map(|(name, &sev)| {
-            serde_json::json!({
+            let cwe_relationships: Vec<serde_json::Value> = check_meta(name)
+                .map(|m| {
+                    m.cwe
+                        .iter()
+                        .map(|id| {
+                            serde_json::json!({
+                                "target": {
+                                    "id": format!("CWE-{id}"),
+                                    "index": id,
+                                    "toolComponent": { "name": "CWE", "guid": "1489f7e0-9b6a-4e5f-9e37-9b7a3e5e4f1c" }
+                                },
+                                "kinds": ["superset"]
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut rule = serde_json::json!({
                 "id": name,
                 "shortDescription": { "text": describe_rule(name) },
                 "fullDescription": { "text": describe_rule(name) },
                 "defaultConfiguration": { "level": severity_to_sarif_level(sev) },
                 "helpUri": "https://github.com/SorobanGuard/Guard-CLI"
-            })
+            });
+            if !cwe_relationships.is_empty() {
+                rule["relationships"] = serde_json::Value::Array(cwe_relationships);
+            }
+            rule
         })
         .collect();
     let results = findings
@@ -752,6 +773,9 @@ struct CheckMeta {
     /// Long-form explanation for `explain` (`explain_details`); `None` falls back to a
     /// generic string.
     long: Option<&'static str>,
+    /// CWE weakness identifiers for this check (at least one per check).
+    /// Exposed in `--json` output and SARIF `taxa` relationships.
+    cwe: &'static [u32],
 }
 
 /// Single source of truth for check metadata read by `describe_check`, `describe_rule`,
@@ -764,6 +788,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Missing env.require_auth() before storage writes",
         rule: "Method writes to storage without env.require_auth()",
         long: Some("Reports contract methods that mutate storage without calling require_auth or require_auth_for_args."),
+        cwe: &[862],
     },
     CheckMeta {
         name: "unchecked-arithmetic",
@@ -771,6 +796,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags unchecked arithmetic on contract state (High / Medium / Low per operand)",
         rule: "Wrapping arithmetic operations may overflow",
         long: Some("Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs. Severity is computed per call site: High for financial-named operands (e.g. amount, balance, price), Low for index-named operands, Medium otherwise."),
+        cwe: &[190],
     },
     CheckMeta {
         name: "unprotected-admin",
@@ -778,6 +804,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags privileged entrypoints without auth",
         rule: "Sensitive admin entrypoints lack an authorization gate",
         long: Some("Reports public admin-like entrypoints such as set_owner, pause, migrate, or upgrade when they lack an auth gate."),
+        cwe: &[862],
     },
     CheckMeta {
         name: "unsafe-storage-patterns",
@@ -785,6 +812,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags temporary storage and dynamic Symbol keys",
         rule: "Temporary storage or dynamic Symbol keys are risky",
         long: Some("Reports temporary storage mutations and dynamic Symbol keys that may expire unexpectedly or collide."),
+        cwe: &[664],
     },
     CheckMeta {
         name: "missing-ttl-extension",
@@ -792,6 +820,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags persistent storage entries without TTL extension",
         rule: "Persistent entries may expire without TTL bump",
         long: Some("Reports persistent storage writes that do not extend TTL in the same function."),
+        cwe: &[664],
     },
     CheckMeta {
         name: "forbidden-std-imports",
@@ -799,6 +828,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags use of std in no_std Soroban contracts",
         rule: "Crate imports std which is forbidden in no_std contracts",
         long: Some("Reports std imports in Soroban contract files because deployable contracts must compile for no_std WASM."),
+        cwe: &[477],
     },
     CheckMeta {
         name: "hardcoded-address",
@@ -806,6 +836,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags hardcoded Stellar address literals",
         rule: "Contract contains a hardcoded Stellar address string",
         long: Some("Reports Stellar public-key-shaped string literals embedded directly in source."),
+        cwe: &[798],
     },
     CheckMeta {
         name: "unsafe-cross-contract-input",
@@ -813,6 +844,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags unvalidated return values from cross-contract calls",
         rule: "Cross-contract call return value used without validation",
         long: Some("Reports invoke_contract return values stored directly without local validation."),
+        cwe: &[20],
     },
     CheckMeta {
         name: "missing-contract-annotation",
@@ -820,6 +852,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags structs missing the #[contract] attribute",
         rule: "Struct missing #[contract] annotation",
         long: Some("Reports contractimpl blocks without a sibling struct annotated with #[contract]."),
+        cwe: &[710],
     },
     CheckMeta {
         name: "delegate-call-risk",
@@ -827,6 +860,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags delegate-call patterns that transfer execution control",
         rule: "Delegate-style call pattern can transfer control unexpectedly",
         long: Some("Reports storage-derived cross-contract callees that can redirect execution if storage is poisoned."),
+        cwe: &[610],
     },
     CheckMeta {
         name: "integer-division-truncation",
@@ -834,6 +868,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags integer division that silently truncates",
         rule: "Integer division silently truncates the remainder",
         long: Some("Reports integer division where truncation may silently change financial or accounting results."),
+        cwe: &[682],
     },
     CheckMeta {
         name: "missing-event-emission",
@@ -841,6 +876,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags state-mutating functions with no event emission",
         rule: "State-mutating function emits no events",
         long: Some("Reports state-mutating functions that do not publish events for off-chain indexers."),
+        cwe: &[778],
     },
     CheckMeta {
         name: "symbol-key-collision",
@@ -848,6 +884,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage keys that share the same Symbol value",
         rule: "Multiple storage keys share the same Symbol value",
         long: Some("Reports duplicate symbol_short! keys in the same impl block."),
+        cwe: &[134],
     },
     CheckMeta {
         name: "self-transfer",
@@ -855,6 +892,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token transfers where sender may equal receiver",
         rule: "Token transfer destination may equal the sender",
         long: Some("Reports transfer-like functions that do not guard against sender and recipient being equal."),
+        cwe: &[20],
     },
     CheckMeta {
         name: "missing-zero-address-check",
@@ -862,6 +900,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags Address parameters not checked for the zero address",
         rule: "Address argument not validated against the zero address",
         long: Some("Reports Address parameters stored or used without checking for default or zero-address values."),
+        cwe: &[20],
     },
     CheckMeta {
         name: "mutable-global-state",
@@ -869,6 +908,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags mutable global state in contract code",
         rule: "Mutable global state is unsafe and not persisted on-chain",
         long: Some("Reports static mut items, which are unsafe and not valid persistent contract state."),
+        cwe: &[362],
     },
     CheckMeta {
         name: "re-initialization-risk",
@@ -876,6 +916,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags initializer-like functions without re-init guards",
         rule: "Initializer-like function can overwrite critical state",
         long: Some("Reports initializer-like methods that write state without checking whether initialization already happened."),
+        cwe: &[665],
     },
     CheckMeta {
         name: "unchecked-invoke-return",
@@ -883,6 +924,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags discarded cross-contract call return values",
         rule: "Cross-contract invocation result is discarded",
         long: Some("Reports bare invoke_contract statements whose return values are discarded."),
+        cwe: &[252],
     },
     CheckMeta {
         name: "missing-balance-check",
@@ -890,6 +932,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token transfers without balance or authorization checks",
         rule: "Token transfer occurs without a balance or authorization check",
         long: Some("Reports token transfer calls that lack a preceding balance or authorization check."),
+        cwe: &[862],
     },
     CheckMeta {
         name: "unbounded-vec-growth",
@@ -897,6 +940,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage-backed Vec growth without a length cap",
         rule: "Storage-backed Vec can grow without a bound",
         long: Some("Reports storage-backed Vec values pushed and written back without an apparent length cap."),
+        cwe: &[770],
     },
     CheckMeta {
         name: "unsafe-randomness",
@@ -904,6 +948,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags ledger timestamp or sequence as randomness",
         rule: "Ledger data is used as a randomness source",
         long: Some("Reports ledger timestamp or sequence usage as a randomness source."),
+        cwe: &[338],
     },
     CheckMeta {
         name: "unchecked-divisor",
@@ -911,6 +956,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags division by runtime values without zero guards",
         rule: "Division uses a runtime divisor without a zero guard",
         long: Some("Reports division by runtime values without an apparent non-zero guard."),
+        cwe: &[369],
     },
     CheckMeta {
         name: "reentrancy-risk",
@@ -918,6 +964,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage writes followed by cross-contract calls",
         rule: "Storage write followed by cross-contract invocation risks reentrancy",
         long: Some("Reports contract methods that write to storage and then perform a cross-contract invocation, leaving state observable to a reentrant callee."),
+        cwe: &[841],
     },
     CheckMeta {
         name: "panic-in-contract",
@@ -925,6 +972,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags panic!, unwrap, and expect in contract methods",
         rule: "Contract uses panic!, unwrap, or expect which abort the WASM execution",
         long: Some("Reports panic!, unwrap(), expect(), and unreachable!() in contract methods, all of which trap and abort WASM execution."),
+        cwe: &[617],
     },
     CheckMeta {
         name: "unprotected-upgrade",
@@ -932,6 +980,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags upgrade entrypoints without authorization",
         rule: "Contract upgrade entrypoint lacks an authorization gate",
         long: Some("Reports contract upgrade entrypoints that swap the contract WASM without an authorization gate."),
+        cwe: &[862],
     },
     CheckMeta {
         name: "unprotected-token-mint",
@@ -939,6 +988,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token mint entrypoints without authorization",
         rule: "Token mint entrypoint lacks an authorization gate",
         long: Some("Reports token mint entrypoints that create new supply without an authorization gate."),
+        cwe: &[862],
     },
     CheckMeta {
         name: "unprotected-contract-deployment",
@@ -946,6 +996,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags contract deployment calls without authorization",
         rule: "Contract deployment call lacks an authorization gate",
         long: Some("Reports contract deployment calls that are reachable without an authorization gate."),
+        cwe: &[862],
     },
     CheckMeta {
         name: "unchecked-token-amount",
@@ -953,6 +1004,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token amounts used without validation",
         rule: "Token amount used without validation",
         long: Some("Reports token amount parameters passed to transfers or mints without a positivity or bounds check."),
+        cwe: &[20],
     },
     CheckMeta {
         name: "large-loop",
@@ -960,6 +1012,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags loops over unbounded collections",
         rule: "Loop may iterate over an unbounded collection",
         long: Some("Reports loops that iterate over collections whose length is not bounded by a constant or validated input."),
+        cwe: &[400],
     },
     CheckMeta {
         name: "missing-nonce",
@@ -967,6 +1020,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags functions susceptible to replay attacks",
         rule: "Function susceptible to replay attacks lacks a nonce check",
         long: Some("Reports replay-sensitive entrypoints that do not consume or verify a nonce."),
+        cwe: &[294],
     },
     CheckMeta {
         name: "uninitialized-storage-read",
@@ -974,6 +1028,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage reads without initialization checks",
         rule: "Storage value read without checking if it has been initialized",
         long: Some("Reports storage reads that are not guarded by a has() check or a default value."),
+        cwe: &[908],
     },
     CheckMeta {
         name: "missing-event-for-admin-change",
@@ -981,6 +1036,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags admin changes with no event emission",
         rule: "Admin-state change emits no event for off-chain indexers",
         long: Some("Reports functions that change admin or ownership state without publishing an event for off-chain indexers."),
+        cwe: &[778],
     },
     CheckMeta {
         name: "missing-input-length-bound",
@@ -988,6 +1044,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags input collections without length bound checks",
         rule: "Input collection used without a length bound check",
         long: Some("Reports input collection parameters used without checking their length against an upper bound."),
+        cwe: &[770],
     },
     CheckMeta {
         name: "auth-after-storage-write",
@@ -995,6 +1052,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags authorization checks after storage writes",
         rule: "Authorization check occurs after a storage write",
         long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
+        cwe: &[696],
     },
 ];
 
@@ -1065,6 +1123,26 @@ fn json_payload(
 ) -> Result<String, serde_json::Error> {
     let (high, medium, low) = severity_counts(findings);
 
+    // Augment each finding with CWE IDs from the metadata table.
+    let augmented: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            let mut v = serde_json::to_value(f).unwrap_or(serde_json::Value::Null);
+            if let serde_json::Value::Object(ref mut map) = v {
+                let cwe_ids: Vec<u32> = check_meta(&f.check_name)
+                    .map(|m| m.cwe.to_vec())
+                    .unwrap_or_default();
+                if !cwe_ids.is_empty() {
+                    map.insert(
+                        "cwe".to_string(),
+                        serde_json::to_value(&cwe_ids).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+            v
+        })
+        .collect();
+
     let envelope = serde_json::json!({
         "tool": {
             "name": "soroban-guard",
@@ -1079,7 +1157,7 @@ fn json_payload(
             "files_scanned": files_scanned,
             "files_skipped": files_skipped
         },
-        "findings": findings
+        "findings": augmented
     });
 
     serde_json::to_string_pretty(&envelope)
@@ -1206,7 +1284,8 @@ fn print_pretty(
             println!("         {} `{}`", "function:".dimmed(), f.function_name);
             println!("         {}", f.description);
             if let Some(suggestion) = &f.suggestion {
-                println!("         {} {}", "suggestion:".dimmed(), suggestion);
+                println!("         {} {}", "confidence: None,
+suggestion:".dimmed(), suggestion);
             }
             if let Some(url) = &f.rule_url {
                 let link = hyperlink(url, url.as_str());
@@ -1247,6 +1326,7 @@ mod tests {
             function_name: "f".to_string(),
             description: "desc".to_string(),
             rule_url: None,
+            confidence: None,
             suggestion: None,
         }
     }
@@ -1261,6 +1341,7 @@ mod tests {
             function_name: "set_balance".to_string(),
             description: "Missing auth".to_string(),
             rule_url: None,
+            confidence: None,
             suggestion: None,
         }];
 
@@ -1296,12 +1377,37 @@ mod tests {
             function_name: "set_balance".to_string(),
             description: "Missing auth".to_string(),
             rule_url: Some(rule_url.to_string()),
+            confidence: None,
             suggestion: None,
         }];
 
         let payload: serde_json::Value =
             serde_json::from_str(&json_payload(&findings, 1, 0).unwrap()).unwrap();
         assert_eq!(payload["findings"][0]["rule_url"], rule_url);
+    }
+
+    #[test]
+    fn json_payload_includes_cwe_from_metadata() {
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/lib.rs".to_string(),
+            line: 10,
+            function_name: "set_balance".to_string(),
+            description: "Missing auth".to_string(),
+            rule_url: None,
+            confidence: None,
+            suggestion: None,
+        }];
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&json_payload(&findings, 1, 0).unwrap()).unwrap();
+        // missing-require-auth maps to CWE-862
+        assert_eq!(
+            payload["findings"][0]["cwe"][0],
+            862,
+            "json_payload should include CWE-862 for missing-require-auth"
+        );
     }
 
     #[test]
@@ -1315,6 +1421,7 @@ mod tests {
                 function_name: "set_balance".to_string(),
                 description: "Missing auth".to_string(),
                 rule_url: None,
+                confidence: None,
                 suggestion: None,
             },
             Finding {
@@ -1325,6 +1432,7 @@ mod tests {
                 function_name: "update".to_string(),
                 description: "Unchecked arithmetic".to_string(),
                 rule_url: None,
+                confidence: None,
                 suggestion: None,
             },
         ];
@@ -1349,6 +1457,7 @@ mod tests {
             function_name: "set_balance".to_string(),
             description: "Missing auth".to_string(),
             rule_url: None,
+            confidence: None,
             suggestion: None,
         }];
 
@@ -1386,6 +1495,7 @@ mod tests {
             function_name: "set_balance".to_string(),
             description: "Missing auth".to_string(),
             rule_url: None,
+            confidence: None,
             suggestion: None,
         }];
 
@@ -1422,6 +1532,7 @@ mod tests {
                 function_name: "set_balance".to_string(),
                 description: "Missing require_auth".to_string(),
                 rule_url: Some(rule_url.to_string()),
+                confidence: None,
                 suggestion: Some("Add env.require_auth();".to_string()),
             },
             Finding {
@@ -1432,6 +1543,7 @@ mod tests {
                 function_name: "update".to_string(),
                 description: "Unchecked arithmetic".to_string(),
                 rule_url: None,
+                confidence: None,
                 suggestion: None,
             },
         ];
@@ -1511,6 +1623,7 @@ mod tests {
                 function_name: "high".to_string(),
                 description: "High finding".to_string(),
                 rule_url: None,
+                confidence: None,
                 suggestion: None,
             },
             Finding {
@@ -1521,6 +1634,7 @@ mod tests {
                 function_name: "medium".to_string(),
                 description: "Medium finding".to_string(),
                 rule_url: None,
+                confidence: None,
                 suggestion: None,
             },
         ];
@@ -1663,6 +1777,24 @@ mod tests {
                 explain_details(name),
                 "No detailed explanation is available for this custom check.",
                 "check {name} has fallback long description"
+            );
+        }
+    }
+
+    /// Every `default_checks()` entry must have at least one CWE mapping in `CHECK_METADATA`
+    /// (issue #984). This enforces the registry-consistency guarantee.
+    #[test]
+    fn check_metadata_every_check_has_cwe_mapping() {
+        for check in default_checks() {
+            let name = check.name();
+            let meta = check_meta(name);
+            assert!(
+                meta.is_some(),
+                "check {name} has no CHECK_METADATA entry"
+            );
+            assert!(
+                !meta.unwrap().cwe.is_empty(),
+                "check {name} has an empty CWE mapping — add at least one CWE id"
             );
         }
     }

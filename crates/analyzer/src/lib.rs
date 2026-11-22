@@ -303,23 +303,6 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
     ))
 }
 
-/// The path relative to `root` shown in findings: the bare file name when `root`
-/// itself is a single file, otherwise the path stripped of the `root` prefix.
-/// Shared by every scan entry point so the copies of this logic can't drift (issue #630).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    }
-}
-
 /// Drop only findings that are identical in everything a reader would use to tell
 /// them apart. Keying on `(file, line, check_name)` alone collapsed distinct
 /// same-line findings from checks that legitimately report more than once per line
@@ -700,25 +683,6 @@ pub fn scan_directory_with_checks(
         .collect();
 
     Ok((results, files_scanned, files_skipped, check_panics))
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
 }
 
 /// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
@@ -1448,7 +1412,8 @@ mod tests {
                 function_name: "f".into(),
                 description: "ok".into(),
                 rule_url: None,
-                suggestion: None,
+                confidence: None,
+suggestion: None,
             }]
         }
     }
@@ -1748,7 +1713,8 @@ impl C {
             function_name: String::new(),
             description: "divisor not validated".to_string(),
             rule_url: None,
-            suggestion: None,
+            confidence: None,
+suggestion: None,
         };
         assert!(
             is_suppressed(&finding, &suppressions, &fn_spans),
@@ -1833,7 +1799,8 @@ mod dedup_tests {
                 function_name: "f".into(),
                 description: "duplicate".into(),
                 rule_url: None,
-                suggestion: None,
+                confidence: None,
+suggestion: None,
             };
             vec![f.clone(), f]
         }
@@ -1878,7 +1845,8 @@ mod dedup_tests {
                     function_name: "b".into(),
                     description: "second".into(),
                     rule_url: None,
-                    suggestion: None,
+                    confidence: None,
+suggestion: None,
                 },
                 Finding {
                     check_name: "reversed-check".into(),
@@ -1888,7 +1856,8 @@ mod dedup_tests {
                     function_name: "a".into(),
                     description: "first".into(),
                     rule_url: None,
-                    suggestion: None,
+                    confidence: None,
+suggestion: None,
                 },
             ]
         }
@@ -1952,7 +1921,8 @@ mod dedup_tests {
                 function_name: "f".into(),
                 description: String::new(),
                 rule_url: None,
-                suggestion: None,
+                confidence: None,
+suggestion: None,
             };
             vec![
                 Finding {

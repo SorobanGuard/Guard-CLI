@@ -57,6 +57,7 @@ impl<'ast> Visit<'ast> for RandomnessVisitor {
                     "{}.ledger().{}() should not be used as randomness source",
                     self.env_ident, method_name
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-randomness-high"
                         .to_string(),

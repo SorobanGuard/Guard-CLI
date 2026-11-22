@@ -35,6 +35,7 @@ pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
 pub mod util;
+pub use util::{summarize, FnSummary};
 
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
@@ -108,6 +109,19 @@ impl Ord for Severity {
     }
 }
 
+/// Confidence level of a finding — distinguishes exact structural matches from
+/// name-based heuristics so CI gates and triage can filter accordingly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    /// Structurally precise match (e.g. `static mut` for mutable global state).
+    High,
+    /// Heuristic match with low false-positive rate (e.g. storage-write pattern).
+    Medium,
+    /// Name-based or pattern-based heuristic with higher false-positive risk.
+    Low,
+}
+
 /// One issue reported by a check.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Finding {
@@ -117,6 +131,9 @@ pub struct Finding {
     pub line: usize,
     pub function_name: String,
     pub description: String,
+    /// Confidence level of this finding. `None` means not set by the check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<Confidence>,
     /// Link to the check's documentation section (exposed in `--json` output for
     /// dashboard integrations).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,7 +164,7 @@ pub trait Check {
 ///         check_name: "a".into(), severity: Severity::High,
 ///         file_path: "src/foo.rs".into(), line: 1,
 ///         function_name: "f".into(), description: "d".into(),
-///         rule_url: None, suggestion: None,
+///         confidence: None, rule_url: None, suggestion: None,
 ///     },
 /// ];
 /// let grouped = group_by_file(&findings);
@@ -175,7 +192,7 @@ pub fn group_by_file<'a>(findings: &'a [Finding]) -> BTreeMap<&'a str, Vec<&'a F
 ///         check_name: "a".into(), severity: Severity::Low,
 ///         file_path: "src/lib.rs".into(), line: 1,
 ///         function_name: "f".into(), description: "d".into(),
-///         rule_url: None, suggestion: None,
+///         confidence: None, rule_url: None, suggestion: None,
 ///     },
 /// ];
 /// let grouped = group_by_severity(&findings);

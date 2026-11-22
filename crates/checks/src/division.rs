@@ -64,6 +64,7 @@ impl Visit<'_> for DivVisitor<'_> {
                      and use checked_div or explicit rounding where appropriate.",
                     self.fn_name
                 ),
+                confidence: None,
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#integer-division-truncation-medium"
                         .to_string(),

@@ -43,6 +43,7 @@ impl Check for AuthAfterStorageWriteCheck {
                              but already wrote to storage on line {write}. State was mutated \
                              before the caller was authorized."
                         ),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#auth-after-storage-write-high"
                                 .to_string(),

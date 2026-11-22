@@ -44,6 +44,7 @@ impl Check for UnprotectedTokenMintCheck {
                             "Mint/burn method `{}` lacks valid require_auth protection before the sensitive operation",
                             name
                         ),
+                        confidence: None,
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-token-mint-high"
                                 .to_string(),
