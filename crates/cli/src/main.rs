@@ -4,8 +4,12 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use soroban_guard_analyzer::{is_ignored_path, scan_directory_with_checks, ScanError};
-use soroban_guard_checks::{default_checks, default_checks_with_config, Finding, Severity};
+use soroban_guard_analyzer::{
+    is_ignored_path, scan_directory_with_checks, scan_manifests_in_root, ScanError,
+};
+use soroban_guard_checks::{
+    default_checks, default_checks_with_config, manifest_checks, Finding, Severity,
+};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -137,7 +141,13 @@ fn run_scan(
 ) -> i32 {
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
         Ok((results, files_scanned, files_skipped, _check_panics)) => {
-            let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
+            let mut findings: Vec<Finding> =
+                results.into_iter().flat_map(|r| r.findings).collect();
+            // Append manifest-level findings (closes #979).
+            let m_checks = manifest_checks();
+            let mut manifest_findings =
+                scan_manifests_in_root(&opts.path, &opts.exclude, &m_checks);
+            findings.append(&mut manifest_findings);
             let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
 
             // Produce the serialized payload for the selected structured format,

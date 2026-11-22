@@ -58,3 +58,41 @@ documented in `docs/checks.md`, and covered by unit tests and fixtures.
 
 See [How to add a new check](../CONTRIBUTING.md#how-to-add-a-new-check-copy-authrs-as-a-template)
 for the complete contributor workflow.
+
+## ScanContext — path- and crate-aware checks (closes #980)
+
+`Check::run` only receives the parsed file and its raw source. `ScanContext` carries
+the extra information needed for path-aware detectors:
+
+```rust
+pub struct ScanContext<'a> {
+    pub path: &'a Path,          // absolute path of the .rs file
+    pub root: &'a Path,          // root of the scan
+    pub crate_name: Option<&'a str>, // from the nearest Cargo.toml
+}
+```
+
+Implement `Check::run_with_context` on a check to receive this context. The default
+implementation delegates to `Check::run`, so existing checks need no changes. The
+analyzer calls `run_with_context` for every file.
+
+## ManifestCheck — Cargo.toml scanning pipeline (closes #979)
+
+A parallel check pipeline runs against `Cargo.toml` manifests via the
+`ManifestCheck` trait:
+
+```rust
+pub trait ManifestCheck {
+    fn name(&self) -> &str;
+    fn run(&self, manifest: &toml::Value, path: &Path) -> Vec<Finding>;
+}
+```
+
+Built-in manifest checks are registered in `manifest_checks()` in
+`crates/checks/src/lib.rs`. The analyzer discovers the root manifest and any
+workspace member manifests, parses them with `toml`, and runs every active
+manifest check. `--disable-check` and `[checks] disabled` apply to both source
+and manifest checks.
+
+The first built-in manifest check is `missing-cdylib`, which flags a `Cargo.toml`
+that does not list `cdylib` in `[lib] crate-type`.
