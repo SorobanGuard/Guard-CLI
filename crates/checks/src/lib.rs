@@ -35,6 +35,9 @@ pub mod unprotected_contract_deployment;
 pub mod unprotected_token_mint;
 pub mod unprotected_upgrade;
 pub mod util;
+pub mod manifest;
+pub mod unbounded_recursion;
+pub mod require_auth_for_args_partial;
 
 pub use admin::UnprotectedAdminCheck;
 pub use annotations::MissingContractAnnotationCheck;
@@ -70,10 +73,13 @@ pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
 pub use unprotected_token_mint::UnprotectedTokenMintCheck;
 pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use unbounded_recursion::UnboundedRecursionCheck;
+pub use require_auth_for_args_partial::RequireAuthForArgsPartialBindingCheck;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::path::Path;
 use syn::File;
 
 /// Severity of a finding.
@@ -126,10 +132,50 @@ pub struct Finding {
     pub suggestion: Option<String>,
 }
 
+/// Context passed to [`Check::run_with_context`], giving checks access to the
+/// file path and crate root so they can skip test/bench files or build
+/// path-relative `file_path` values in findings without coupling to the analyzer.
+///
+/// All fields are optional or derived from the analyzer — a check must not
+/// require any field to be non-`None` for its `run` path to work.
+pub struct ScanContext<'a> {
+    /// Absolute or relative path of the `.rs` file being scanned.
+    pub path: &'a Path,
+    /// Root of the scan (the directory or file passed to `scan`).
+    pub root: &'a Path,
+    /// The `[package] name` from the nearest `Cargo.toml`, when available.
+    pub crate_name: Option<&'a str>,
+}
+
 /// A static analyzer check implemented against a parsed `syn::File`.
 pub trait Check {
     fn name(&self) -> &str;
     fn run(&self, file: &File, source: &str) -> Vec<Finding>;
+    /// Run the check with extra context.  The default delegates to [`Check::run`]
+    /// so existing checks need no changes (closes #980).
+    fn run_with_context(
+        &self,
+        file: &File,
+        source: &str,
+        _ctx: &ScanContext<'_>,
+    ) -> Vec<Finding> {
+        self.run(file, source)
+    }
+}
+
+/// A check that runs against a parsed `Cargo.toml` manifest (closes #979).
+///
+/// Implement this trait to detect manifest-level misconfigurations such as
+/// missing `cdylib` crate-type, `testutils` in `[dependencies]`, or
+/// `overflow-checks = false` in the release profile.
+pub trait ManifestCheck {
+    fn name(&self) -> &str;
+    fn run(&self, manifest: &toml::Value, path: &Path) -> Vec<Finding>;
+}
+
+/// Returns all built-in manifest checks.
+pub fn manifest_checks() -> Vec<Box<dyn ManifestCheck + Send + Sync>> {
+    vec![Box::new(manifest::MissingCdylibCheck)]
 }
 
 /// Group a flat findings slice by `file_path`.
@@ -230,6 +276,8 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(UnboundedRecursionCheck),
+        Box::new(RequireAuthForArgsPartialBindingCheck),
     ]
 }
 
