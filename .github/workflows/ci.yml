@@ -80,3 +80,40 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/examples
         run: cargo check --manifest-path examples/all-findings/Cargo.toml
+
+  # Spell-check docs, code comments and check descriptions (closes #992).
+  typos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check spelling with typos
+        uses: crate-ci/typos@v1.26.0
+
+  # Run the scanner on its own vulnerable fixtures and upload SARIF to Code Scanning (closes #993).
+  dogfood-sarif:
+    runs-on: ubuntu-latest
+    # Only upload to Code Scanning on pushes to main (needs GITHUB_TOKEN write).
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dogfood
+
+      - name: Build soroban-guard
+        run: cargo build --release -p soroban-guard-cli
+
+      - name: Scan vulnerable fixtures and emit SARIF
+        run: |
+          target/release/soroban-guard scan examples/all-findings \
+            --sarif --output results.sarif --fail-on low || true
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+          category: soroban-guard

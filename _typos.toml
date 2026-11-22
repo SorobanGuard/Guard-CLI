@@ -1,0 +1,22 @@
+[files]
+# Skip generated/locked files and test-contract source (identifier names are intentional).
+extend-exclude = [
+    "Cargo.lock",
+    "test-contracts/**",
+    "examples/**",
+    "target/**",
+]
+
+[default]
+# Check all files by default.
+check-filename = true
+check-file = true
+
+[type.rust]
+extend-glob = ["*.rs"]
+
+[default.extend-words]
+# Intentional identifiers used in Soroban contracts.
+# Add false-positive words here, e.g.:
+# "someword" = "someword"
+EOF = "EOF"

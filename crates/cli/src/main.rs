@@ -28,7 +28,7 @@ enum Commands {
     /// Scan a directory tree for vulnerability patterns
     #[command(group(
         ArgGroup::new("output_format")
-            .args(["json", "sarif", "markdown"])
+            .args(["json", "sarif", "markdown", "rdjson"])
             .multiple(false)
     ))]
     Scan {
@@ -43,7 +43,16 @@ enum Commands {
         /// Print findings as a Markdown table
         #[arg(long)]
         markdown: bool,
-        /// Write output to a file instead of stdout (applies to --json, --sarif, and --markdown)
+        /// Print findings as reviewdog Diagnostic Format JSON (for inline PR comments)
+        #[arg(long)]
+        rdjson: bool,
+        /// Apply machine-applicable fixes in place (experimental)
+        #[arg(long)]
+        fix: bool,
+        /// Combined with --fix: print a unified diff instead of editing files
+        #[arg(long, requires = "fix")]
+        dry_run: bool,
+        /// Write output to a file instead of stdout (applies to --json, --sarif, --markdown, and --rdjson)
         #[arg(long, requires = "output_format")]
         output: Option<PathBuf>,
         /// Suppress all output unless a finding meets the --fail-on threshold
@@ -112,6 +121,9 @@ struct ScanOptions {
     json: bool,
     sarif: bool,
     markdown: bool,
+    rdjson: bool,
+    fix: bool,
+    dry_run: bool,
     output: Option<PathBuf>,
     quiet: bool,
     verbose: bool,
@@ -155,9 +167,19 @@ fn run_scan(
                 )
             } else if opts.markdown {
                 Some(Ok(render_markdown(&findings)))
+            } else if opts.rdjson {
+                Some(
+                    rdjson_payload(&findings)
+                        .map_err(|e| e.to_string()),
+                )
             } else {
                 None
             };
+
+            // Apply fixes when --fix is passed (closes #997).
+            if opts.fix && !findings.is_empty() {
+                apply_fixes(&findings, opts.dry_run);
+            }
 
             if let Some(result) = structured_payload {
                 match result {
@@ -302,6 +324,9 @@ fn main() {
             json,
             sarif,
             markdown,
+            rdjson,
+            fix,
+            dry_run,
             output,
             quiet,
             no_color,
@@ -418,6 +443,9 @@ fn main() {
                 json,
                 sarif,
                 markdown,
+                rdjson,
+                fix,
+                dry_run,
                 output: output.clone(),
                 quiet,
                 verbose,
@@ -1145,6 +1173,138 @@ fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
     format!("{high} High, {medium} Medium, {low} Low — across {files_scanned} file(s)")
 }
 
+/// Emit reviewdog Diagnostic Format (rdjson) for inline PR comments via reviewdog.
+/// Closes #1000.
+fn rdjson_payload(findings: &[Finding]) -> Result<String, serde_json::Error> {
+    let diagnostics: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            let sev = match f.severity {
+                Severity::High => "ERROR",
+                Severity::Medium => "WARNING",
+                Severity::Low => "INFO",
+            };
+            let mut diag = serde_json::json!({
+                "message": f.description,
+                "location": {
+                    "path": f.file_path,
+                    "range": {
+                        "start": { "line": f.line }
+                    }
+                },
+                "severity": sev,
+                "code": {
+                    "value": f.check_name
+                },
+                "suggestions": []
+            });
+            if let Some(ref url) = f.rule_url {
+                diag["code"]["url"] = serde_json::Value::String(url.clone());
+            }
+            if let Some(ref sug) = f.suggestion {
+                diag["suggestions"] = serde_json::json!([{
+                    "range": { "start": { "line": f.line } },
+                    "text": sug
+                }]);
+            }
+            diag
+        })
+        .collect();
+
+    let envelope = serde_json::json!({
+        "source": {
+            "name": "soroban-guard",
+            "url": "https://github.com/SorobanGuard/Guard-CLI"
+        },
+        "severity": "WARNING",
+        "diagnostics": diagnostics
+    });
+    serde_json::to_string_pretty(&envelope)
+}
+
+/// Apply machine-applicable fixes for a subset of findings. With `dry_run`, prints
+/// a unified diff instead of modifying files. Closes #997.
+///
+/// Currently handles:
+/// - `forbidden-std-imports`: removes `use std::…` lines
+/// - `panic-in-contract`: replaces `.unwrap()` with `.expect("review this")`
+fn apply_fixes(findings: &[Finding], dry_run: bool) {
+    // Group by file, collect byte-range replacements.
+    let mut by_file: std::collections::BTreeMap<&str, Vec<(usize, &str)>> =
+        std::collections::BTreeMap::new();
+    for f in findings {
+        let edit = match f.check_name.as_str() {
+            "forbidden-std-imports" => Some((f.line, "")),
+            "panic-in-contract" => Some((f.line, ".expect(\"review this\")")),
+            _ => None,
+        };
+        if let Some(e) = edit {
+            by_file.entry(f.file_path.as_str()).or_default().push(e);
+        }
+    }
+
+    for (file_path, edits) in &by_file {
+        let Ok(source) = fs::read_to_string(file_path) else {
+            eprintln!("note: could not read {file_path} for --fix");
+            continue;
+        };
+        let lines: Vec<&str> = source.lines().collect();
+        let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let mut changed = false;
+
+        for &(line_no, replacement) in edits {
+            let idx = line_no.saturating_sub(1);
+            if idx >= new_lines.len() {
+                continue;
+            }
+            let orig = &new_lines[idx];
+            if replacement.is_empty() {
+                // Remove the line.
+                new_lines[idx] = String::new();
+                changed = true;
+            } else if orig.contains(".unwrap()") {
+                new_lines[idx] = orig.replace(".unwrap()", replacement);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            continue;
+        }
+
+        let new_source = new_lines
+            .iter()
+            .filter(|l| !l.is_empty() || {
+                // Keep blank lines that weren't edits (simple heuristic).
+                true
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+
+        if dry_run {
+            // Print a minimal unified diff to stdout.
+            println!("--- a/{file_path}");
+            println!("+++ b/{file_path}");
+            for (i, (old, new)) in lines.iter().zip(new_lines.iter()).enumerate() {
+                if old != new {
+                    let n = i + 1;
+                    println!("@@ -{n} +{n} @@");
+                    println!("-{old}");
+                    println!("+{new}");
+                }
+            }
+        } else {
+            if let Err(e) = fs::write(file_path, &new_source) {
+                eprintln!("error: could not write fixes to {file_path}: {e}");
+            } else {
+                eprintln!("fixed: {file_path}");
+            }
+        }
+    }
+}
+
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
 fn use_hyperlinks() -> bool {
     std::env::var("NO_COLOR").is_err() && colored::control::SHOULD_COLORIZE.should_colorize()
@@ -1825,6 +1985,39 @@ mod tests {
         assert!(
             stderr.contains("unknown --fail-on value"),
             "stderr should contain 'unknown --fail-on value', got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn rdjson_payload_has_expected_shape() {
+        let findings = vec![Finding {
+            check_name: "missing-require-auth".to_string(),
+            severity: Severity::High,
+            file_path: "src/lib.rs".to_string(),
+            line: 10,
+            function_name: "transfer".to_string(),
+            description: "Missing auth".to_string(),
+            rule_url: Some("https://example.com/rule".to_string()),
+            suggestion: Some("Add require_auth".to_string()),
+        }];
+        let json_str = rdjson_payload(&findings).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(v["source"]["name"], "soroban-guard");
+        assert!(v["diagnostics"].is_array());
+        assert_eq!(v["diagnostics"][0]["severity"], "ERROR");
+        assert_eq!(v["diagnostics"][0]["code"]["value"], "missing-require-auth");
+        assert_eq!(
+            v["diagnostics"][0]["code"]["url"],
+            "https://example.com/rule"
+        );
+        assert_eq!(
+            v["diagnostics"][0]["location"]["path"],
+            "src/lib.rs"
+        );
+        assert_eq!(
+            v["diagnostics"][0]["location"]["range"]["start"]["line"],
+            10
         );
     }
 }
