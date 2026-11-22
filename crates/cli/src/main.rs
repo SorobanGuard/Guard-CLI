@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use soroban_guard_cli::config;
 
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
@@ -995,6 +997,13 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags authorization checks after storage writes",
         rule: "Authorization check occurs after a storage write",
         long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
+    },
+    CheckMeta {
+        name: "symbol-literal-too-long",
+        severity: "high",
+        short: "Flags Symbol::new / symbol_short! literals that are too long or contain invalid chars",
+        rule: "Symbol literal exceeds the allowed length or contains invalid characters",
+        long: Some("Reports string literals passed to Symbol::new or Symbol::try_from_val that exceed 32 characters, symbol_short! literals that exceed 9 characters, or literals containing characters outside [a-zA-Z0-9_]. An oversized Symbol::new literal compiles but panics at runtime on every call."),
     },
 ];
 

@@ -1,5 +1,8 @@
 //! Vulnerability detectors for Soroban smart contracts.
 
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
 pub mod admin;
 pub mod annotations;
 pub mod auth;
@@ -27,6 +30,7 @@ pub mod ttl;
 pub mod unchecked_divisor;
 pub mod unsafe_randomness;
 pub mod vec_growth;
+pub mod symbol_literal_too_long;
 pub mod xc_input;
 pub mod zero_address;
 pub mod unchecked_token_amount;
@@ -65,6 +69,7 @@ pub use unsafe_randomness::UnsafeRandomnessCheck;
 pub use vec_growth::UnboundedVecGrowthCheck;
 pub use xc_input::UnsafeCrossContractInputCheck;
 pub use zero_address::MissingZeroAddressCheck;
+pub use symbol_literal_too_long::SymbolLiteralTooLongCheck;
 pub use unchecked_token_amount::UncheckedTokenAmountCheck;
 pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
@@ -230,6 +235,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(SymbolLiteralTooLongCheck),
     ]
 }
 
