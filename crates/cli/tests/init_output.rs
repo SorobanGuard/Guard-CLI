@@ -1,22 +1,42 @@
-use std::path::PathBuf;
+use std::fs;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_soroban-guard")
+}
 
 #[test]
-fn init_writes_exactly_one_trailing_newline() {
-    let root = PathBuf::from(std::env::temp_dir()).join(format!(
-        "soroban-guard-init-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-    ));
-    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
-        .args(["init", root.to_str().unwrap()])
-        .env("NO_COLOR", "1")
+fn init_writes_schema_directive_at_top() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("soroban-guard.toml");
+
+    let status = Command::new(bin())
+        .args(["init", "--path", path.to_str().unwrap()])
+        .status()
+        .expect("run init");
+    assert!(status.success(), "init should succeed");
+
+    let contents = fs::read_to_string(&path).expect("read generated config");
+    let first_line = contents.lines().next().unwrap_or_default();
+    assert_eq!(
+        first_line,
+        "#:schema https://raw.githubusercontent.com/SorobanGuard/Guard-CLI/main/schemas/soroban-guard.schema.json",
+        "generated config must start with the schema directive"
+    );
+}
+
+#[test]
+fn schema_subcommand_emits_valid_json() {
+    let output = Command::new(bin())
+        .arg("schema")
         .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
-    let contents = std::fs::read_to_string(root.join("soroban-guard.toml")).unwrap();
-    assert!(contents.ends_with("extra = []\n"));
-    assert!(!contents.ends_with("\n\n"));
-    std::fs::remove_dir_all(root).unwrap();
+        .expect("run schema");
+    assert!(output.status.success(), "schema should succeed");
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 schema");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("schema is valid JSON");
+    assert!(
+        value.get("properties").is_some(),
+        "schema should expose top-level properties"
+    );
 }

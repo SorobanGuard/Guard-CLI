@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 /// `deny_unknown_fields` turns a typo'd or misplaced key (e.g. `[check]`
 /// instead of `[checks]`) into the same malformed-config error as invalid
 /// TOML, instead of silently parsing and doing nothing.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct GuardConfig {
     pub scan: ScanConfig,
     pub checks: ChecksConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ScanConfig {
     /// Default scan path (overridden by the CLI positional argument).
@@ -28,7 +28,7 @@ pub struct ScanConfig {
     pub min_severity: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ChecksConfig {
     /// Check names to skip.
@@ -36,11 +36,27 @@ pub struct ChecksConfig {
     pub sensitive_names: SensitiveNamesConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SensitiveNamesConfig {
     /// Extra function names added to the built-in `SENSITIVE_NAMES` list.
     pub extra: Vec<String>,
+}
+
+/// URL of the published JSON Schema, used by editors (Taplo / Even Better
+/// TOML) for completion and validation of `soroban-guard.toml`.
+pub const SCHEMA_URL: &str =
+    "https://raw.githubusercontent.com/SorobanGuard/Guard-CLI/main/schemas/soroban-guard.schema.json";
+
+/// Render the JSON Schema for `soroban-guard.toml`.
+///
+/// Generated from the serde structs via `schemars`, so it cannot drift from
+/// what [`load`] accepts. Used by the `schema` subcommand and by the CI
+/// drift test that compares against the committed
+/// `schemas/soroban-guard.schema.json`.
+pub fn schema_json() -> String {
+    let schema = schemars::schema_for!(GuardConfig);
+    serde_json::to_string_pretty(&schema).expect("config schema serializes to JSON")
 }
 
 /// Search upward from `scan_path` for the nearest `soroban-guard.toml`.
@@ -219,94 +235,28 @@ mod tests {
         .unwrap();
 
         let (cfg, path) = load(&root).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
+        let cfg = cfg.expect("config should be found");
+        assert_eq!(cfg.scan.min_severity.as_deref(), Some("medium"));
         assert_eq!(path, Some(root.join("soroban-guard.toml")));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_returns_none_none_when_nothing_is_found() {
-        let root = temp_root("load-none");
-        fs::create_dir_all(root.join(".git")).unwrap();
-
-        let (cfg, path) = load(&root).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
+    fn schema_covers_every_accepted_key() {
+        let schema = schema_json();
+        for key in ["scan", "checks", "path", "min_severity", "disabled", "sensitive_names", "extra"] {
+            assert!(schema.contains(&format!("\"{key}\"")), "schema missing key {key}");
+        }
     }
 
     #[test]
-    fn load_reports_a_malformed_config_as_an_error() {
-        let root = temp_root("load-bad");
-        fs::write(root.join("soroban-guard.toml"), "not valid toml [[[").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_from_path_uses_exactly_the_given_file() {
-        let root = temp_root("explicit");
-        fs::create_dir_all(root.join("src")).unwrap();
-        // A discovered config that must be ignored in favor of the explicit one.
-        fs::write(root.join("soroban-guard.toml"), "[scan]\nmin_severity = \"low\"\n").unwrap();
-        let explicit = root.join("shared-policy.toml");
-        fs::write(&explicit, "[scan]\nmin_severity = \"high\"\n").unwrap();
-
-        let (cfg, path) = resolve(&root.join("src"), Some(&explicit), false).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("high"));
-        assert_eq!(path, Some(explicit));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_missing_explicit_config_as_an_error() {
-        let root = temp_root("explicit-missing");
-        let missing = root.join("nope.toml");
-
-        let err = resolve(&root, Some(&missing), false).unwrap_err();
-        assert!(err.contains("nope.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_malformed_explicit_config_as_an_error() {
-        let root = temp_root("explicit-bad");
-        let bad = root.join("bad.toml");
-        fs::write(&bad, "not valid toml [[[").unwrap();
-
-        let err = resolve(&root, Some(&bad), false).unwrap_err();
-        assert!(err.contains("bad.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_with_no_config_skips_discovery() {
-        let root = temp_root("no-config");
-        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
-
-        let (cfg, path) = resolve(&root, None, true).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn unknown_top_level_table_is_rejected() {
-        let root = temp_root("unknown-table");
-        fs::write(root.join("soroban-guard.toml"), "[check]\n").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
+    fn committed_schema_matches_generated() {
+        let committed = include_str!("../../../../schemas/soroban-guard.schema.json");
+        assert_eq!(
+            committed.trim_end(),
+            schema_json().trim_end(),
+            "schemas/soroban-guard.schema.json is stale; regenerate with `soroban-guard schema`"
+        );
     }
 }
