@@ -1,6 +1,7 @@
 # Guard CLI
 
 [![CI](https://img.shields.io/github/actions/workflow/status/SorobanGuard/Guard-CLI/ci.yml?branch=main&label=CI)](https://github.com/SorobanGuard/Guard-CLI/actions/workflows/ci.yml)
+[![MSRV 1.74](https://img.shields.io/badge/MSRV-1.74-blue.svg)](Cargo.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/SorobanGuard/Guard-CLI)
 [![Rust Edition 2021](https://img.shields.io/badge/edition-2021-orange.svg)](Cargo.toml)
 <!-- crates.io badge: add once `soroban-guard-cli` is published —
@@ -9,6 +10,10 @@
 > Static analysis engine for [Soroban](https://soroban.stellar.org/) smart contracts — securing the Stellar blockchain, one contract at a time.
 
 Guard CLI is a CLI-based static analyzer for Rust smart contracts deployed on the **Stellar network** via the Soroban smart contract platform. It detects vulnerabilities before your code ever touches the chain.
+
+![Guard CLI demo scanning examples/all-findings](docs/demo/demo.svg)
+
+_Recorded with [`vhs`](https://github.com/charmbracelet/vhs) from [`docs/demo/demo.tape`](docs/demo/demo.tape) — regenerate with `vhs docs/demo/demo.tape`._
 
 ---
 
@@ -192,163 +197,6 @@ Guard-CLI/
 │           ├── lib.rs          # trait definition, Finding, Severity, default_checks()
 │           └── ...             # one module per detector; see docs/checks.md for the full list
 └── test-contracts/             # 68 standalone Soroban fixture crates (excluded from workspace)
-    ├── vulnerable/             # triggers missing-require-auth
-    ├── safe/                   # passes missing-require-auth
-    ├── arithmetic-vulnerable/
-    ├── arithmetic-safe/
-    ├── admin-vulnerable/
-    ├── admin-safe/
-    ├── storage-vulnerable/
-    ├── storage-safe/
-    └── ...                     # paired safe/vulnerable fixtures for each implemented check
-```
+    ├── vulnerable/             # triggers missing-require-a
 
----
-
-## Code Snippets
-
-### Vulnerable contract — triggers `missing-require-auth`
-
-```rust
-#![no_std]
-use soroban_sdk::{contract, contractimpl, symbol_short, Env, Symbol};
-
-#[contract]
-pub struct VulnerableContract;
-
-const KEY: Symbol = symbol_short!("counter");
-
-#[contractimpl]
-impl VulnerableContract {
-    // ❌ No env.require_auth() — anyone on Stellar can call this
-    pub fn bump(env: Env) {
-        let mut n: u32 = env.storage().instance().get(&KEY).unwrap_or(0);
-        n += 1;
-        env.storage().instance().set(&KEY, &n);
-    }
-}
-```
-
-### Safe contract — passes `missing-require-auth`
-
-```rust
-#![no_std]
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol};
-
-#[contract]
-pub struct SafeContract;
-
-const KEY: Symbol = symbol_short!("owner");
-
-#[contractimpl]
-impl SafeContract {
-    // ✅ Caller must be the authorized Address on Stellar
-    pub fn set_owner(env: Env, owner: Address, new_owner: Address) {
-        owner.require_auth();
-        env.storage().instance().set(&KEY, &new_owner);
-    }
-}
-```
-
-### Adding a custom check
-
-Implement the `Check` trait in `crates/checks/src/`, export it from the module, and register it in `all_checks_base()`:
-
-```rust
-use crate::{Check, Finding};
-use syn::File;
-
-pub struct MyCustomCheck;
-
-impl Check for MyCustomCheck {
-    fn name(&self) -> &str { "my-custom-check" }
-
-    fn run(&self, file: &File, source: &str) -> Vec<Finding> {
-        // inspect the syn AST and return any findings
-        vec![]
-    }
-}
-```
-
-```rust
-// crates/checks/src/lib.rs — register it once here
-fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
-    vec![
-        // ...(existing checks)...
-        Box::new(MyCustomCheck),   // 👈 add your check
-    ]
-}
-```
-
-`default_checks()` and `default_checks_with_config()` both derive their lists
-from `all_checks_base()`, so custom checks should not be registered in either
-wrapper directly.
-
----
-
-## Stellar Integration
-
-Guard CLI is designed to sit at the gate of your Stellar deployment pipeline. Soroban contracts are compiled to WASM and deployed to the Stellar network — Guard CLI catches vulnerabilities at the source level before any of that happens.
-
-### How it fits in
-
-```
-[Source code] → Guard CLI scan → [WASM build] → [Stellar deploy]
-```
-
-- Runs purely on Rust source — no Stellar SDK, no network connection, no wallet required.
-- Exit code `1` on High findings lets CI block a deploy automatically.
-- `--json` output can be piped into any dashboard or audit log.
-- `--sarif` emits SARIF 2.1.0 for GitHub Advanced Security and other code scanning integrations.
-- `--output findings.json` writes JSON output to disk for CI logs that should stay clean.
-
-### Deployment workflow
-
-```bash
-# 1. Scan before building — fails fast on High findings (exit 1)
-cargo run -p soroban-guard-cli -- scan ./my-contract --json > findings.json
-
-# 2. Build the WASM artifact only if scan passed
-cargo build --target wasm32-unknown-unknown --release
-
-# 3. Deploy to Stellar Testnet
-stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
-  --source <account-name> \
-  --network testnet
-
-# 4. Or deploy to Mainnet
-stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
-  --source <account-name> \
-  --network mainnet
-```
-
-### CI example (GitHub Actions)
-
-```yaml
-- name: Guard CLI scan
-  run: cargo run -p soroban-guard-cli -- scan ./my-contract --sarif --output findings.sarif
-  # exits 1 on High findings — blocks the workflow
-
-- name: Build WASM
-  run: cargo build --target wasm32-unknown-unknown --release
-```
-
----
-
-## Workspace layout
-
-| Crate | Role |
-|-------|------|
-| `crates/cli` | `clap` entrypoint, reporting |
-| `crates/analyzer` | Walk `.rs` files, parse with `syn`, run checks |
-| `crates/checks` | `Check` trait + individual detectors |
-
-See `docs/checks.md` for implemented rules, `docs/json-schema.md` for the `--json` output schema, `docs/integrations.md` for pre-commit / CI / editor snippets, `docs/configuration.md` for the `soroban-guard.toml` project config file, and `CONTRIBUTING.md` to add a check.
-
----
-
-## License
-
-MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+/* … truncated 4531 chars — edit only what you need near the top … */
