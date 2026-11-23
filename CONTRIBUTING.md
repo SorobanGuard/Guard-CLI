@@ -52,6 +52,32 @@ Release managers should follow the [crates.io release process](docs/release.md).
    cargo install --path crates/cli
    ```
 
+### Snapshot tests (`insta`)
+
+The pretty (terminal) output is covered by [`insta`](https://insta.rs/) snapshot tests in
+`crates/cli/tests/golden_output.rs`. Snapshots are stored under `crates/cli/tests/snapshots/`.
+
+- **Run and review snapshots:**
+
+  ```bash
+  cargo insta test --workspace
+  cargo insta review
+  ```
+
+  `cargo insta test` runs the suite and writes any new/changed snapshots as `.snap.new` files;
+  `cargo insta review` lets you accept or reject them interactively. Install the tool once with
+  `cargo install cargo-insta`.
+
+- **Accept snapshots non-interactively** (e.g. in CI or scripts):
+
+  ```bash
+  INSTA_UPDATE=always cargo test -p soroban-guard-cli --test golden_output
+  ```
+
+- **Color stability** — Pretty-output snapshots disable ANSI color for deterministic results;
+  a single snapshot forces color on to guard the ANSI rendering path. If you change the human
+  output format, update the affected snapshots and review the diff before committing.
+
 ### Commit hygiene
 
 Prefer **small, focused commits** (one logical change per commit): a single check, a doc section, or a test fixture pair. This makes review and `git bisect` straightforward. Aim for **clear commit messages** in [Conventional Commits](https://www.conventionalcommits.org/) style (`feat(checks): …`, `fix(cli): …`, `docs: …`).
@@ -187,15 +213,4 @@ Fixture crates live under **`test-contracts/`** and are **excluded** from the ro
 - **`syn` `full`** — New crates in this workspace should inherit workspace `syn` with `features = ["full", "visit"]` unless there is a strong reason not to.
 - **No `todo!()`** — Land complete logic; placeholders block merge.
 - **No panics in library / CLI paths** — Propagate or handle `Result` (the CLI uses exit code **2** for report serialization failures and scan errors).
-- **Checks stay isolated** — Stateless `run` implementations; no reliance on execution order or global mutable state.
-
----
-
-## Code style
-
-- Prefer small visitors and helpers over monolithic passes.
-- Keep `--json` output stable for scripting.
-- When you change severity or rule IDs, update `docs/checks.md` in the same change.
-- Run `cargo fmt --all` before pushing so CI's `cargo fmt --all -- --check` step passes.
-
-Thank you for contributing.
+- **Checks stay isolated** — Stateless `run` implementations; no reliance on

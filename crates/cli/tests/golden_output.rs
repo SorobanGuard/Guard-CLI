@@ -33,6 +33,26 @@ fn run_scan_json(threads: &str) -> String {
     String::from_utf8(output.stdout).expect("scan output was not valid UTF-8")
 }
 
+fn run_scan_pretty(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_handsoff"))
+        .arg("scan")
+        .arg(contracts_dir())
+        .args(args)
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .output()
+        .expect("failed to run handsoff scan");
+
+    assert!(
+        output.status.success(),
+        "scan failed with args {:?}: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout).expect("scan output was not valid UTF-8")
+}
+
 #[test]
 fn findings_are_deterministic_across_thread_counts() {
     let single = run_scan_json("1");
@@ -85,4 +105,81 @@ fn findings_are_sorted_by_file_line_check_name() {
     );
 
     keys.dedup();
+}
+
+#[test]
+fn pretty_output_mixed_severities() {
+    let output = run_scan_pretty(&[]);
+    insta::assert_snapshot!("pretty_mixed_severities", output);
+}
+
+#[test]
+fn pretty_output_quiet() {
+    let output = run_scan_pretty(&["--quiet"]);
+    insta::assert_snapshot!("pretty_quiet", output);
+}
+
+#[test]
+fn pretty_output_verbose() {
+    let output = run_scan_pretty(&["--verbose"]);
+    insta::assert_snapshot!("pretty_verbose", output);
+}
+
+#[test]
+fn pretty_output_max_findings_truncation() {
+    let output = run_scan_pretty(&["--max-findings", "2"]);
+    insta::assert_snapshot!("pretty_max_findings_2", output);
+}
+
+#[test]
+fn pretty_output_no_findings() {
+    let empty_dir = repo_root().join("test-contracts").join("empty");
+    let output = Command::new(env!("CARGO_BIN_EXE_handsoff"))
+        .arg("scan")
+        .arg(&empty_dir)
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .output()
+        .expect("failed to run handsoff scan");
+
+    assert!(
+        output.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("scan output was not valid UTF-8");
+    insta::assert_snapshot!("pretty_no_findings", stdout);
+}
+
+#[test]
+fn pretty_output_with_skipped_files() {
+    let output = run_scan_pretty(&["--verbose"]);
+    assert!(
+        output.contains("skipped") || output.contains("Skipped"),
+        "expected skipped-file reporting in verbose output:\n{}",
+        output
+    );
+    insta::assert_snapshot!("pretty_skipped_files", output);
+}
+
+#[test]
+fn pretty_output_ansi_colors_forced() {
+    let output = Command::new(env!("CARGO_BIN_EXE_handsoff"))
+        .arg("scan")
+        .arg(contracts_dir())
+        .env("CLICOLOR_FORCE", "1")
+        .env("FORCE_COLOR", "1")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run handsoff scan");
+
+    assert!(
+        output.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("scan output was not valid UTF-8");
+    insta::assert_snapshot!("pretty_ansi_colors", stdout);
 }
