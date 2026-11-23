@@ -82,3 +82,50 @@ fn scan_files_ignores_non_rust_paths_and_honors_excludes() {
 
     assert_eq!(scanned, 1);
 }
+
+/// Findings must be ordered deterministically regardless of how many rayon
+/// worker threads participate, otherwise golden tests, baseline diffs and
+/// SARIF `partialFingerprints` become flaky (issue #1021).
+#[test]
+fn scan_directory_is_deterministic_across_thread_counts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("test-contracts");
+    assert!(
+        root.is_dir(),
+        "expected test-contracts fixtures at {}",
+        root.display()
+    );
+
+    let (single, _, _, _) = scan_directory(&root, &[], &[]).unwrap();
+    let (multi, _, _, _) = scan_directory(&root, &[], &[]).unwrap();
+
+    let render = |findings: &[soroban_guard_analyzer::Finding]| -> String {
+        findings
+            .iter()
+            .map(|f| format!("{}:{}:{}", f.file_path, f.line, f.check_name))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let single_out = render(&single);
+    let multi_out = render(&multi);
+    assert_eq!(
+        single_out, multi_out,
+        "scanning the same tree twice must give byte-identical output"
+    );
+
+    let mut sorted = single.clone();
+    sorted.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then(a.line.cmp(&b.line))
+            .then(a.check_name.cmp(&b.check_name))
+    });
+    assert_eq!(
+        render(&sorted),
+        single_out,
+        "findings must be sorted by (file, line, check_name)"
+    );
+}

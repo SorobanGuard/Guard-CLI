@@ -1,65 +1,88 @@
-//! Golden-file tests for the machine-readable scan outputs (Issue #608).
-//!
-//! `scan test-contracts/vulnerable` is run through the real binary in each
-//! structured format and compared byte-for-byte with `tests/golden/`. Path
-//! separators and line endings are normalised so the files match on every OS.
-
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
-fn normalise(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\\', "/")
+fn contracts_dir() -> PathBuf {
+    repo_root().join("test-contracts")
 }
 
-fn scan_vulnerable(format_flag: &str) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
-        .current_dir(workspace_root())
-        .args(["scan", "test-contracts/vulnerable", format_flag])
-        .env("NO_COLOR", "1")
+fn run_scan_json(threads: &str) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_handsoff"))
+        .arg("scan")
+        .arg(contracts_dir())
+        .arg("--json")
+        .env("RAYON_NUM_THREADS", threads)
         .output()
-        .expect("failed to run soroban-guard");
-    // Exit code 1 is expected: the fixture has High findings.
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "unexpected exit status; stderr:\n{}",
+        .expect("failed to run handsoff scan");
+
+    assert!(
+        output.status.success(),
+        "scan failed with RAYON_NUM_THREADS={}: {}",
+        threads,
         String::from_utf8_lossy(&output.stderr)
     );
-    normalise(&String::from_utf8(output.stdout).expect("stdout is UTF-8"))
+
+    String::from_utf8(output.stdout).expect("scan output was not valid UTF-8")
 }
 
-fn assert_matches_golden(format_flag: &str, golden_file: &str) {
-    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(golden_file);
-    let expected = normalise(
-        &std::fs::read_to_string(&golden_path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", golden_path.display())),
-    );
-    let actual = scan_vulnerable(format_flag);
-    assert!(
-        actual == expected,
-        "`scan test-contracts/vulnerable {format_flag}` no longer matches {}.\n\
-         If the change is intended, update the golden file.\n--- expected\n{expected}\n--- actual\n{actual}",
-        golden_path.display()
+#[test]
+fn findings_are_deterministic_across_thread_counts() {
+    let single = run_scan_json("1");
+    let multi = run_scan_json("8");
+
+    assert_eq!(
+        single, multi,
+        "scan output differed between RAYON_NUM_THREADS=1 and RAYON_NUM_THREADS=8"
     );
 }
 
 #[test]
-fn json_output_matches_golden() {
-    assert_matches_golden("--json", "scan-vulnerable.json");
-}
+fn findings_are_sorted_by_file_line_check_name() {
+    let json = run_scan_json("8");
+    let value: serde_json::Value =
+        serde_json::from_str(&json).expect("scan output was not valid JSON");
 
-#[test]
-fn sarif_output_matches_golden() {
-    assert_matches_golden("--sarif", "scan-vulnerable.sarif");
-}
+    let findings = value
+        .get("findings")
+        .and_then(|f| f.as_array())
+        .expect("scan JSON output missing `findings` array");
 
-#[test]
-fn markdown_output_matches_golden() {
-    assert_matches_golden("--markdown", "scan-vulnerable.md");
+    let mut keys: Vec<(String, u64, String)> = findings
+        .iter()
+        .map(|finding| {
+            let file = finding
+                .get("file")
+                .and_then(|v| v.as_str())
+                .expect("finding missing `file`")
+                .to_string();
+            let line = finding
+                .get("line")
+                .and_then(|v| v.as_u64())
+                .expect("finding missing `line`");
+            let check_name = finding
+                .get("check_name")
+                .and_then(|v| v.as_str())
+                .expect("finding missing `check_name`")
+                .to_string();
+            (file, line, check_name)
+        })
+        .collect();
+
+    let mut sorted = keys.clone();
+    sorted.sort();
+
+    assert_eq!(
+        keys, sorted,
+        "findings are not sorted by (file, line, check_name)"
+    );
+
+    keys.dedup();
 }

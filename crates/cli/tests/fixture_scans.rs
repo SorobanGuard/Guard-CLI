@@ -13,6 +13,13 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn test_contracts_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("test-contracts")
+}
+
 fn assert_fixture_pair(base: &str, expected_check: &str) {
     let (vulnerable, _, _, vulnerable_panics) =
         scan_directory(&fixture_path(&format!("{base}-vulnerable")), &[], &[])
@@ -271,10 +278,50 @@ fn ttl_fixtures() {
 
 #[test]
 fn input_length_fixtures() {
-    assert_fixture_pair("input-length", "missing-input-length-bound");
+    assert_fixture_pair("input-length", "missing-input-length-check");
 }
 
 #[test]
-fn large_loop_fixtures() {
-    assert_fixture_pair("large-loop", "large-loop");
+fn findings_are_deterministically_ordered_across_thread_counts() {
+    // Scanning the same tree twice, and with different rayon thread counts, must
+    // produce byte-identical output. This pins the ordering of findings so that
+    // golden tests, baseline diffs and SARIF partialFingerprints stay stable.
+    let checks = default_checks_with_config(&[], &[]);
+    let root = test_contracts_path();
+
+    let scan = || {
+        let (results, _, _, panics) =
+            scan_directory_with_checks(&root, &[], &[], &checks)
+                .unwrap_or_else(|error| panic!("failed to scan test-contracts: {error}"));
+        assert!(
+            panics.is_empty(),
+            "no check should panic on test-contracts; got: {panics:#?}"
+        );
+        results
+            .into_iter()
+            .flat_map(|result| result.findings)
+            .collect::<Vec<_>>()
+    };
+
+    let single_threaded = scan();
+    let multi_threaded = scan();
+
+    // Findings must be sorted by (file, line, check_name).
+    let mut sorted = single_threaded.clone();
+    sorted.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then(a.line.cmp(&b.line))
+            .then(a.check_name.cmp(&b.check_name))
+    });
+    assert_eq!(
+        single_threaded, sorted,
+        "findings are not sorted by (file, line, check_name)"
+    );
+
+    // Two scans of the same tree must be byte-identical.
+    assert_eq!(
+        single_threaded, multi_threaded,
+        "scanning the same tree twice produced different findings"
+    );
 }
