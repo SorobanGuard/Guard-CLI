@@ -24,3 +24,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 toml.workspace = true
 notify = "6"
+schemars = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# Used by unit tests for OSC 8 hyperlink capability detection.
+serial_test = "3"
+
+[features]
+schema = ["dep:schemars"]
