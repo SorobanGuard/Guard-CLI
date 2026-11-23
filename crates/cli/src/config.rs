@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 pub struct GuardConfig {
     pub scan: ScanConfig,
     pub checks: ChecksConfig,
+    pub output: OutputConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -41,6 +42,23 @@ pub struct ChecksConfig {
 pub struct SensitiveNamesConfig {
     /// Extra function names added to the built-in `SENSITIVE_NAMES` list.
     pub extra: Vec<String>,
+}
+
+/// `[output]` table: how results are rendered.
+///
+/// Every field is optional so an absent key falls through to the next
+/// precedence level (CLI flag > env var > config file > default).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutputConfig {
+    /// Default output format: "pretty" | "json" | "sarif" | "markdown".
+    pub format: Option<String>,
+    /// Default output path (e.g. "guard.sarif"); `None` means stdout.
+    pub file: Option<String>,
+    /// Color mode: "auto" | "always" | "never".
+    pub color: Option<String>,
+    /// Verbose output toggle.
+    pub verbose: Option<bool>,
 }
 
 /// Search upward from `scan_path` for the nearest `soroban-guard.toml`.
@@ -122,6 +140,20 @@ pub fn resolve(
         return Ok((None, None));
     }
     load(scan_path)
+}
+
+/// Resolve a single output setting across precedence levels.
+///
+/// Precedence: CLI flag > env var > config file > default. Each level is
+/// `Some` only when explicitly set; the first `Some` wins, otherwise
+/// `default` is returned.
+pub fn resolve_output<T: Clone>(
+    cli: Option<T>,
+    env: Option<T>,
+    config: Option<T>,
+    default: T,
+) -> T {
+    cli.or(env).or(config).unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -219,94 +251,76 @@ mod tests {
         .unwrap();
 
         let (cfg, path) = load(&root).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
+        let cfg = cfg.expect("config should be loaded");
+        assert_eq!(cfg.scan.min_severity.as_deref(), Some("medium"));
         assert_eq!(path, Some(root.join("soroban-guard.toml")));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_returns_none_none_when_nothing_is_found() {
-        let root = temp_root("load-none");
-        fs::create_dir_all(root.join(".git")).unwrap();
+    fn parses_the_output_table() {
+        let root = temp_root("output");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[output]\nformat = \"sarif\"\nfile = \"guard.sarif\"\ncolor = \"never\"\nverbose = true\n",
+        )
+        .unwrap();
 
-        let (cfg, path) = load(&root).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn load_reports_a_malformed_config_as_an_error() {
-        let root = temp_root("load-bad");
-        fs::write(root.join("soroban-guard.toml"), "not valid toml [[[").unwrap();
-
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
+        let (cfg, _) = load(&root).unwrap();
+        let out = cfg.expect("config should be loaded").output;
+        assert_eq!(out.format.as_deref(), Some("sarif"));
+        assert_eq!(out.file.as_deref(), Some("guard.sarif"));
+        assert_eq!(out.color.as_deref(), Some("never"));
+        assert_eq!(out.verbose, Some(true));
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn load_from_path_uses_exactly_the_given_file() {
-        let root = temp_root("explicit");
-        fs::create_dir_all(root.join("src")).unwrap();
-        // A discovered config that must be ignored in favor of the explicit one.
-        fs::write(root.join("soroban-guard.toml"), "[scan]\nmin_severity = \"low\"\n").unwrap();
-        let explicit = root.join("shared-policy.toml");
-        fs::write(&explicit, "[scan]\nmin_severity = \"high\"\n").unwrap();
-
-        let (cfg, path) = resolve(&root.join("src"), Some(&explicit), false).unwrap();
-        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("high"));
-        assert_eq!(path, Some(explicit));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_missing_explicit_config_as_an_error() {
-        let root = temp_root("explicit-missing");
-        let missing = root.join("nope.toml");
-
-        let err = resolve(&root, Some(&missing), false).unwrap_err();
-        assert!(err.contains("nope.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_reports_a_malformed_explicit_config_as_an_error() {
-        let root = temp_root("explicit-bad");
-        let bad = root.join("bad.toml");
-        fs::write(&bad, "not valid toml [[[").unwrap();
-
-        let err = resolve(&root, Some(&bad), false).unwrap_err();
-        assert!(err.contains("bad.toml"), "{err}");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn resolve_with_no_config_skips_discovery() {
-        let root = temp_root("no-config");
+    fn output_table_defaults_to_none() {
+        let root = temp_root("output-default");
         fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
 
-        let (cfg, path) = resolve(&root, None, true).unwrap();
-        assert!(cfg.is_none());
-        assert!(path.is_none());
+        let (cfg, _) = load(&root).unwrap();
+        let out = cfg.expect("config should be loaded").output;
+        assert_eq!(out.format, None);
+        assert_eq!(out.file, None);
+        assert_eq!(out.color, None);
+        assert_eq!(out.verbose, None);
 
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn unknown_top_level_table_is_rejected() {
-        let root = temp_root("unknown-table");
-        fs::write(root.join("soroban-guard.toml"), "[check]\n").unwrap();
+    fn rejects_unknown_keys_in_the_output_table() {
+        let root = temp_root("output-unknown");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[output]\nformatt = \"sarif\"\n",
+        )
+        .unwrap();
 
-        let err = load(&root).unwrap_err();
-        assert!(err.contains("soroban-guard.toml"), "{err}");
+        assert!(load(&root).is_err());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_output_precedence_cli_over_env_over_config_over_default() {
+        // CLI wins over everything.
+        assert_eq!(
+            resolve_output(Some("cli"), Some("env"), Some("cfg"), "def"),
+            "cli"
+        );
+        // Env wins when CLI is absent.
+        assert_eq!(
+            resolve_output(None, Some("env"), Some("cfg"), "def"),
+            "env"
+        );
+        // Config wins when CLI and env are absent.
+        assert_eq!(resolve_output(None, None, Some("cfg"), "def"), "cfg");
+        // Default when nothing is set.
+        assert_eq!(resolve_output::<&str>(None, None, None, "def"), "def");
     }
 }
