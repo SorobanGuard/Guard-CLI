@@ -1,0 +1,16 @@
+[book]
+title = "Handsoff"
+authors = ["Handsoff contributors"]
+description = "Documentation for Handsoff"
+src = "docs"
+language = "en"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+no-section-label = true
+
+[output.linkcheck]
+optional = true
