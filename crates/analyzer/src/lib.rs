@@ -660,6 +660,113 @@ pub fn scan_directory(
     Ok((findings, files_scanned, files_skipped, check_panics))
 }
 
+/// Like `run_checks_for_file` but also returns findings that were suppressed by
+/// `// soroban-guard: allow(...)` annotations (#1007).
+fn run_checks_for_file_with_suppressed(
+    path: &Path,
+    root: &Path,
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<Finding>, Vec<Finding>, Vec<ScanError>), ScanError> {
+    let content = std::fs::read_to_string(path).map_err(|e| ScanError::IoRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let syn_file = syn::parse_file(&content).map_err(|e| ScanError::Parse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let file_label = file_label(path, root);
+    let fn_spans = build_fn_spans(&syn_file);
+    let suppressions = parse_suppressions(&content, &fn_spans);
+
+    let mut active: Vec<Finding> = Vec::new();
+    let mut suppressed: Vec<Finding> = Vec::new();
+    let mut check_panics: Vec<ScanError> = Vec::new();
+    for check in checks {
+        let check_name = check.name().to_string();
+        match catch_unwind(AssertUnwindSafe(|| check.run(&syn_file, &content))) {
+            Ok(mut hits) => {
+                for finding in &mut hits {
+                    finding.file_path.clone_from(&file_label);
+                }
+                for finding in hits {
+                    if is_suppressed(&finding, &suppressions, &fn_spans) {
+                        suppressed.push(finding);
+                    } else {
+                        active.push(finding);
+                    }
+                }
+            }
+            Err(payload) => {
+                let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                    msg.to_string()
+                } else if let Some(msg) = payload.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "panic payload was not a string".to_string()
+                };
+                check_panics.push(ScanError::CheckPanic {
+                    check: check_name,
+                    path: path.to_path_buf(),
+                    message,
+                });
+            }
+        }
+    }
+
+    active.sort_by_key(|f| f.line);
+    suppressed.sort_by_key(|f| f.line);
+    Ok((active, suppressed, check_panics))
+}
+
+/// Like [`scan_directory_with_checks`] but also returns suppressed findings (#1007).
+///
+/// Returns `(active_results, suppressed_findings, files_scanned, files_skipped, check_panics)`.
+/// `active_results` groups un-suppressed findings by file; `suppressed_findings` is a flat list.
+pub fn scan_directory_with_checks_and_suppressed(
+    root: &Path,
+    excludes: &[String],
+    includes: &[String],
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<FileScanResult>, Vec<Finding>, usize, usize, Vec<ScanError>), ScanError> {
+    let root = canonicalize_root(root)?;
+    let (paths, files_skipped) = collect_rust_paths(&root, excludes, includes)?;
+    let files_scanned = paths.len();
+
+    let per_file = paths
+        .par_iter()
+        .map(|path| {
+            let (active, suppressed, check_panics) =
+                run_checks_for_file_with_suppressed(path, &root, checks)?;
+            let file_label = file_label(path, &root);
+            Ok((
+                FileScanResult {
+                    file_path: file_label,
+                    findings: active,
+                },
+                suppressed,
+                check_panics,
+            ))
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?;
+
+    let mut results: Vec<FileScanResult> = per_file.iter().map(|(r, _, _)| r.clone()).collect();
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
+    let mut suppressed_all: Vec<Finding> = per_file
+        .iter()
+        .flat_map(|(_, s, _)| s.iter().cloned())
+        .collect();
+    suppressed_all.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.line.cmp(&b.line)));
+
+    let check_panics: Vec<ScanError> = per_file
+        .into_iter()
+        .flat_map(|(_, _, p)| p)
+        .collect();
+
+    Ok((results, suppressed_all, files_scanned, files_skipped, check_panics))
+}
+
 /// Like [`scan_directory`] but runs `checks` instead of [`default_checks`].
 ///
 /// Returns `(results, files_scanned, files_skipped, check_panics)` where each element of
@@ -700,44 +807,6 @@ pub fn scan_directory_with_checks(
         .collect();
 
     Ok((results, files_scanned, files_skipped, check_panics))
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
-}
-
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
-    }
 }
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.

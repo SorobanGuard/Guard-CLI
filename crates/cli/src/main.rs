@@ -4,7 +4,10 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use soroban_guard_analyzer::{is_ignored_path, scan_directory_with_checks, ScanError};
+use soroban_guard_analyzer::{
+    is_ignored_path, scan_directory_with_checks, scan_directory_with_checks_and_suppressed,
+    ScanError,
+};
 use soroban_guard_checks::{default_checks, default_checks_with_config, Finding, Severity};
 use std::collections::HashSet;
 use std::fs;
@@ -76,6 +79,17 @@ enum Commands {
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
+        /// Print only the severity histogram and exit status — no per-finding output.
+        /// Mutually exclusive with --quiet.
+        #[arg(long, conflicts_with = "quiet")]
+        summary_only: bool,
+        /// Keep only findings on lines changed since this git ref (e.g. `origin/main`).
+        /// Runs `git diff -U0 <ref>...HEAD` to determine changed line ranges.
+        #[arg(long, value_name = "GIT_REF")]
+        diff_base: Option<String>,
+        /// Also print findings silenced by `// soroban-guard: allow(...)` annotations.
+        #[arg(long)]
+        show_suppressed: bool,
     },
     /// List the checks that are enabled by default
     ListChecks {
@@ -104,6 +118,28 @@ enum Commands {
     },
     /// Print version and build information
     Version,
+    /// Insert `// soroban-guard: allow(...)` comments for current findings (#996).
+    ///
+    /// Re-scans the target path and writes a suppression comment directly above
+    /// each unsuppressed finding's function (or line, for non-function findings).
+    /// Idempotent: existing suppression comments are not duplicated.
+    /// Use `--dry-run` to preview the diff without writing any files.
+    Suppress {
+        /// Path to the contract crate or folder to scan
+        path: Option<PathBuf>,
+        /// Only suppress findings from this check (may be repeated; default: all)
+        #[arg(long, value_name = "CHECK")]
+        check: Vec<String>,
+        /// A short reason to include in the suppression comment
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Print a unified diff instead of writing files
+        #[arg(long)]
+        dry_run: bool,
+        /// Disable colored output
+        #[arg(long)]
+        no_color: bool,
+    },
 }
 
 /// Parameters passed to the core scan-and-print routine.
@@ -119,6 +155,9 @@ struct ScanOptions {
     exclude: Vec<String>,
     includes: Vec<String>,
     max_findings: usize,
+    summary_only: bool,
+    diff_base: Option<String>,
+    show_suppressed: bool,
 }
 
 /// Whether scan results should be printed. `--quiet` suppresses output only while the
@@ -128,6 +167,58 @@ fn should_print_results(quiet: bool, should_fail: bool) -> bool {
     !quiet || should_fail
 }
 
+/// Parse `git diff -U0 <base>...HEAD` output into a map of file → list of (start, end) line ranges.
+fn parse_diff_ranges(diff_output: &str) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
+    let mut result: std::collections::HashMap<String, Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
+    let mut current_file: Option<String> = None;
+    for line in diff_output.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            current_file = Some(rest.to_string());
+        } else if line.starts_with("@@ ") {
+            // @@ -old_start[,old_count] +new_start[,new_count] @@
+            if let Some(ref file) = current_file {
+                if let Some(new_part) = line.split_whitespace().nth(2) {
+                    let new_part = new_part.trim_start_matches('+');
+                    let (start_str, count_str) = if let Some(comma) = new_part.find(',') {
+                        (&new_part[..comma], &new_part[comma + 1..])
+                    } else {
+                        (new_part, "1")
+                    };
+                    if let (Ok(start), Ok(count)) =
+                        (start_str.parse::<usize>(), count_str.parse::<usize>())
+                    {
+                        if count > 0 {
+                            let end = start + count - 1;
+                            result.entry(file.clone()).or_default().push((start, end));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Filter findings to only those whose line falls within any changed range for their file.
+fn filter_findings_by_diff(
+    findings: Vec<Finding>,
+    ranges: &std::collections::HashMap<String, Vec<(usize, usize)>>,
+) -> Vec<Finding> {
+    findings
+        .into_iter()
+        .filter(|f| {
+            if let Some(file_ranges) = ranges.get(&f.file_path) {
+                file_ranges
+                    .iter()
+                    .any(|(start, end)| f.line >= *start && f.line <= *end)
+            } else {
+                false
+            }
+        })
+        .collect()
+}
+
 /// Run a single scan and print its results.
 /// Returns the exit code that would normally be passed to `std::process::exit`
 /// (0 = pass, 1 = findings above threshold, 2 = I/O error).
@@ -135,9 +226,64 @@ fn run_scan(
     opts: &ScanOptions,
     active_checks: &[Box<dyn soroban_guard_checks::Check + Send + Sync>],
 ) -> i32 {
-    match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
-        Ok((results, files_scanned, files_skipped, _check_panics)) => {
-            let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
+    // When --show-suppressed is set, use the variant that also returns suppressed findings.
+    let scan_result = if opts.show_suppressed {
+        scan_directory_with_checks_and_suppressed(
+            &opts.path,
+            &opts.exclude,
+            &opts.includes,
+            active_checks,
+        )
+        .map(|(results, suppressed, fs, fsk, panics)| {
+            (results, Some(suppressed), fs, fsk, panics)
+        })
+    } else {
+        scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks).map(
+            |(results, fs, fsk, panics)| (results, None, fs, fsk, panics),
+        )
+    };
+
+    match scan_result {
+        Ok((results, suppressed_opt, files_scanned, files_skipped, _check_panics)) => {
+            let mut findings: Vec<Finding> =
+                results.into_iter().flat_map(|r| r.findings).collect();
+
+            // Apply --diff-base filter: keep only findings on changed lines.
+            let diff_ranges = if let Some(ref base) = opts.diff_base {
+                match std::process::Command::new("git")
+                    .args(["diff", "-U0", &format!("{base}...HEAD")])
+                    .output()
+                {
+                    Ok(out) if out.status.success() => {
+                        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+                        Some(parse_diff_ranges(&text))
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        eprintln!("{} git diff failed: {}", "error:".red().bold(), stderr.trim());
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("{} could not run git: {}", "error:".red().bold(), e);
+                        return 2;
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(ref ranges) = diff_ranges {
+                let before = findings.len();
+                findings = filter_findings_by_diff(findings, ranges);
+                if opts.verbose {
+                    eprintln!(
+                        "note: --diff-base filtered {} finding(s) outside changed lines ({} remain).",
+                        before - findings.len(),
+                        findings.len()
+                    );
+                }
+            }
+
             let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
 
             // Produce the serialized payload for the selected structured format,
@@ -180,6 +326,11 @@ fn run_scan(
                         return 2;
                     }
                 }
+            } else if opts.summary_only {
+                // --summary-only: print just the histogram line, skip per-finding output.
+                if should_print_results(opts.quiet, should_fail) {
+                    println!("{}", summary_text(&findings, files_scanned));
+                }
             } else if should_print_results(opts.quiet, should_fail) {
                 let (display, truncated) = truncate(&findings, opts.max_findings);
                 print_pretty(
@@ -189,6 +340,27 @@ fn run_scan(
                     opts.path.display().to_string(),
                     truncated,
                 );
+                // --show-suppressed: print suppressed findings after the main output.
+                if opts.show_suppressed {
+                    if let Some(ref suppressed) = suppressed_opt {
+                        if !suppressed.is_empty() {
+                            println!(
+                                "  {} {} suppressed finding(s):",
+                                "note:".dimmed(),
+                                suppressed.len()
+                            );
+                            for f in suppressed {
+                                println!(
+                                    "    {} {}  {} (suppressed by annotation)",
+                                    format!("{}:{}", f.file_path, f.line).dimmed(),
+                                    f.check_name.dimmed(),
+                                    f.description.dimmed()
+                                );
+                            }
+                            println!();
+                        }
+                    }
+                }
             }
 
             if opts.verbose {
@@ -313,6 +485,9 @@ fn main() {
             watch,
             no_clear,
             max_findings,
+            summary_only,
+            diff_base,
+            show_suppressed,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
@@ -425,6 +600,9 @@ fn main() {
                 exclude: exclude.clone(),
                 includes: include.clone(),
                 max_findings,
+                summary_only,
+                diff_base: diff_base.clone(),
+                show_suppressed,
             };
 
             // Run the initial scan.
@@ -632,6 +810,178 @@ fn main() {
                 std::env::consts::ARCH,
                 std::env::consts::OS
             );
+        }
+        Commands::Suppress {
+            path,
+            check,
+            reason,
+            dry_run,
+            no_color,
+        } => {
+            if no_color || std::env::var_os("NO_COLOR").is_some() {
+                colored::control::set_override(false);
+            }
+
+            // Resolve scan path.
+            let scan_path = if let Some(p) = path {
+                p
+            } else {
+                let cfg = config::load(&PathBuf::from("."))
+                    .ok()
+                    .and_then(|(c, _)| c)
+                    .unwrap_or_default();
+                if let Some(p) = cfg.scan.path {
+                    PathBuf::from(p)
+                } else {
+                    eprintln!(
+                        "{} no scan path provided and none found in soroban-guard.toml",
+                        "error:".red().bold()
+                    );
+                    std::process::exit(2);
+                }
+            };
+
+            let active_checks = default_checks_with_config(&[], &[]);
+            let results = match scan_directory_with_checks(
+                &scan_path,
+                &[],
+                &[],
+                &active_checks,
+            ) {
+                Ok((r, _, _, _)) => r,
+                Err(e) => {
+                    eprintln!("{} {}", "error:".red().bold(), e);
+                    std::process::exit(2);
+                }
+            };
+
+            let mut findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
+            // Filter by --check if specified.
+            if !check.is_empty() {
+                findings.retain(|f| check.contains(&f.check_name));
+            }
+
+            if findings.is_empty() {
+                println!("No unsuppressed findings to suppress.");
+                return;
+            }
+
+            // Group findings by absolute file path.
+            let mut by_file: std::collections::HashMap<String, Vec<&Finding>> =
+                std::collections::HashMap::new();
+            for f in &findings {
+                by_file.entry(f.file_path.clone()).or_default().push(f);
+            }
+
+            let comment_suffix = reason
+                .as_deref()
+                .map(|r| format!(" // {r}"))
+                .unwrap_or_default();
+
+            let mut total_inserted = 0usize;
+            let mut file_paths: Vec<String> = by_file.keys().cloned().collect();
+            file_paths.sort();
+
+            for rel_path in &file_paths {
+                // Resolve relative path against the scan root.
+                let abs_path = scan_path.join(rel_path);
+                let abs_path = if abs_path.exists() {
+                    abs_path
+                } else {
+                    PathBuf::from(rel_path)
+                };
+
+                let source = match fs::read_to_string(&abs_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("warning: could not read {}: {}", abs_path.display(), e);
+                        continue;
+                    }
+                };
+
+                let mut lines: Vec<String> = source.lines().map(|l| l.to_string()).collect();
+                // Findings for this file, sorted descending by line so insertions don't
+                // shift later line numbers.
+                let mut file_findings: Vec<&Finding> =
+                    by_file[rel_path.as_str()].to_vec();
+                file_findings.sort_by(|a, b| b.line.cmp(&a.line));
+
+                // Deduplicate: skip if the line above the finding already has an allow for
+                // this check.
+                let mut inserted_this_file = 0usize;
+                for f in file_findings {
+                    if f.line == 0 || f.line > lines.len() {
+                        continue;
+                    }
+                    let insert_at = f.line - 1; // 0-indexed line before the finding
+                    // Determine indentation from the finding's own line.
+                    let indent = lines[insert_at]
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .collect::<String>();
+                    let allow_comment = format!(
+                        "{}// soroban-guard: allow({}){comment_suffix}",
+                        indent,
+                        f.check_name
+                    );
+                    // Idempotency: skip if this exact allow is already on the line above.
+                    let already_suppressed = insert_at > 0
+                        && lines[insert_at - 1].trim() == allow_comment.trim();
+                    if already_suppressed {
+                        continue;
+                    }
+                    lines.insert(insert_at, allow_comment);
+                    inserted_this_file += 1;
+                }
+
+                if inserted_this_file == 0 {
+                    continue;
+                }
+                total_inserted += inserted_this_file;
+
+                let new_source = lines.join("\n")
+                    + if source.ends_with('\n') { "\n" } else { "" };
+
+                if dry_run {
+                    // Emit a minimal unified diff.
+                    let orig_lines: Vec<&str> = source.lines().collect();
+                    let new_lines: Vec<&str> = new_source.lines().collect();
+                    println!("--- {}", abs_path.display());
+                    println!("+++ {}", abs_path.display());
+                    // Simple line-by-line diff (hunk headers omitted for brevity).
+                    let mut oi = 0usize;
+                    let mut ni = 0usize;
+                    while oi < orig_lines.len() || ni < new_lines.len() {
+                        match (orig_lines.get(oi), new_lines.get(ni)) {
+                            (None, None) => break,
+                            (None, Some(n)) => {
+                                println!("{}", format!("+{n}").green());
+                                ni += 1;
+                            }
+                            (Some(o), Some(n)) if o == n => {
+                                oi += 1;
+                                ni += 1;
+                            }
+                            (Some(_), Some(n)) if orig_lines[oi] != *n => {
+                                println!("{}", format!("+{n}").green());
+                                ni += 1;
+                            }
+                            (Some(o), _) => {
+                                println!("{}", format!("-{o}").red());
+                                oi += 1;
+                            }
+                        }
+                    }
+                } else if let Err(e) = fs::write(&abs_path, &new_source) {
+                    eprintln!("{} could not write {}: {}", "error:".red().bold(), abs_path.display(), e);
+                }
+            }
+
+            if dry_run {
+                println!("(dry run) Would insert {} suppression comment(s).", total_inserted);
+            } else {
+                println!("Inserted {} suppression comment(s).", total_inserted);
+            }
         }
     }
 }
