@@ -1,0 +1,14 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+# The check registry (names, severities, one-liners, long descriptions)
+# lives in the main crate; reuse it instead of duplicating metadata.
+slopguard = { path = "..", default-features = false }

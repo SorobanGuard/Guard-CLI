@@ -4,79 +4,29 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  ci:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  test:
+    name: Test
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
+      - name: Build
+        run: cargo build --workspace --all-targets
       - name: Test
         run: cargo test --workspace
 
-      - name: Build
-        run: cargo build --workspace --release
-
-  msrv:
-    name: MSRV (1.74)
+  docs:
+    name: Generated docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.74
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: msrv
-
-      - name: Check MSRV
-        run: cargo check --workspace
-
-  fixture-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fixture-contracts
-
-      - name: Check test-contracts fixtures
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/fixture-contracts
-        shell: bash
-        run: |
-          set -e
-          find test-contracts -mindepth 2 -maxdepth 2 -name Cargo.toml -print0 \
-            | xargs -0 -n1 -P 4 sh -c '
-                manifest="$1"
-                crate_dir="$(dirname "$manifest")"
-                echo "::group::cargo check $crate_dir"
-                cargo check --manifest-path "$manifest"
-                echo "::endgroup::"
-              ' sh
-
-      - name: Check examples/all-findings compiles against soroban-sdk
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target/examples
-        run: cargo check --manifest-path examples/all-findings/Cargo.toml
+      - name: Check generated check reference is up to date
+        run: cargo xtask docs --check

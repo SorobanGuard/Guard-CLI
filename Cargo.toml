@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cli", "crates/analyzer", "crates/checks"]
+members = ["crates/cli", "crates/analyzer", "crates/checks", "xtask"]
 exclude = ["test-contracts", "examples/all-findings"]
 
 [workspace.package]
