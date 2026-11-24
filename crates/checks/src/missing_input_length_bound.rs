@@ -1,4 +1,4 @@
-use crate::util::contractimpl_functions_excluding_test;
+use crate::util::{contractimpl_functions_excluding_test, is_exported_entrypoint};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -17,7 +17,7 @@ impl Check for MissingInputLengthBoundCheck {
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
-            if matches!(method.vis, syn::Visibility::Public(_)) {
+            if is_exported_entrypoint(method) {
                 let bytes_vec_params = find_bytes_vec_params(&method.sig.inputs);
                 for (param_name, _) in bytes_vec_params {
                     if !has_length_check(&method.block, &param_name) {

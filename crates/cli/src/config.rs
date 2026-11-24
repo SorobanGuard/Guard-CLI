@@ -56,10 +56,20 @@ pub struct SensitiveNamesConfig {
 /// Returns `None` when no config file is found before either stopping
 /// condition is reached.
 pub fn find_config_path(scan_path: &Path) -> Option<PathBuf> {
-    let mut dir = if scan_path.is_file() {
-        scan_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
-    } else {
+    // Resolve a relative path against the process cwd first: climbing with
+    // `Path::parent()` on a relative path like `.` or `src` bottoms out at
+    // `""` (the cwd) and then `None`, which would stop the upward search at
+    // the cwd instead of continuing to the `.git` boundary.
+    let resolved = if scan_path.is_absolute() {
         scan_path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(scan_path)
+    };
+
+    let mut dir = if resolved.is_file() {
+        resolved.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+    } else {
+        resolved
     };
 
     loop {
@@ -295,6 +305,62 @@ mod tests {
         let (cfg, path) = resolve(&root, None, true).unwrap();
         assert!(cfg.is_none());
         assert!(path.is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Run `f` with the process cwd set to `dir`, restoring the original cwd
+    /// afterwards. Tests that touch the cwd are serialised by a mutex so they
+    /// can't observe each other's `set_current_dir` calls.
+    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        use std::sync::Mutex;
+        static CWD_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::env::set_current_dir(&original).unwrap();
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    #[test]
+    fn finds_config_from_a_relative_dot_path() {
+        let root = temp_root("rel-dot");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
+
+        let found = with_cwd(&root.join("a/b"), || find_config_path(Path::new(".")));
+        assert_eq!(found, Some(root.join("soroban-guard.toml")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finds_config_from_a_relative_subdirectory_path() {
+        let root = temp_root("rel-src");
+        fs::create_dir_all(root.join("a/b/src")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
+
+        let found = with_cwd(&root.join("a/b"), || find_config_path(Path::new("src")));
+        assert_eq!(found, Some(root.join("soroban-guard.toml")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finds_config_from_a_relative_parent_path() {
+        let root = temp_root("rel-parent");
+        fs::create_dir_all(root.join("a/b/x")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("soroban-guard.toml"), "[scan]\n").unwrap();
+
+        let found = with_cwd(&root.join("a/b"), || find_config_path(Path::new("../x")));
+        assert_eq!(found, Some(root.join("soroban-guard.toml")));
 
         fs::remove_dir_all(root).unwrap();
     }

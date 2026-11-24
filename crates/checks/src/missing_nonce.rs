@@ -1,4 +1,6 @@
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{
+    contractimpl_functions_excluding_test, is_exported_entrypoint, receiver_chain_contains_storage,
+};
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
 use syn::FnArg;
@@ -15,8 +17,8 @@ impl Check for MissingNonceCheck {
 
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
-            if matches!(method.vis, syn::Visibility::Public(_)) {
+        for (item_impl, method) in contractimpl_functions_excluding_test(file) {
+            if is_exported_entrypoint(item_impl, method) {
                 let has_storage_write = contains_storage_write(&method.block);
                 let has_address_param = contains_address_param(&method.sig.inputs);
                 let has_nonce = contains_nonce_reference(&method.block);
