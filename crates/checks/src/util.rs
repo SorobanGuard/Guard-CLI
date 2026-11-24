@@ -307,6 +307,29 @@ pub(crate) fn receiver_is_auth_gate(
     }
 }
 
+/// Does this call emit a contract event?
+///
+/// Recognises both the legacy `env.events().publish(topics, data)` form and the
+/// `#[contractevent]` form `MyEvent { .. }.publish(&env)` (current soroban-sdk), where
+/// `publish` takes the function's `Env` parameter (`env_name`) as its only argument.
+pub(crate) fn is_event_publish_call(m: &syn::ExprMethodCall, env_name: &str) -> bool {
+    if m.method != "publish" {
+        return false;
+    }
+    if receiver_chain_contains_events(&m.receiver) {
+        return true;
+    }
+    fn is_env(expr: &Expr, env_name: &str) -> bool {
+        match expr {
+            Expr::Path(p) => p.path.is_ident(env_name),
+            Expr::Reference(r) => is_env(&r.expr, env_name),
+            Expr::Paren(p) => is_env(&p.expr, env_name),
+            _ => false,
+        }
+    }
+    m.args.len() == 1 && m.args.first().is_some_and(|a| is_env(a, env_name))
+}
+
 /// Does the receiver chain of `expr` contain a call to `.temporary()`?
 pub(crate) fn receiver_chain_contains_temporary(expr: &Expr) -> bool {
     receiver_chain_contains(expr, "temporary")
@@ -454,4 +477,50 @@ fn collect_contractimpl_fns_with_type<'a>(
             _ => {}
         }
     }
+}
+
+/// 1-based, inclusive line ranges of test-only code: modules gated by
+/// `#[cfg(test)]` or named `tests` / `test` (the same rule as
+/// [`crate::util::contractimpl_functions_excluding_test`]), and any other item
+/// carrying `#[cfg(test)]` or `#[test]`. Spans include the item's attributes.
+pub(crate) fn test_only_line_ranges(file: &syn::File) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    collect_test_ranges(&file.items, &mut out);
+    out
+}
+
+fn collect_test_ranges(items: &[syn::Item], out: &mut Vec<(usize, usize)>) {
+    for item in items {
+        let attrs: &[syn::Attribute] = match item {
+            syn::Item::Mod(m) => {
+                if is_cfg_test(&m.attrs) || m.ident == "tests" || m.ident == "test" {
+                    out.push(line_range(item));
+                } else if let Some((_, nested)) = &m.content {
+                    collect_test_ranges(nested, out);
+                }
+                continue;
+            }
+            syn::Item::Fn(f) => &f.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            syn::Item::Const(c) => &c.attrs,
+            syn::Item::Static(st) => &st.attrs,
+            syn::Item::Struct(st) => &st.attrs,
+            syn::Item::Enum(e) => &e.attrs,
+            _ => continue,
+        };
+        if is_cfg_test(attrs) || attrs.iter().any(|a| a.path().is_ident("test")) {
+            out.push(line_range(item));
+        }
+    }
+}
+
+fn line_range(item: &syn::Item) -> (usize, usize) {
+    let span = syn::spanned::Spanned::span(item);
+    (span.start().line, span.end().line)
+}
+
+pub(crate) fn in_any_range(ranges: &[(usize, usize)], line: usize) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| line >= *start && line <= *end)
 }

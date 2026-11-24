@@ -2,8 +2,8 @@
 //! Detection of state-changing functions (storage writes) without event emission.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_events,
-    receiver_chain_contains_storage,
+    contractimpl_functions_excluding_test, env_param_name, is_event_publish_call,
+    is_storage_mutation_call,
 };
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
@@ -23,7 +23,10 @@ impl Check for MissingEventEmissionCheck {
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
-            let mut scan = FuncBodyScan::default();
+            let mut scan = FuncBodyScan {
+                env_name: env_param_name(&method.sig).unwrap_or_else(|| "env".to_string()),
+                ..FuncBodyScan::default()
+            };
             scan.visit_block(&method.block);
             if !scan.storage_write || scan.event_emitted {
                 continue;
@@ -55,23 +58,10 @@ impl Check for MissingEventEmissionCheck {
     }
 }
 
-fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    if !matches!(
-        name.as_str(),
-        "set" | "remove" | "extend_ttl" | "bump" | "append"
-    ) {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
-}
-
-fn is_event_publish_call(m: &ExprMethodCall) -> bool {
-    m.method == "publish" && receiver_chain_contains_events(&m.receiver)
-}
-
 #[derive(Default)]
 struct FuncBodyScan {
+    /// Name of the method's `Env` parameter, for `MyEvent { .. }.publish(&env)`.
+    env_name: String,
     storage_write: bool,
     event_emitted: bool,
 }
@@ -81,7 +71,7 @@ impl<'ast> Visit<'ast> for FuncBodyScan {
         if is_storage_mutation_call(i) {
             self.storage_write = true;
         }
-        if is_event_publish_call(i) {
+        if is_event_publish_call(i, &self.env_name) {
             self.event_emitted = true;
         }
         visit::visit_expr_method_call(self, i);
@@ -151,5 +141,78 @@ impl Contract {
         let file = parse_file(src).unwrap();
         let findings = MissingEventEmissionCheck.run(&file, src);
         assert!(findings.is_empty());
+    }
+
+    /// #1060 / #603: `#[contractevent]` structs emit with `.publish(&env)`.
+    #[test]
+    fn passes_with_contractevent_publish() {
+        let src = r#"
+use soroban_sdk::{contract, contractevent, contractimpl, symbol_short, Address, Env};
+
+#[contractevent]
+pub struct Deposited {
+    #[topic]
+    pub from: Address,
+    pub amount: i128,
+}
+
+#[contract]
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn deposit(env: Env, from: Address, amount: i128) {
+        env.storage().persistent().set(&from, &amount);
+        Deposited { from, amount }.publish(&env);
+    }
+
+    pub fn deposit_renamed_env(e: Env, from: Address, amount: i128) {
+        e.storage().persistent().set(&from, &amount);
+        let event = Deposited { from, amount };
+        event.publish(&e);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = MissingEventEmissionCheck.run(&file, src);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    /// A `publish` that does not take the method's `Env` is not an event emission.
+    #[test]
+    fn flags_unrelated_publish_method() {
+        let src = r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct Contract;
+#[contractimpl]
+impl Contract {
+    pub fn set(env: Env, feed: Feed, v: i128) {
+        env.storage().instance().set(&symbol_short!("v"), &v);
+        feed.publish(v);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        assert_eq!(MissingEventEmissionCheck.run(&file, src).len(), 1);
+    }
+
+    /// #1060 / #731: extending a TTL changes no state, so no event is needed.
+    #[test]
+    fn passes_extend_ttl_only_function() {
+        let src = r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct Contract;
+#[contractimpl]
+impl Contract {
+    pub fn keep_alive(env: Env) {
+        env.storage().instance().extend_ttl(100, 1000);
+        env.storage().persistent().extend_ttl(&symbol_short!("bal"), 100, 1000);
+        env.storage().persistent().bump(&symbol_short!("bal"), 100, 1000);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let findings = MissingEventEmissionCheck.run(&file, src);
+        assert!(findings.is_empty(), "{findings:#?}");
     }
 }

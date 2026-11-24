@@ -882,7 +882,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         severity: "medium",
         short: "Flags discarded cross-contract call return values",
         rule: "Cross-contract invocation result is discarded",
-        long: Some("Reports bare invoke_contract statements whose return values are discarded."),
+        long: Some("Reports fallible cross-contract calls (try_invoke_contract, try_* client methods) whose Result is discarded. Plain invoke_contract traps on failure, so it is not reported."),
     },
     CheckMeta {
         name: "missing-balance-check",
@@ -931,7 +931,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         severity: "high",
         short: "Flags upgrade entrypoints without authorization",
         rule: "Contract upgrade entrypoint lacks an authorization gate",
-        long: Some("Reports contract upgrade entrypoints that swap the contract WASM without an authorization gate."),
+        long: Some("Reports exported methods that call deployer().update_current_contract_wasm(..) without an authorization gate before it."),
     },
     CheckMeta {
         name: "unprotected-token-mint",

@@ -161,6 +161,8 @@ Names like `set_owner` strongly suggest privilege; without any auth call the sca
 
 Files that contain `#[contract]` or `#[contractimpl]` and also import from `std` with paths such as `use std::...` or `use ::std::...`.
 
+Lines inside test-only code are skipped: `#[cfg(test)]` / `#[cfg(all(test, …))]` modules and items, modules named `test` / `tests`, and `#[test]` functions. Those build for the host, where `std` is available, so the usual `#[cfg(test)] mod test { extern crate std; use std::println; … }` in a `#![no_std]` `lib.rs` is fine. This uses the same test-range helper as `hardcoded-address`.
+
 **Why it matters**
 
 Soroban contracts compile to WASM with `#![no_std]`. Importing from `std` causes a compile error for WASM targets and indicates that the contract cannot be deployed as-is.
@@ -310,7 +312,7 @@ Integer division truncates the fractional part, which can lead to precision loss
 
 **What it detects**
 
-In `#[contractimpl]` methods: storage mutations (`set`, `remove`, `extend_ttl`, `bump`, `append`) that occur in a function body that contains no call to `env.events().publish()`.
+In `#[contractimpl]` methods: storage mutations (`set`, `remove`, `append`) that occur in a function body that emits no event. Both event APIs count as an emission: `env.events().publish(topics, data)` and the `#[contractevent]` form `MyEvent { .. }.publish(&env)` (a `publish` call whose only argument is the method's `Env` parameter). TTL operations (`extend_ttl` / `bump`) change no stored value, so a function that only extends TTLs needs no event.
 
 **Why it matters**
 
@@ -442,15 +444,32 @@ Without a one-time guard, an attacker can call `initialize` again to overwrite t
 
 **What it detects**
 
-Inside `#[contractimpl]` methods, any call to `env.invoke_contract(…)` or `env.invoke_contract_check(…)` whose return value is silently discarded (standalone expression statement, bound to `_`, or bound to an unreferenced variable).
+Inside `#[contractimpl]` methods, a **fallible** cross-contract call whose `Result` is discarded: a bare expression statement, bound to `_` / `_name`, or bound to a variable that is never read. Fallible calls are:
+
+- `env.try_invoke_contract(…)`;
+- `try_*` methods on a contract client — an expression or `let` binding built with `<X>Client::new(…)`, e.g. `token::Client::new(&env, &id).try_transfer(…)` or a generated `FooClient`'s `try_*` methods.
+
+Plain `env.invoke_contract(…)` / `invoke_contract_check(…)` are **not** reported: they return `T` and trap the whole transaction if the callee fails, so discarding their (often unit) return value hides no failure.
+
+```rust
+// Finding: the transfer may have failed, and nothing looks at the Result.
+let _ = token::Client::new(&env, &tok).try_transfer(&from, &to, &amount);
+
+// No finding: the Result is inspected.
+if client.try_transfer(&from, &to, &amount).is_err() { return false; }
+
+// No finding: invoke_contract traps on failure.
+env.invoke_contract::<()>(&callee, &symbol_short!("ping"), vec![&env]);
+```
 
 **Why it matters**
 
-Cross-contract calls may fail. Discarding the return value silently swallows errors and can leave the calling contract in an inconsistent state.
+`try_invoke_contract` and `try_*` client methods exist so that the caller can handle a callee's failure. Dropping their `Result` makes the function continue as if the call had succeeded, e.g. recording a payment whose token transfer was rejected.
 
 **Limitations**
 
-- Only flags discarded or unreferenced return value bindings; does not track complex data flow.
+- A client is recognised only when it is built with `<X>Client::new(…)` in the same method; a client passed in as a parameter is not.
+- Calling `.is_ok()` / `.ok()` / `.unwrap()` on the result counts as inspecting it, even if that value is then thrown away.
 
 **Fixture:** `test-contracts/invoke-return-vulnerable/`, `test-contracts/invoke-return-safe/`
 
@@ -729,7 +748,24 @@ This check owns the `storage.get(...).unwrap()`/`.expect(...)` pattern exclusive
 
 **What it detects**
 
-In an `impl` block marked with `#[contractimpl]`, a `pub fn` whose name contains `upgrade`, `migrate`, `set_wasm`, or `replace_wasm`, and whose body contains no call to `require_auth` or `require_auth_for_args`.
+In an `impl` block marked with `#[contractimpl]`, any `pub fn`, whatever its name, that replaces the contract's code with `env.deployer().update_current_contract_wasm(new_wasm_hash)` without a valid `require_auth` / `require_auth_for_args` call before it. Valid receivers are the `Env` parameter and an admin-like local loaded from storage (`let admin: Address = env.storage().instance().get(&ADMIN).unwrap(); admin.require_auth();`).
+
+```rust
+#[contractimpl]
+impl Contract {
+    // Finding: anyone can replace the contract's code.
+    pub fn set_code(env: Env, new_wasm_hash: BytesN<32>) {
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    // No finding: the stored admin authorizes first.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env.storage().instance().get(&ADMIN).unwrap();
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+}
+```
 
 **Why it matters**
 
@@ -737,12 +773,12 @@ Upgrade and migration entrypoints replace the contract's executable code. Withou
 
 **Relationship to `unprotected-admin`**
 
-[`unprotected-admin`](#unprotected-admin-high) also flags `upgrade` and `migrate` by exact name match against its `SENSITIVE_NAMES` list. This check is broader: it matches on substring (e.g. `set_wasm_hash`, `replace_wasm_v2`) rather than requiring an exact name, and it additionally checks that the auth call comes *before* the WASM swap. The double report on a plain `upgrade` / `migrate` entrypoint is **intentional** — two useful angles on the same bug — and a single fix (adding `require_auth`) clears both findings.
+[`unprotected-admin`](#unprotected-admin-high) also flags `upgrade` and `migrate` by exact name match against its `SENSITIVE_NAMES` list. This check is broader: it looks at what the method does (`update_current_contract_wasm` on a `deployer()` chain) rather than its name, and it additionally checks that the auth call comes *before* the WASM swap. The double report on a plain `upgrade` / `migrate` entrypoint is **intentional** — two useful angles on the same bug — and a single fix (adding `require_auth`) clears both findings.
 
 **Limitations**
 
-- Name-based matching only; an upgrade entrypoint with an unrelated name is not detected.
-- Any `require_auth` / `require_auth_for_args` call anywhere in the body clears the finding (no dataflow).
+- An upgrade performed in a private helper called by the method is not detected.
+- An auth helper with its own name (e.g. `require_admin(&env)`) is not recognised as authorization.
 
 **Fixture:** `test-contracts/upgrade-vulnerable/`, `test-contracts/upgrade-safe/`
 
@@ -771,7 +807,7 @@ Deploying or uploading contract WASM is a privileged operation. Without an autho
 
 **What it detects**
 
-Public admin-mutating functions inside `#[contractimpl]` whose name matches a sensitive set (`set_owner`, `set_admin`, `transfer_ownership`, `set_operator`) that write to storage via `set`, `remove`, or `append` but contain no call to `env.events().publish()`.
+Public admin-mutating functions inside `#[contractimpl]` whose name matches a sensitive set (`set_owner`, `set_admin`, `transfer_ownership`, `set_operator`) that write to storage via `set`, `remove`, or `append` but emit no event (`env.events().publish(…)`, or a `#[contractevent]` struct's `.publish(&env)`).
 
 **Why it matters**
 

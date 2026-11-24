@@ -1,3 +1,9 @@
+//! Unprotected-upgrade: an exported method replaces the contract's WASM
+//! (`env.deployer().update_current_contract_wasm(..)`) without authorization first.
+//!
+//! Every public `#[contractimpl]` method is checked, whatever its name: the upgrade can sit
+//! in `upgrade`, `set_code`, `admin_action` or anything else.
+
 use crate::util::{
     is_admin_var_name,
     self, contractimpl_functions_excluding_test, env_param_name, pat_ident_name,
@@ -9,7 +15,6 @@ use syn::visit::{self, Visit};
 use syn::{Block, Expr, ExprMethodCall};
 
 const CHECK_NAME: &str = "unprotected-upgrade";
-const SENSITIVE_NAMES: &[&str] = &["upgrade", "migrate", "set_wasm", "replace_wasm"];
 
 pub struct UnprotectedUpgradeCheck;
 
@@ -22,10 +27,10 @@ impl Check for UnprotectedUpgradeCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let name = method.sig.ident.to_string();
-            if is_sensitive_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
+            if matches!(method.vis, syn::Visibility::Public(_)) {
                 let env_name = env_param_name(&method.sig).unwrap_or_else(|| "env".to_string());
                 let address_names = util::address_param_names(&method.sig);
-                let sensitive_line = first_invoke_wasm_line(&method.block);
+                let sensitive_line = first_wasm_update_line(&method.block);
                 let auth_line = first_valid_auth_line(method, &env_name, &address_names);
 
                 let unprotected = match (sensitive_line, auth_line) {
@@ -42,14 +47,20 @@ impl Check for UnprotectedUpgradeCheck {
                         line: sensitive_line.unwrap_or_else(|| method.sig.fn_token.span().start().line),
                         function_name: name.clone(),
                         description: format!(
-                            "Upgrade/migrate method `{}` lacks valid require_auth protection before the sensitive operation",
+                            "Method `{}` replaces the contract WASM with \
+                             `deployer().update_current_contract_wasm(..)` without a valid \
+                             `require_auth` before it, so anyone can swap the contract's code",
                             name
                         ),
                         rule_url: Some(
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-upgrade-high"
                                 .to_string(),
                         ),
-                        suggestion: Some("Add env.require_auth() at the start".to_string()),
+                        suggestion: Some(
+                            "Load the admin from storage and call `admin.require_auth()` before \
+                             `update_current_contract_wasm`."
+                                .to_string(),
+                        ),
                     });
                 }
             }
@@ -58,24 +69,26 @@ impl Check for UnprotectedUpgradeCheck {
     }
 }
 
-fn is_sensitive_name(name: &str) -> bool {
-    SENSITIVE_NAMES.contains(&name)
+/// `….deployer().update_current_contract_wasm(..)` — the soroban-sdk upgrade API.
+fn is_wasm_update_call(node: &ExprMethodCall) -> bool {
+    node.method == "update_current_contract_wasm"
+        && receiver_chain_contains(&node.receiver, "deployer")
 }
 
-fn first_invoke_wasm_line(block: &Block) -> Option<usize> {
-    let mut v = InvokeWasmVisitor::default();
+fn first_wasm_update_line(block: &Block) -> Option<usize> {
+    let mut v = WasmUpdateVisitor::default();
     visit::visit_block(&mut v, block);
     v.line
 }
 
 #[derive(Default)]
-struct InvokeWasmVisitor {
+struct WasmUpdateVisitor {
     line: Option<usize>,
 }
 
-impl<'ast> Visit<'ast> for InvokeWasmVisitor {
+impl<'ast> Visit<'ast> for WasmUpdateVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if self.line.is_none() && node.method == "invoke_wasm" {
+        if self.line.is_none() && is_wasm_update_call(node) {
             self.line = Some(node.span().start().line);
         }
         visit::visit_expr_method_call(self, node);
@@ -174,8 +187,8 @@ mod tests {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
-        env.invoke_wasm(&new_code);
+    pub fn upgrade(env: Env, new_code: BytesN<32>) {
+        env.deployer().update_current_contract_wasm(new_code);
     }
 }
         "#;
@@ -192,9 +205,9 @@ impl C {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn migrate(env: Env, new_code: Bytes) {
+    pub fn migrate(env: Env, new_code: BytesN<32>) {
         env.require_auth();
-        env.invoke_wasm(&new_code);
+        env.deployer().update_current_contract_wasm(new_code);
     }
 }
         "#;
@@ -210,9 +223,9 @@ impl C {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn upgrade(env: Env, to: Address, new_code: Bytes) {
+    pub fn upgrade(env: Env, to: Address, new_code: BytesN<32>) {
         to.require_auth();
-        env.invoke_wasm(&new_code);
+        env.deployer().update_current_contract_wasm(new_code);
     }
 }
         "#;
@@ -224,12 +237,12 @@ impl C {
     }
 
     #[test]
-    fn flags_auth_after_invoke_wasm() -> Result<(), syn::Error> {
+    fn flags_auth_after_wasm_update() -> Result<(), syn::Error> {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
-        env.invoke_wasm(&new_code);
+    pub fn upgrade(env: Env, new_code: BytesN<32>) {
+        env.deployer().update_current_contract_wasm(new_code);
         env.require_auth();
     }
 }
@@ -263,10 +276,10 @@ impl C {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
+    pub fn upgrade(env: Env, new_code: BytesN<32>) {
         let admin: Address = env.storage().instance().get(&0).unwrap();
         admin.require_auth();
-        env.invoke_wasm(&new_code);
+        env.deployer().update_current_contract_wasm(new_code);
     }
 }
         "#;
@@ -300,8 +313,8 @@ impl C {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn upgrade(env: Env, new_code: Bytes) {
-        env.invoke_wasm(&new_code);
+    pub fn upgrade(env: Env, new_code: BytesN<32>) {
+        env.deployer().update_current_contract_wasm(new_code);
     }
 }
 
@@ -311,8 +324,8 @@ mod tests {
 
     #[contractimpl]
     impl C {
-        pub fn upgrade(env: Env, new_code: Bytes) {
-            env.invoke_wasm(&new_code);
+        pub fn upgrade(env: Env, new_code: BytesN<32>) {
+            env.deployer().update_current_contract_wasm(new_code);
         }
     }
 }
@@ -321,6 +334,51 @@ mod tests {
         let check = UnprotectedUpgradeCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        Ok(())
+    }
+
+    /// #1061: the upgrade is found in any exported method, whatever its name.
+    #[test]
+    fn flags_wasm_update_in_any_exported_method() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn set_code(env: Env, hash: BytesN<32>) {
+        env.deployer().update_current_contract_wasm(hash);
+    }
+
+    pub fn admin_action(e: Env, hash: BytesN<32>) {
+        let d = e.deployer();
+        e.deployer().update_current_contract_wasm(hash.clone());
+        let _ = d;
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let findings = UnprotectedUpgradeCheck.run(&file, src);
+        let names: Vec<_> = findings.iter().map(|f| f.function_name.as_str()).collect();
+        assert_eq!(names, ["set_code", "admin_action"]);
+        Ok(())
+    }
+
+    /// #1061: a method that never replaces the WASM is not reported, and an unrelated
+    /// `update_current_contract_wasm` method (not on a deployer) is ignored.
+    #[test]
+    fn ignores_methods_without_deployer_wasm_update() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn upgrade(env: Env, hash: BytesN<32>) {
+        env.storage().instance().set(&KEY, &hash);
+    }
+
+    pub fn other(env: Env, registry: Registry, hash: BytesN<32>) {
+        registry.update_current_contract_wasm(hash);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert!(UnprotectedUpgradeCheck.run(&file, src).is_empty());
         Ok(())
     }
 }

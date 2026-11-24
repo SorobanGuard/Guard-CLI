@@ -1,18 +1,22 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env};
 
 #[contract]
 pub struct InvokeReturnSafe;
 
 #[contractimpl]
 impl InvokeReturnSafe {
-    // ✅ Return value is bound and used
-    pub fn notify(env: Env, callee: Address) -> i128 {
-        let result = env.invoke_contract::<i128>(
-            &callee,
-            &symbol_short!("get"),
-            soroban_sdk::vec![&env],
-        );
-        result
+    // ✅ `invoke_contract` traps the transaction if the callee fails, so a discarded
+    // (unit) return value hides nothing.
+    pub fn notify(env: Env, callee: Address) {
+        env.invoke_contract::<()>(&callee, &symbol_short!("ping"), soroban_sdk::vec![&env]);
+    }
+
+    // ✅ The fallible call's `Result` is inspected.
+    pub fn pay(env: Env, token: Address, to: Address, amount: i128) -> bool {
+        let client = token::Client::new(&env, &token);
+        client
+            .try_transfer(&env.current_contract_address(), &to, &amount)
+            .is_ok()
     }
 }
