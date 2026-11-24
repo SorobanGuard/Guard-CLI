@@ -94,9 +94,7 @@ impl<'ast> Visit<'ast> for StorageHasGuardVisitor<'ast> {
 fn is_storage_get(expr: &Expr) -> Option<String> {
     match expr {
         Expr::MethodCall(m) => {
-            if (m.method == "get" || m.method == "get_unchecked")
-                && receiver_chain_contains_storage(&m.receiver)
-            {
+            if m.method == "get" && receiver_chain_contains_storage(&m.receiver) {
                 use quote::ToTokens;
                 let key_text = m
                     .args
@@ -119,11 +117,10 @@ fn has_key_arg(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-/// Returns the argument expression passed to a `.get(…)`/`.get_unchecked(…)`
-/// call, if any.
+/// Returns the argument expression passed to a `.get(…)` call, if any.
 fn get_key_arg(expr: &Expr) -> Option<&Expr> {
     match expr {
-        Expr::MethodCall(m) if m.method == "get" || m.method == "get_unchecked" => m.args.first(),
+        Expr::MethodCall(m) if m.method == "get" => m.args.first(),
         _ => None,
     }
 }

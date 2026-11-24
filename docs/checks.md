@@ -137,7 +137,8 @@ Names like `set_owner` strongly suggest privilege; without any auth call the sca
 **What it detects**
 
 1. **Temporary storage writes** — `env.storage().temporary()` in the receiver chain of a storage mutation (`set`, `remove`, `extend_ttl`, `bump`, `append`).
-2. **Dynamic `Symbol::new` keys** — `Symbol::new(&env, …)` where the second argument is **not** a string literal (e.g. derived from a parameter). Literal second args like `Symbol::new(&env, "fixed")` are ignored.
+2. **Unwrapped temporary reads** — `env.storage().temporary().get(&k).unwrap()` / `.expect(..)`, and `.unwrap()` / `.expect(..)` on the `Option` argument of a closure passed to `env.storage().temporary().update(..)` / `try_update(..)`. Temporary entries are deleted when their TTL lapses, so these panic once the entry has expired; handle the `None` case instead (`match`, `unwrap_or`, `if let`). (soroban-sdk has no `get_unchecked` storage method; an earlier rule for it never matched compiling code.)
+3. **Dynamic `Symbol::new` keys** — `Symbol::new(&env, …)` where the second argument is **not** a string literal (e.g. derived from a parameter). Literal second args like `Symbol::new(&env, "fixed")` are ignored.
 
 **Why it matters**
 
@@ -262,7 +263,14 @@ Invoking contracts from a storage-derived address is effectively a delegate call
 
 **What it detects**
 
-Inside a single `#[contractimpl]` method: a storage write (`set`, `remove`, `extend_ttl`, `bump`, or `append` called on a `.storage()`-derived receiver) followed by a call to `invoke_contract` or `invoke_contract_check`, with no intervening storage read (`get`, `get_unchecked`, or `has`) between the write and the call.
+Inside a single `#[contractimpl]` method: a storage write (`set`, `remove`, `extend_ttl`, `bump`, or `append` called on a `.storage()`-derived receiver) followed by an external contract call, with no intervening storage read (`get` or `has`) between the write and the call.
+
+An external contract call is any of:
+
+- `env.invoke_contract(..)`, `invoke_contract_check(..)` or `try_invoke_contract(..)`;
+- any method called on a contract client: an expression or `let` binding built with `<X>Client::new(..)`, e.g. `token::Client::new(&env, &id).transfer(..)`, `TokenClient`, a `contractimport!` / `#[contractclient]`-generated `FooClient`, or a `use … as` alias of one. The test-only auth helpers (`mock_auths`, `mock_all_auths`, `set_auths`, …) are not counted.
+
+Calls and reads in an `if` / `if let` condition count: the condition runs before either branch, so `if client.try_transfer(..).is_err()` after a write is reported, and `if let Some(v) = env.storage().persistent().get(&k)` counts as a re-read.
 
 **Why it matters**
 
@@ -271,7 +279,8 @@ Inside a single `#[contractimpl]` method: a storage write (`set`, `remove`, `ext
 **Limitations**
 
 - Tracks a single, linear path through one method body; writes and calls reached through different branches of an `if`/`match`, or made from a helper function, are not correlated.
-- A storage read anywhere after the write clears the finding, even if it doesn't actually re-validate the state used by the subsequent `invoke_contract` call.
+- A storage read anywhere after the write clears the finding, even if it doesn't actually re-validate the state used by the subsequent external call.
+- A client is recognised only when it is built with `<X>Client::new(..)` in the same method (inline or through a `let`); a client passed in as a parameter or returned by a helper function is not.
 
 **Fixture:** tests in `crates/checks/src/reentrancy.rs`
 
@@ -567,7 +576,7 @@ Panics abort the transaction with an unhelpful, generic error and can leave the 
 
 **Relationship to `uninitialized-storage-read`**
 
-`.unwrap()`/`.expect(...)` chained directly onto a storage `.get(...)`/`.get_unchecked(...)` call (e.g. `env.storage().persistent().get(&K).unwrap()`) is **not** flagged here — that exact pattern is reported once, as the more specific and more severe [`uninitialized-storage-read`](#uninitialized-storage-read-high) finding, instead of being double-reported by both checks.
+`.unwrap()`/`.expect(...)` chained directly onto a storage `.get(...)` call (e.g. `env.storage().persistent().get(&K).unwrap()`) is **not** flagged here — that exact pattern is reported once, as the more specific and more severe [`uninitialized-storage-read`](#uninitialized-storage-read-high) finding, instead of being double-reported by both checks.
 
 **Limitations**
 
@@ -706,7 +715,7 @@ impl Contract {
 
 **What it detects**
 
-In `#[contractimpl]` methods: a storage read (`.storage().<tier>().get(...)` or `.get_unchecked(...)`) with `.unwrap()` or `.expect(...)` chained directly onto it, with no prior `has()` guard.
+In `#[contractimpl]` methods: a storage read (`.storage().<tier>().get(...)`) with `.unwrap()` or `.expect(...)` chained directly onto it, with no prior `has()` guard.
 
 **Why it matters**
 

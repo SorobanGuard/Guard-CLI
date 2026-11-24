@@ -31,17 +31,13 @@ impl Check for UnsafeRandomnessCheck {
 #[derive(Default)]
 struct RandomnessVisitor {
     findings: Vec<Finding>,
+    /// The method being scanned. `run` drives the visitor over `method.block`, never the
+    /// `ImplItemFn` itself, so this has to be set there (#1058).
     current_function: String,
     env_ident: String,
 }
 
 impl<'ast> Visit<'ast> for RandomnessVisitor {
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        let prev = std::mem::replace(&mut self.current_function, node.sig.ident.to_string());
-        visit::visit_impl_item_fn(self, node);
-        self.current_function = prev;
-    }
-
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method_name = node.method.to_string();
         if (method_name == "timestamp" || method_name == "sequence")
@@ -178,6 +174,28 @@ mod tests {
         let check = UnsafeRandomnessCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
+        Ok(())
+    }
+
+    /// #1058: every finding names the enclosing method.
+    #[test]
+    fn finding_names_the_enclosing_method() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn draw(env: Env) -> u64 {
+        env.ledger().timestamp()
+    }
+
+    pub fn pick(env: Env) -> u32 {
+        if env.ledger().sequence() % 2 == 0 { 1 } else { 0 }
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let findings = UnsafeRandomnessCheck.run(&file, src);
+        let names: Vec<_> = findings.iter().map(|f| f.function_name.as_str()).collect();
+        assert_eq!(names, ["draw", "pick"]);
         Ok(())
     }
 }
