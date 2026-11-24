@@ -21,7 +21,7 @@ impl Check for UnprotectedTokenMintCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let name = method.sig.ident.to_string();
-            if is_mint_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
+            if is_mint_name(&name) && util::is_exported_entrypoint(method) {
                 let env_name = env_param_name(&method.sig).unwrap_or_else(|| "env".to_string());
                 let address_names = util::address_param_names(&method.sig);
                 let sensitive_line = first_storage_mutation_line(&method.block);

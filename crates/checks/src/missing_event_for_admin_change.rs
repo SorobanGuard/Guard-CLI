@@ -1,4 +1,5 @@
 use crate::util::contractimpl_functions_excluding_test;
+use crate::util::is_exported_entrypoint;
 use crate::util::receiver_chain_contains_events;
 use crate::util::receiver_chain_contains_storage;
 use crate::{Check, Finding, Severity};
@@ -20,7 +21,7 @@ impl Check for MissingEventForAdminChangeCheck {
         let mut findings = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let name = method.sig.ident.to_string();
-            if is_admin_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
+            if is_admin_name(&name) && is_exported_entrypoint(file, method) {
                 let has_storage_write = has_storage_write(&method.block);
                 let has_event = has_event_emit(&method.block);
 

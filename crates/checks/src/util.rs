@@ -84,6 +84,17 @@ pub fn contractimpl_functions_with_type_excluding_test(
     out
 }
 
+/// Is `method` exported as a contract entrypoint by `#[contractimpl]`?
+///
+/// `pub` methods of an inherent impl are entrypoints, and so is **every** method of a
+/// trait impl (`impl TokenInterface for Token { fn set_admin(..) {..} }`): Rust forbids
+/// `pub` there, so those methods have `Visibility::Inherited` yet `#[contractimpl]` still
+/// exports them. Checks must use this instead of testing `Visibility::Public` directly,
+/// or they silently skip every trait-impl entrypoint.
+pub fn is_exported_entrypoint(item_impl: &ItemImpl, method: &syn::ImplItemFn) -> bool {
+    item_impl.trait_.is_some() || matches!(method.vis, syn::Visibility::Public(_))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +191,123 @@ mod integration {
         let methods = contractimpl_functions_excluding_test(&file);
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].sig.ident.to_string(), "live");
+        Ok(())
+    }
+
+    #[test]
+    fn excludes_cfg_test_contractimpl_impl_block() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+#[contractimpl]
+impl C {
+    pub fn live(env: Env) {
+        let _ = env;
+    }
+}
+
+#[cfg(test)]
+#[contractimpl]
+impl TestHarness {
+    pub fn set_admin(env: Env, a: Address) {
+        let _ = (env, a);
+    }
+}
+"#,
+        )?;
+
+        let methods = contractimpl_functions_excluding_test(&file);
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].sig.ident.to_string(), "live");
+
+        let with_type = contractimpl_functions_with_type_excluding_test(&file);
+        assert_eq!(with_type.len(), 1);
+        assert_eq!(with_type[0].0, "C");
+        assert_eq!(with_type[0].1.sig.ident.to_string(), "live");
+        Ok(())
+    }
+
+    #[test]
+    fn excludes_cfg_test_method_inside_contractimpl_impl() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+#[contractimpl]
+impl C {
+    pub fn live(env: Env) {
+        let _ = env;
+    }
+
+    #[cfg(test)]
+    pub fn debug_reset(env: Env) {
+        let _ = env;
+    }
+}
+"#,
+        )?;
+
+        let methods = contractimpl_functions_excluding_test(&file);
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].sig.ident.to_string(), "live");
+
+        let with_type = contractimpl_functions_with_type_excluding_test(&file);
+        assert_eq!(with_type.len(), 1);
+        assert_eq!(with_type[0].0, "C");
+        assert_eq!(with_type[0].1.sig.ident.to_string(), "live");
+        Ok(())
+    }
+
+    #[test]
+    fn is_exported_entrypoint_covers_pub_inherent_and_all_trait_impl_methods() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+#[contractimpl]
+impl C {
+    pub fn public_fn(env: Env) {
+        let _ = env;
+    }
+
+    fn private_fn(env: Env) {
+        let _ = env;
+    }
+}
+
+#[contractimpl]
+impl Admin for C {
+    fn set_admin(env: Env, new: Address) {
+        let _ = (env, new);
+    }
+}
+"#,
+        )?;
+
+        let mut inherent = None;
+        let mut trait_impl = None;
+        for item in &file.items {
+            if let Item::Impl(item_impl) = item {
+                if item_impl.trait_.is_some() {
+                    trait_impl = Some(item_impl);
+                } else {
+                    inherent = Some(item_impl);
+                }
+            }
+        }
+        let inherent = inherent.expect("inherent impl");
+        let trait_impl = trait_impl.expect("trait impl");
+
+        let inherent_fns: Vec<&syn::ImplItemFn> = inherent
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ImplItem::Fn(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert!(is_exported_entrypoint(inherent, inherent_fns[0]));
+        assert!(!is_exported_entrypoint(inherent, inherent_fns[1]));
+
+        let ImplItem::Fn(trait_fn) = &trait_impl.items[0] else {
+            panic!("expected a method");
+        };
+        assert!(is_exported_entrypoint(trait_impl, trait_fn));
         Ok(())
     }
 
@@ -415,9 +543,14 @@ fn collect_contractimpl_fns<'a>(
                     collect_contractimpl_fns(nested, is_test, out);
                 }
             }
-            Item::Impl(item_impl) if !in_test_mod && is_contractimpl(item_impl) => {
+            Item::Impl(item_impl)
+                if !in_test_mod && is_contractimpl(item_impl) && !is_cfg_test(&item_impl.attrs) =>
+            {
                 for impl_item in &item_impl.items {
                     if let ImplItem::Fn(m) = impl_item {
+                        if is_cfg_test(&m.attrs) {
+                            continue;
+                        }
                         out.push(m);
                     }
                 }
@@ -443,10 +576,15 @@ fn collect_contractimpl_fns_with_type<'a>(
                     collect_contractimpl_fns_with_type(nested, is_test, out);
                 }
             }
-            Item::Impl(item_impl) if !in_test_mod && is_contractimpl(item_impl) => {
+            Item::Impl(item_impl)
+                if !in_test_mod && is_contractimpl(item_impl) && !is_cfg_test(&item_impl.attrs) =>
+            {
                 let type_name = impl_type_name(item_impl);
                 for impl_item in &item_impl.items {
                     if let ImplItem::Fn(m) = impl_item {
+                        if is_cfg_test(&m.attrs) {
+                            continue;
+                        }
                         out.push((type_name.clone(), m));
                     }
                 }

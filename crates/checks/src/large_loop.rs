@@ -1,4 +1,4 @@
-use crate::util::contractimpl_functions_excluding_test;
+use crate::util::{contractimpl_functions_excluding_test, is_exported_entrypoint};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -15,8 +15,8 @@ impl Check for LargeLoopCheck {
 
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
-            if matches!(method.vis, syn::Visibility::Public(_)) {
+        for (item_impl, method) in contractimpl_functions_excluding_test(file) {
+            if is_exported_entrypoint(item_impl, method) {
                 let mut loop_visitor = LoopFinder::default();
                 visit::visit_block(&mut loop_visitor, &method.block);
 

@@ -1,13 +1,13 @@
 //! Privileged-style entrypoints without any `require_auth` / `require_auth_for_args` call.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, is_admin_var_name, pat_ident_name,
-    receiver_chain_contains, receiver_chain_contains_storage,
+    contractimpl_functions_excluding_test, is_admin_var_name, is_exported_entrypoint,
+    pat_ident_name, receiver_chain_contains, receiver_chain_contains_storage,
 };
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Block, Expr, ExprIf, ExprMethodCall, File, Visibility};
+use syn::{Block, Expr, ExprIf, ExprMethodCall, File};
 
 const CHECK_NAME: &str = "unprotected-admin";
 
@@ -68,8 +68,8 @@ impl Check for UnprotectedAdminCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
-            if !matches!(method.vis, Visibility::Public(_)) {
+        for (item_impl, method) in contractimpl_functions_excluding_test(file) {
+            if !is_exported_entrypoint(item_impl, method) {
                 continue;
             }
             let name = method.sig.ident.to_string();
@@ -564,6 +564,32 @@ impl C {
         let x = env.storage().instance().get(&1).unwrap();
         if x > 0 { let _ = env; }
         env.storage().instance().set(&2, &new_admin);
+    }
+}
+"#,
+        )?;
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function_name, "set_admin");
+        Ok(())
+    }
+
+    #[test]
+    fn flags_trait_impl_set_admin_without_auth() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env};
+
+pub struct C;
+
+pub trait Admin {
+    fn set_admin(env: Env, new: Address);
+}
+
+#[contractimpl]
+impl Admin for C {
+    fn set_admin(env: Env, new: Address) {
+        env.storage().instance().set(&ADMIN_KEY, &new);
     }
 }
 "#,

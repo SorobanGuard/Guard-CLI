@@ -20,7 +20,7 @@ impl Check for UnprotectedContractDeploymentCheck {
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
-            if matches!(method.vis, syn::Visibility::Public(_)) {
+            if util::is_exported_entrypoint(file, method) {
                 let (has_deployer, line) = has_deployer_call(&method.block);
                 if has_deployer {
                     let env_name =

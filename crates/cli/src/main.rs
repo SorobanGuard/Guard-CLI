@@ -252,6 +252,23 @@ fn chrono_timestamp() -> String {
     format!("{h:02}:{m:02}:{s:02} UTC")
 }
 
+/// Resolve a `[scan] path` value from a config file.
+///
+/// Relative values are joined to the directory containing the config file so that
+/// `path = "contracts"` means the same thing regardless of the process cwd (issue
+/// #1042). Absolute values are returned unchanged. When no config file was found,
+/// the value is returned as-is (relative to the cwd).
+fn resolve_config_relative_path(value: &str, config_file: Option<&Path>) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        return path;
+    }
+    match config_file.and_then(|p| p.parent()) {
+        Some(dir) => dir.join(path),
+        None => path,
+    }
+}
+
 fn effective_fail_on(cli_value: Option<&str>, config_value: Option<&str>) -> String {
     cli_value.or(config_value).unwrap_or("high").to_string()
 }
@@ -326,15 +343,15 @@ fn main() {
                 p
             } else {
                 // Try to load soroban-guard.toml from current directory to get default path.
-                let config_for_default = match config::load(&PathBuf::from(".")) {
-                    Ok((c, _)) => c.unwrap_or_default(),
+                let (config_for_default, config_file) = match config::load(&PathBuf::from(".")) {
+                    Ok((c, p)) => (c.unwrap_or_default(), p),
                     Err(e) => {
                         eprintln!("{} {}", "error:".red().bold(), e);
                         std::process::exit(2);
                     }
                 };
                 if let Some(config_path) = &config_for_default.scan.path {
-                    PathBuf::from(config_path)
+                    resolve_config_relative_path(config_path, config_file.as_deref())
                 } else {
                     eprintln!(
                         "{} no scan path provided and none found in soroban-guard.toml",
@@ -1754,6 +1771,30 @@ mod tests {
         assert_eq!(effective_fail_on(Some("high"), Some("low")), "high");
         assert_eq!(effective_fail_on(None, Some("low")), "low");
         assert_eq!(effective_fail_on(None, None), "high");
+    }
+
+    #[test]
+    fn config_relative_scan_path_resolves_against_config_dir() {
+        let config_file = Path::new("/repo/root/soroban-guard.toml");
+        assert_eq!(
+            resolve_config_relative_path("contracts", Some(config_file)),
+            PathBuf::from("/repo/root/contracts"),
+            "relative path should be joined to the config file's directory"
+        );
+        assert_eq!(
+            resolve_config_relative_path("./contracts", Some(config_file)),
+            PathBuf::from("/repo/root/./contracts")
+        );
+        assert_eq!(
+            resolve_config_relative_path("/abs/contracts", Some(config_file)),
+            PathBuf::from("/abs/contracts"),
+            "absolute path should be unchanged"
+        );
+        assert_eq!(
+            resolve_config_relative_path("contracts", None),
+            PathBuf::from("contracts"),
+            "without a config file the value stays cwd-relative"
+        );
     }
 
     #[test]
