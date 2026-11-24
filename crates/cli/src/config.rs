@@ -20,10 +20,13 @@ pub struct GuardConfig {
 pub struct ScanConfig {
     /// Default scan path (overridden by the CLI positional argument).
     pub path: Option<String>,
-    /// Severity threshold for the `--fail-on` exit gate ("high" | "medium" | "low").
+    /// Severity threshold for the `--fail-on` exit gate
+    /// ("high" | "medium" | "low" | "none").
     ///
     /// Equivalent to the `--fail-on` flag (the flag wins if both are set): the
     /// process exits `1` when a finding at or above this severity is present.
+    /// `"none"` is report-only mode: findings are still reported, but the
+    /// process never exits `1` because of them (errors still exit `2`).
     /// This does **not** filter findings out of the printed output.
     pub min_severity: Option<String>,
 }
@@ -220,6 +223,22 @@ mod tests {
 
         let (cfg, path) = load(&root).unwrap();
         assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("medium"));
+        assert_eq!(path, Some(root.join("soroban-guard.toml")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_accepts_min_severity_none() {
+        let root = temp_root("load-none-severity");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[scan]\nmin_severity = \"none\"\n",
+        )
+        .unwrap();
+
+        let (cfg, path) = load(&root).unwrap();
+        assert_eq!(cfg.unwrap().scan.min_severity.as_deref(), Some("none"));
         assert_eq!(path, Some(root.join("soroban-guard.toml")));
 
         fs::remove_dir_all(root).unwrap();

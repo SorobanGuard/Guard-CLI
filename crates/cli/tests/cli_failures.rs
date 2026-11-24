@@ -94,6 +94,63 @@ fn malformed_explicit_config_exits_two() {
 }
 
 #[test]
+fn sarif_output_creates_missing_parent_directories() {
+    let root = temporary_directory("nested-output");
+    std::fs::create_dir_all(root.join("contract/src")).unwrap();
+    std::fs::write(root.join("contract/src/lib.rs"), "pub fn harmless() {}\n").unwrap();
+    let output_path = root.join("reports/nested/out.sarif");
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .args([
+            "scan",
+            "contract",
+            "--sarif",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output_path.is_file(), "expected {} to be created", output_path.display());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fail_on_none_reports_findings_but_exits_zero() {
+    let root = temporary_directory("fail-on-none");
+    std::fs::create_dir_all(root.join("contract/src")).unwrap();
+    std::fs::write(
+        root.join("contract/src/lib.rs"),
+        "pub fn risky() { panic!(\"boom\"); }\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .args(["scan", "contract", "--fail-on", "none"])
+        .current_dir(&root)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_fail_on_value_exits_two() {
+    let root = temporary_directory("invalid-fail-on");
+    std::fs::create_dir_all(root.join("contract/src")).unwrap();
+    std::fs::write(root.join("contract/src/lib.rs"), "pub fn harmless() {}\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .args(["scan", "contract", "--fail-on", "bogus"])
+        .current_dir(&root)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn no_config_flag_disables_discovery() {
     let root = temporary_directory("no-config");
     std::fs::create_dir_all(root.join("contract/src")).unwrap();

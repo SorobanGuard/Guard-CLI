@@ -61,7 +61,7 @@ enum Commands {
         /// Exclude files matching this glob pattern (e.g. `src/proxy.rs`); may be repeated
         #[arg(long, value_name = "PATTERN")]
         exclude: Vec<String>,
-        /// Exit code 1 when findings at or above this severity are found (high|medium|low, default: high)
+        /// Exit code 1 when findings at or above this severity are found (high|medium|low|none, default: high)
         #[arg(long)]
         fail_on: Option<String>,
         /// Disable a named check (may be repeated)
@@ -115,7 +115,7 @@ struct ScanOptions {
     output: Option<PathBuf>,
     quiet: bool,
     verbose: bool,
-    fail_threshold: Severity,
+    fail_threshold: Option<Severity>,
     exclude: Vec<String>,
     includes: Vec<String>,
     max_findings: usize,
@@ -138,7 +138,10 @@ fn run_scan(
     match scan_directory_with_checks(&opts.path, &opts.exclude, &opts.includes, active_checks) {
         Ok((results, files_scanned, files_skipped, _check_panics)) => {
             let findings: Vec<Finding> = results.into_iter().flat_map(|r| r.findings).collect();
-            let should_fail = findings.iter().any(|f| f.severity <= opts.fail_threshold);
+            // `--fail-on none` (fail_threshold == None) never fails on findings.
+            let should_fail = opts
+                .fail_threshold
+                .is_some_and(|threshold| findings.iter().any(|f| f.severity <= threshold));
 
             // Produce the serialized payload for the selected structured format,
             // then emit it via a single shared write-or-print path (Issue #430).
@@ -280,18 +283,28 @@ fn emit_setup_error(message: &str, use_json: bool) -> ! {
     std::process::exit(2)
 }
 
-/// Parse a `--fail-on` / `min_severity` string into a `Severity`.
+/// Parse a `--fail-on` / `min_severity` string into a fail threshold.
 ///
-/// Returns `Ok(Severity)` for `"high"`, `"medium"`, or `"low"` (case-insensitive).
+/// Returns `Ok(Some(Severity))` for `"high"`, `"medium"`, or `"low"` (case-insensitive),
+/// and `Ok(None)` for `"none"` (report-only mode that never fails on findings).
 /// Returns `Err(original_value)` for anything else so the caller can emit a
 /// helpful `error:` message and exit 2.
-fn parse_fail_on(value: &str) -> Result<Severity, &str> {
+fn parse_fail_on(value: &str) -> Result<Option<Severity>, &str> {
     match value.to_lowercase().as_str() {
-        "high" => Ok(Severity::High),
-        "medium" => Ok(Severity::Medium),
-        "low" => Ok(Severity::Low),
+        "high" => Ok(Some(Severity::High)),
+        "medium" => Ok(Some(Severity::Medium)),
+        "low" => Ok(Some(Severity::Low)),
+        "none" => Ok(None),
         _ => Err(value),
     }
+}
+
+/// Whether colour should be disabled because `NO_COLOR` is set.
+///
+/// Follows the no-color.org convention: colour is disabled only when `NO_COLOR`
+/// is present *and* not an empty string. `NO_COLOR=` (empty) does not disable colour.
+fn no_color_requested() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
 }
 
 fn main() {
@@ -314,7 +327,7 @@ fn main() {
             no_clear,
             max_findings,
         } => {
-            if no_color || std::env::var_os("NO_COLOR").is_some() {
+            if no_color || no_color_requested() {
                 colored::control::set_override(false);
             }
             // Resolve scan path: CLI argument takes precedence, then config, then error.
@@ -373,7 +386,7 @@ fn main() {
                 Err(bad) => {
                     emit_setup_error(
                         &format!(
-                            "unknown --fail-on value `{}`. Expected one of: high, medium, low",
+                            "unknown --fail-on value `{}`. Expected one of: high, medium, low, none",
                             bad
                         ),
                         json,
@@ -641,7 +654,8 @@ const STARTER_CONFIG: &str = r#"# Soroban Guard project defaults.
 
 [scan]
 # Fail the scan when findings at or above this severity are present.
-# Allowed values: "high", "medium", "low".
+# Allowed values: "high", "medium", "low", "none".
+# "none" reports findings but never exits 1 on them (errors still exit 2).
 min_severity = "high"
 
 [checks]
@@ -1035,6 +1049,14 @@ fn list_checks_json() -> Result<String, serde_json::Error> {
 }
 
 fn write_output(path: &Path, payload: &str) -> Result<(), std::io::Error> {
+    // Create missing parent directories (e.g. `reports/` for
+    // `--output reports/soroban-guard.sarif`) so a fresh CI checkout does not
+    // need a separate `mkdir -p` step (Issue #1074).
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     // Match println! while avoiding a second newline when a static payload,
     // such as STARTER_CONFIG, is already newline-terminated.
     fs::write(path, format!("{}\n", payload.trim_end_matches('\n')))
@@ -1147,7 +1169,7 @@ fn summary_text(findings: &[Finding], files_scanned: usize) -> String {
 
 /// Returns true if OSC 8 hyperlinks should be emitted (color is on).
 fn use_hyperlinks() -> bool {
-    std::env::var("NO_COLOR").is_err() && colored::control::SHOULD_COLORIZE.should_colorize()
+    !no_color_requested() && colored::control::SHOULD_COLORIZE.should_colorize()
 }
 
 /// Wrap `text` in an OSC 8 hyperlink for `url` when hyperlinks are enabled.
@@ -1744,9 +1766,15 @@ mod tests {
 
     #[test]
     fn parse_fail_on_accepts_known_values() {
-        assert_eq!(parse_fail_on("high"), Ok(Severity::High));
-        assert_eq!(parse_fail_on("medium"), Ok(Severity::Medium));
-        assert_eq!(parse_fail_on("low"), Ok(Severity::Low));
+        assert_eq!(parse_fail_on("high"), Ok(Some(Severity::High)));
+        assert_eq!(parse_fail_on("medium"), Ok(Some(Severity::Medium)));
+        assert_eq!(parse_fail_on("low"), Ok(Some(Severity::Low)));
+    }
+
+    #[test]
+    fn parse_fail_on_accepts_none() {
+        assert_eq!(parse_fail_on("none"), Ok(None));
+        assert_eq!(parse_fail_on("NONE"), Ok(None));
     }
 
     #[test]
@@ -1774,15 +1802,14 @@ mod tests {
 
     #[test]
     fn parse_fail_on_is_case_insensitive() {
-        assert_eq!(parse_fail_on("HIGH"), Ok(Severity::High));
-        assert_eq!(parse_fail_on("Medium"), Ok(Severity::Medium));
-        assert_eq!(parse_fail_on("LOW"), Ok(Severity::Low));
+        assert_eq!(parse_fail_on("HIGH"), Ok(Some(Severity::High)));
+        assert_eq!(parse_fail_on("Medium"), Ok(Some(Severity::Medium)));
+        assert_eq!(parse_fail_on("LOW"), Ok(Some(Severity::Low)));
     }
 
     #[test]
     fn parse_fail_on_rejects_unknown_string() {
         assert!(parse_fail_on("medim").is_err(), "typo should be rejected");
-        assert!(parse_fail_on("none").is_err(), "'none' should be rejected");
         assert!(
             parse_fail_on("critical").is_err(),
             "'critical' should be rejected"
@@ -1791,6 +1818,37 @@ mod tests {
             parse_fail_on("").is_err(),
             "empty string should be rejected"
         );
+    }
+
+    // ── no_color_requested ───────────────────────────────────────────────────
+
+    #[test]
+    fn no_color_requested_handles_unset_empty_and_non_empty() {
+        // Serialize access to the process-global NO_COLOR variable.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let original = std::env::var_os("NO_COLOR");
+
+        std::env::remove_var("NO_COLOR");
+        assert!(!no_color_requested(), "unset NO_COLOR must not disable colour");
+
+        std::env::set_var("NO_COLOR", "");
+        assert!(
+            !no_color_requested(),
+            "empty NO_COLOR must not disable colour (no-color.org)"
+        );
+
+        std::env::set_var("NO_COLOR", "1");
+        assert!(
+            no_color_requested(),
+            "non-empty NO_COLOR must disable colour"
+        );
+
+        match original {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
     }
 
     // ── CLI integration: bad --fail-on exits 2 ───────────────────────────────
@@ -1826,5 +1884,82 @@ mod tests {
             stderr.contains("unknown --fail-on value"),
             "stderr should contain 'unknown --fail-on value', got: {stderr}"
         );
+    }
+
+    #[test]
+    fn fail_on_none_exits_0_with_findings() {
+        let mut bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        bin.push("../../target/debug/soroban-guard");
+
+        if !bin.exists() {
+            eprintln!(
+                "note: skipping fail_on_none_exits_0_with_findings — binary not found at {}",
+                bin.display()
+            );
+            return;
+        }
+
+        // Scan the workspace root, which contains the analyzer's own sources and
+        // therefore findings; `--fail-on none` must still exit 0.
+        let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        root.push("../..");
+
+        let output = std::process::Command::new(&bin)
+            .args(["scan"])
+            .arg(&root)
+            .args(["--fail-on", "none", "--quiet"])
+            .output()
+            .expect("failed to run soroban-guard binary");
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "--fail-on none must exit 0 even with findings, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn fail_on_none_still_exits_2_on_parse_error() {
+        let mut bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        bin.push("../../target/debug/soroban-guard");
+
+        if !bin.exists() {
+            eprintln!(
+                "note: skipping fail_on_none_still_exits_2_on_parse_error — binary not found at {}",
+                bin.display()
+            );
+            return;
+        }
+
+        let output = std::process::Command::new(&bin)
+            .args(["scan", ".", "--fail-on", "none", "--disable-check", "no-such-check"])
+            .output()
+            .expect("failed to run soroban-guard binary");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--fail-on none must not mask setup errors (exit 2), stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn write_output_creates_missing_parent_directories() {
+        let base = std::env::temp_dir().join(format!(
+            "soroban-guard-nested-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = base.join("reports").join("nested").join("out.sarif");
+        write_output(&path, "{\"ok\":true}").unwrap();
+        assert!(path.exists(), "nested output file should be created");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("ok"));
+        let _ = fs::remove_dir_all(base);
     }
 }

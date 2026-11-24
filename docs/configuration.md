@@ -32,9 +32,10 @@ rather than silently ignoring it.
 # relative value is resolved against the current directory.
 path = "contracts/token"
 
-# Severity threshold for the `--fail-on` exit gate. One of "high", "medium", "low".
-# Equivalent to the `--fail-on` flag; the flag wins if both are set.
-# Does not filter findings out of the printed output.
+# Severity threshold for the `--fail-on` exit gate. One of "high", "medium",
+# "low", "none". "none" is report-only: findings are printed but never cause
+# exit 1 (errors still exit 2). Equivalent to the `--fail-on` flag; the flag
+# wins if both are set. Does not filter findings out of the printed output.
 min_severity = "medium"
 
 [checks]
@@ -56,7 +57,7 @@ extra = ["drain", "sweep", "rescue_funds"]
 | Key | Type | Default | Effect |
 |-----|------|---------|--------|
 | `[scan] path` | string | unset | Scan path used when `scan` is given no positional path. The config is looked up from the current directory (same upward search as above), and a relative value is resolved against the current directory, not the config file's location. If neither a path argument nor this key is set, the scan exits `2`. |
-| `[scan] min_severity` | `"high"` \| `"medium"` \| `"low"` | unset | Same as `--fail-on`: exit `1` when a finding at or above this severity is present. |
+| `[scan] min_severity` | `"high"` \| `"medium"` \| `"low"` \| `"none"` | unset | Same as `--fail-on`: exit `1` when a finding at or above this severity is present. `"none"` is report-only: findings are reported but never cause exit `1`; errors still exit `2`. |
 | `[checks] disabled` | list of strings | `[]` | Check names to skip, merged with any `--disable-check` flags. Unknown names cause the scan to exit `2`. |
 | `[checks.sensitive_names] extra` | list of strings | `[]` | Additional function-name patterns treated as privileged/admin-like, appended to the built-in list used **only** by `unprotected-admin`. Other checks (`missing-zero-address-check`, `unprotected-upgrade`, `unprotected-token-mint`, `unprotected-contract-deployment`) maintain their own separate hardcoded lists and are not affected by this option. |
 
