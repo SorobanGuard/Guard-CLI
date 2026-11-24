@@ -11,7 +11,7 @@ Release managers should follow the [crates.io release process](docs/release.md).
 
 ## Local development setup
 
-1. **Install Rust** (1.74 or newer recommended) using [rustup](https://rustup.rs/):
+1. **Install Rust** (1.85 or newer recommended) using [rustup](https://rustup.rs/):
 
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh

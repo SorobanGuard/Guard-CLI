@@ -52,7 +52,7 @@ Soroban contracts are Rust crates compiled to WASM and deployed to the Stellar n
 
 ## Requirements
 
-- Rust 1.74+ (2021 edition)
+- Rust 1.85+ (2021 edition)
 - No Stellar SDK or network connection required — analysis is purely static
 
 ## Build
