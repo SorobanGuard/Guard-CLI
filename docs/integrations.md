@@ -96,6 +96,51 @@ to see them inline in pull requests:
     sarif_file: findings.sarif
 ```
 
+#### Monorepos and subdirectory scans
+
+GitHub Code Scanning resolves every `artifactLocation.uri` in the SARIF file
+against the **repository root**, but Soroban Guard reports paths relative to the
+**scan root**. If you scan a subdirectory, the two differ:
+
+```bash
+# Scan root is contracts/token, so findings carry uri: "src/lib.rs"
+soroban-guard scan contracts/token --sarif --output findings.sarif
+```
+
+GitHub would then look for `src/lib.rs` at the repository root, which does not
+exist (or is the wrong file), and the PR annotation silently disappears.
+
+To make this unambiguous, every SARIF report includes:
+
+- `uriBaseId: "SRCROOT"` on each `artifactLocation`, and
+- `run.originalUriBaseIds.SRCROOT`, a `file://` URI pointing at the scan root.
+
+Consumers that understand `uriBaseId` can rebase the paths themselves. GitHub
+Code Scanning does not, so pass `--sarif-base <DIR>` to make `uri` relative to
+that directory instead:
+
+```yaml
+- name: Soroban Guard scan (SARIF)
+  # --sarif-base defaults to the git toplevel when one is available, so
+  # scanning contracts/token yields uri: "contracts/token/src/lib.rs".
+  run: soroban-guard scan contracts/token --sarif --output findings.sarif
+  continue-on-error: true
+
+- name: Upload SARIF to GitHub Code Scanning
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: findings.sarif
+```
+
+`--sarif-base` defaults to the git toplevel of the scan root (as reported by
+`git rev-parse --show-toplevel`). When the scan runs outside a git repository,
+it falls back to the scan root itself. Set it explicitly if your checkout layout
+differs from the repository root GitHub sees:
+
+```bash
+soroban-guard scan contracts/token --sarif --sarif-base . --output findings.sarif
+```
+
 ---
 
 ## VS Code tasks

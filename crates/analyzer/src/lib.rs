@@ -63,6 +63,10 @@ pub enum ScanError {
     },
     #[error("Invalid glob pattern `{pattern}`: {reason}")]
     InvalidGlobPattern { pattern: String, reason: String },
+    /// A single-file scan root that is not a `.rs` file. Reported instead of
+    /// trying to parse e.g. `Cargo.toml` as Rust (issue #1072).
+    #[error("{path} is not a .rs file")]
+    NotRustFile { path: PathBuf },
     /// A WalkDir traversal error (e.g. permission-denied on a subdirectory).
     /// The scan is incomplete and must not be treated as clean.
     #[error("Directory traversal error at {path}: {reason}")]
@@ -383,7 +387,8 @@ fn scan_error_path(err: &ScanError) -> PathBuf {
         | ScanError::IoRead { path, .. }
         | ScanError::Parse { path, .. }
         | ScanError::CheckPanic { path, .. }
-        | ScanError::Traversal { path, .. } => path.clone(),
+        | ScanError::Traversal { path, .. }
+        | ScanError::NotRustFile { path } => path.clone(),
         ScanError::Io(_) | ScanError::InvalidGlobPattern { .. } | ScanError::Multiple(_) => {
             PathBuf::new()
         }
@@ -483,8 +488,27 @@ fn collect_rust_paths(
     let exclude_patterns = compile_globs(excludes)?;
     let include_patterns = compile_globs(includes)?;
 
+    // A single-file root goes through the same filter as a walked file so
+    // `--include`/`--exclude`, the `.rs` extension check and generated-file
+    // skipping all apply (issue #1072). The label is the bare file name, since
+    // the root is the file itself.
     if root.is_file() {
-        return Ok((vec![root.to_path_buf()], 0));
+        let label = root.file_name().map(Path::new).unwrap_or(root);
+        return match classify_rust_path(root, label, &exclude_patterns, &include_patterns) {
+            Ok(PathVerdict::Scan) => Ok((vec![root.to_path_buf()], 0)),
+            Ok(PathVerdict::GeneratedSkip) => Ok((Vec::new(), 1)),
+            Ok(PathVerdict::Reject) => {
+                if root.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    Err(ScanError::NotRustFile {
+                        path: root.to_path_buf(),
+                    })
+                } else {
+                    // A `.rs` file rejected by an exclude/include glob.
+                    Ok((Vec::new(), 0))
+                }
+            }
+            Err(e) => Err(e),
+        };
     }
 
     let mut files_skipped = 0;
@@ -842,6 +866,86 @@ mod tests {
         assert_eq!(files_scanned, 1);
         assert_eq!(files_skipped, 0);
         assert!(check_panics.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn single_file_root_that_is_not_rust_is_a_clear_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "soroban-guard-singlefile-notrs-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("Cargo.toml");
+        fs::write(&file_path, "[package]\nname = \"x\"\n").unwrap();
+
+        let err = scan_directory(&file_path, &[], &[]).unwrap_err();
+        assert!(
+            matches!(err, ScanError::NotRustFile { .. }),
+            "expected NotRustFile, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("not a .rs file"),
+            "expected a clear message, got: {err}"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn single_file_root_with_generated_header_is_skipped() {
+        let dir = std::env::temp_dir().join(format!(
+            "soroban-guard-singlefile-generated-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("bindings.rs");
+        fs::write(
+            &file_path,
+            "// @generated\npub fn generated() {}\n",
+        )
+        .unwrap();
+
+        let (findings, files_scanned, files_skipped, check_panics) =
+            scan_directory(&file_path, &[], &[]).unwrap();
+        assert!(findings.is_empty());
+        assert_eq!(files_scanned, 0);
+        assert_eq!(files_skipped, 1);
+        assert!(check_panics.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn single_file_root_honors_exclude_glob() {
+        let dir = std::env::temp_dir().join(format!(
+            "soroban-guard-singlefile-exclude-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("lib.rs");
+        fs::write(&file_path, "pub fn f() {}").unwrap();
+
+        let (_, files_scanned, files_skipped, _) =
+            scan_directory(&file_path, &["lib.rs".to_string()], &[]).unwrap();
+        assert_eq!(files_scanned, 0);
+        assert_eq!(files_skipped, 0);
+
+        // An include glob that does not match also rejects the file root.
+        let (_, files_scanned, _, _) =
+            scan_directory(&file_path, &[], &["other.rs".to_string()]).unwrap();
+        assert_eq!(files_scanned, 0);
+
         fs::remove_dir_all(dir).unwrap();
     }
 

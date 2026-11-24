@@ -74,12 +74,27 @@ struct DeployerVisitor {
 
 impl<'ast> Visit<'ast> for DeployerVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "deployer" {
+        if is_deployment_call(node) {
             self.found_deployer = true;
             self.line = node.span().start().line;
         }
         visit::visit_expr_method_call(self, node);
     }
+}
+
+/// Returns true when `node` is a real contract-creation call, i.e. the
+/// outermost method is `deploy` / `deploy_v2` and its receiver chain goes
+/// through `with_current_contract(..)` or `with_address(..)`.
+///
+/// Read-only helpers (`deployed_address`), wasm uploads
+/// (`upload_contract_wasm`) and upgrades (`update_current_contract_wasm`)
+/// are intentionally not matched here.
+fn is_deployment_call(node: &ExprMethodCall) -> bool {
+    if node.method != "deploy" && node.method != "deploy_v2" {
+        return false;
+    }
+    receiver_chain_contains(&node.receiver, "with_current_contract")
+        || receiver_chain_contains(&node.receiver, "with_address")
 }
 
 fn first_valid_auth_line(
@@ -170,67 +185,11 @@ mod tests {
     use syn::parse_file;
 
     #[test]
-    fn flags_unprotected_deployer() -> Result<(), syn::Error> {
+    fn does_not_flag_upload_contract_wasm() -> Result<(), syn::Error> {
         let src = r#"
 #[contractimpl]
 impl C {
     pub fn upload(env: Env, wasm: Bytes) {
-        env.deployer().upload_contract_wasm(&wasm);
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedContractDeploymentCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].function_name, "upload");
-        assert_eq!(findings[0].line, 5);
-        Ok(())
-    }
-
-    #[test]
-    fn ignores_unrelated_require_auth_on_address() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upload(env: Env, to: Address, wasm: Bytes) {
-        to.require_auth();
-        env.deployer().upload_contract_wasm(&wasm);
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedContractDeploymentCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn flags_auth_after_deployer() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upload(env: Env, wasm: Bytes) {
-        env.deployer().upload_contract_wasm(&wasm);
-        env.require_auth();
-    }
-}
-        "#;
-        let file = parse_file(src)?;
-        let check = UnprotectedContractDeploymentCheck;
-        let findings = check.run(&file, src);
-        assert_eq!(findings.len(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn passes_when_env_require_auth_precedes_deployer() -> Result<(), syn::Error> {
-        let src = r#"
-#[contractimpl]
-impl C {
-    pub fn upload(env: Env, wasm: Bytes) {
-        env.require_auth();
         env.deployer().upload_contract_wasm(&wasm);
     }
 }
@@ -243,14 +202,103 @@ impl C {
     }
 
     #[test]
-    fn passes_when_stored_admin_require_auth_precedes_deployer() -> Result<(), syn::Error> {
+    fn does_not_flag_deployed_address() -> Result<(), syn::Error> {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn upload(env: Env, wasm: Bytes) {
+    pub fn address(env: Env, salt: BytesN<32>) -> Address {
+        env.deployer().with_current_contract(salt).deployed_address()
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedContractDeploymentCheck;
+        let findings = check.run(&file, src);
+        assert!(findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_flag_update_current_contract_wasm() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn upgrade(env: Env, hash: BytesN<32>) {
+        env.deployer().update_current_contract_wasm(hash);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedContractDeploymentCheck;
+        let findings = check.run(&file, src);
+        assert!(findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_unprotected_deploy_v2() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn deploy(env: Env, salt: BytesN<32>, wasm: Bytes, init: Val) {
+        env.deployer().with_current_contract(salt).deploy_v2(wasm, init);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedContractDeploymentCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "deploy");
+        assert_eq!(findings[0].line, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_env_require_auth_precedes_deploy_v2() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn deploy(env: Env, salt: BytesN<32>, wasm: Bytes, init: Val) {
+        env.require_auth();
+        env.deployer().with_current_contract(salt).deploy_v2(wasm, init);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedContractDeploymentCheck;
+        let findings = check.run(&file, src);
+        assert!(findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_auth_after_deploy() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn deploy(env: Env, salt: BytesN<32>, wasm: Bytes, init: Val) {
+        env.deployer().with_current_contract(salt).deploy_v2(wasm, init);
+        env.require_auth();
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedContractDeploymentCheck;
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn passes_when_stored_admin_require_auth_precedes_deploy() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn deploy(env: Env, salt: BytesN<32>, wasm: Bytes, init: Val) {
         let admin: Address = env.storage().instance().get(&0).unwrap();
         admin.require_auth();
-        env.deployer().upload_contract_wasm(&wasm);
+        env.deployer().with_current_contract(salt).deploy_v2(wasm, init);
     }
 }
         "#;
@@ -266,19 +314,19 @@ impl C {
         let src = r#"
 #[contractimpl]
 impl C {
-    pub fn upload(env: Env, wasm: Bytes) {
-        env.deployer().upload_contract_wasm(&wasm);
+    pub fn deploy(env: Env, salt: BytesN<32>, wasm: Bytes, init: Val) {
+        env.deployer().with_current_contract(salt).deploy_v2(wasm, init);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use soroban_sdk::{contractimpl, Env, Bytes};
+    use soroban_sdk::{contractimpl, Env, Bytes, BytesN, Val};
 
     #[contractimpl]
     impl C {
-        pub fn upload(env: Env, wasm: Bytes) {
-            env.deployer().upload_contract_wasm(&wasm);
+        pub fn deploy(env: Env, salt: BytesN<32>, wasm: Bytes, init: Val) {
+            env.deployer().with_current_contract(salt).deploy_v2(wasm, init);
         }
     }
 }
