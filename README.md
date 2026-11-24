@@ -79,10 +79,10 @@ Output as JSON (useful for CI pipelines or the web dashboard):
 cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --json
 ```
 
-Write JSON to a file instead of stdout:
+Write JSON to a file instead of stdout (missing parent directories are created automatically):
 
 ```bash
-cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --json --output findings.json
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --json --output reports/findings.json
 ```
 
 Emit SARIF 2.1.0 for GitHub Code Scanning:
@@ -115,6 +115,14 @@ Only fail (exit 1) on Medium-or-higher findings, instead of the High-only defaul
 ```bash
 cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --fail-on medium
 ```
+
+Report-only mode — never fail (exit 1) on findings, while real errors still exit 2:
+
+```bash
+cargo run -p soroban-guard-cli -- scan ./path/to/contract-crate --fail-on none
+```
+
+`--fail-on none` (or `min_severity = "none"` in `soroban-guard.toml`) is useful when first adopting the tool or for informational jobs that upload SARIF, without wrapping the command in `|| true` (which would also hide exit-2 errors).
 
 Skip specific checks (may be repeated), or scope the scan to matching files:
 
@@ -165,8 +173,8 @@ cargo run -p soroban-guard-cli -- init
 | Code | Meaning |
 |------|---------|
 | `0` | No High severity findings — safe to proceed |
-| `1` | At least one High finding — **do not deploy** |
-| `2` | Scan error (I/O or parse failure) |
+| `1` | At least one High finding — **do not deploy** (never returned with `--fail-on none`) |
+| `2` | Scan error (I/O or parse failure) — returned even with `--fail-on none` |
 
 ### Configuration file
 

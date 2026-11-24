@@ -26,3 +26,24 @@ fn clap_rejects_output_without_structured_format() {
     assert!(stderr.contains("required"), "{stderr}");
     assert!(stderr.contains("--output"), "{stderr}");
 }
+
+#[test]
+fn clap_accepts_fail_on_none() {
+    let output = run(&["scan", ".", "--fail-on", "none"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // `none` must be a valid value: clap must not emit a usage error.
+    assert!(
+        !stderr.contains("invalid value"),
+        "clap rejected `--fail-on none`: {stderr}"
+    );
+    assert!(
+        !stderr.contains("possible values"),
+        "clap rejected `--fail-on none`: {stderr}"
+    );
+    // Argument parsing succeeded, so the exit code must not be a clap usage error.
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "`--fail-on none` produced a usage error: {stderr}"
+    );
+}
