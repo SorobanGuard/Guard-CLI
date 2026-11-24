@@ -162,3 +162,31 @@ fn test_tables_only_name_registered_checks() {
         "entries for checks that are not registered: {stale:?}"
     );
 }
+
+/// #1064: every fixture pair in `FIXTURES` must be asserted in
+/// `crates/cli/tests/fixture_scans.rs`, so a new check can't land with fixtures that
+/// nothing actually scans. The original `vulnerable` / `safe` pair (empty base) is
+/// covered by its own `missing_require_auth_fixtures` test.
+#[test]
+fn every_fixture_pair_is_asserted_in_fixture_scans() {
+    let scans = read("crates/cli/tests/fixture_scans.rs");
+    let compact: String = scans.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut missing = Vec::new();
+    for (check, base) in FIXTURES {
+        let covered = if base.is_empty() {
+            scans.contains("fn missing_require_auth_fixtures()")
+        } else {
+            compact.contains(&format!("assert_fixture_pair(\"{base}\",\"{check}\")"))
+        };
+        if !covered {
+            missing.push(format!(
+                "{check}: add `assert_fixture_pair(\"{base}\", \"{check}\")` to crates/cli/tests/fixture_scans.rs"
+            ));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "fixture pairs without a scan assertion:\n{}",
+        missing.join("\n")
+    );
+}

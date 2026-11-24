@@ -214,6 +214,91 @@ fn parse_allow_checks(line: &str) -> Option<Vec<String>> {
     (!checks.is_empty()).then_some(checks)
 }
 
+/// The `//` comment that trails code on `line` (e.g. `let x = a / b; // note`), or
+/// `None` when the line has no such comment or no code before it.
+///
+/// The scan skips string literals (`"…"` with escapes, raw `r"…"` / `r#"…"#`), char
+/// literals and `/* … */` block comments, so `"// soroban-guard: allow(x)"` inside a
+/// string is not mistaken for a comment. Literals that span several lines are not
+/// tracked; a `//` inside the continuation line of a multi-line string can still be
+/// misread.
+fn trailing_line_comment(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut saw_code = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                return saw_code.then(|| &line[i..]);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                // Block comment: skip to its end on this line (or give up).
+                match line[i + 2..].find("*/") {
+                    Some(end) => i += 2 + end + 2,
+                    None => return None,
+                }
+                continue;
+            }
+            b'r' if matches!(bytes.get(i + 1), Some(b'"') | Some(b'#'))
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')) =>
+            {
+                // Raw string `r#"…"#`: count the hashes, then find the matching close.
+                let hashes = bytes[i + 1..].iter().take_while(|&&b| b == b'#').count();
+                let open = i + 1 + hashes;
+                if bytes.get(open) != Some(&b'"') {
+                    saw_code = true;
+                    i += 1;
+                    continue;
+                }
+                let close = format!("\"{}", "#".repeat(hashes));
+                match line[open + 1..].find(&close) {
+                    Some(end) => i = open + 1 + end + close.len(),
+                    None => return None,
+                }
+                saw_code = true;
+                continue;
+            }
+            b'"' => {
+                // Ordinary string: skip escaped characters.
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] != b'"' {
+                    j += if bytes[j] == b'\\' { 2 } else { 1 };
+                }
+                if j >= bytes.len() {
+                    return None;
+                }
+                i = j + 1;
+                saw_code = true;
+                continue;
+            }
+            b'\'' => {
+                // Char literal (`'x'`, `'\n'`, `'\''`); otherwise a lifetime like `'a`.
+                if bytes.get(i + 1) == Some(&b'\\') {
+                    if let Some(end) = line[i + 3..].find('\'') {
+                        i += 3 + end + 1;
+                        saw_code = true;
+                        continue;
+                    }
+                } else if let Some(c) = line[i + 1..].chars().next() {
+                    let after = i + 1 + c.len_utf8();
+                    if bytes.get(after) == Some(&b'\'') {
+                        i = after + 1;
+                        saw_code = true;
+                        continue;
+                    }
+                }
+                saw_code = true;
+                i += 1;
+                continue;
+            }
+            b if !b.is_ascii_whitespace() => saw_code = true,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Index of the first line at or after `from` that carries actual code, skipping the
 /// lines rustfmt and normal documentation routinely insert between a suppression
 /// comment and the item it applies to: blank lines, `//` / `///` / `//!` comments, and
@@ -230,6 +315,14 @@ fn parse_suppressions(source: &str, fn_spans: &[FnSpan]) -> Suppressions {
     let mut suppressions = Suppressions::default();
 
     for (idx, line) in lines.iter().enumerate() {
+        // Trailing form: `let fee = a * r / 10_000; // soroban-guard: allow(x)` suppresses
+        // matching findings on this line only.
+        if let Some(checks) = trailing_line_comment(line).and_then(parse_allow_checks) {
+            for check in checks {
+                suppressions.line_checks.insert((idx + 1, check));
+            }
+            continue;
+        }
         let Some(checks) = parse_allow_checks(line) else {
             continue;
         };
@@ -372,8 +465,6 @@ pub fn is_ignored_path(path: &Path) -> bool {
     path.components()
         .any(|c| matches!(c.as_os_str().to_str(), Some("target" | ".git")))
 }
-
-/// The path relative to `root` shown in findings: the bare file name when `root`
 
 /// Path used to sort a [`ScanError`] for deterministic multi-error reporting (#629).
 fn scan_error_path(err: &ScanError) -> PathBuf {
@@ -2095,5 +2186,98 @@ mod dedup_tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    // ── #1066: trailing same-line suppressions ─────────────────────────────
+
+    #[test]
+    fn trailing_line_comment_finds_comment_after_code() {
+        assert_eq!(
+            trailing_line_comment("let fee = amount * rate / 10_000; // soroban-guard: allow(x)"),
+            Some("// soroban-guard: allow(x)")
+        );
+        // A whole-line comment is not "trailing".
+        assert_eq!(
+            trailing_line_comment("    // soroban-guard: allow(x)"),
+            None
+        );
+        assert_eq!(trailing_line_comment("let x = 1;"), None);
+    }
+
+    #[test]
+    fn trailing_line_comment_ignores_comment_markers_in_literals() {
+        assert_eq!(
+            trailing_line_comment(r#"let s = "// soroban-guard: allow(x)";"#),
+            None
+        );
+        assert_eq!(trailing_line_comment(r#"let s = "a \" // b";"#), None);
+        assert_eq!(
+            trailing_line_comment(r##"let s = r#"// not "a comment"#;"##),
+            None
+        );
+        assert_eq!(
+            trailing_line_comment("let c = '/'; let d = '\\''; // ok"),
+            Some("// ok")
+        );
+        assert_eq!(
+            trailing_line_comment("fn f<'a>(x: &'a str) {} // ok"),
+            Some("// ok")
+        );
+        assert_eq!(
+            trailing_line_comment("let x = 1; /* // */ let y = 2;"),
+            None
+        );
+        assert_eq!(
+            trailing_line_comment(r#"let s = "url://x"; // soroban-guard: allow(y)"#),
+            Some("// soroban-guard: allow(y)")
+        );
+    }
+
+    #[test]
+    fn trailing_suppression_applies_to_its_own_line_only() {
+        let source = "\
+fn f() {
+    let fee = amount * rate / 10_000; // soroban-guard: allow(integer-division-truncation)
+    let other = amount / 3;
+}
+";
+        let suppressions = parse_suppressions(source, &[]);
+        assert!(suppressions
+            .line_checks
+            .contains(&(2, "integer-division-truncation".to_string())));
+        assert!(!suppressions
+            .line_checks
+            .contains(&(3, "integer-division-truncation".to_string())));
+        assert!(suppressions.function_checks.is_empty());
+    }
+
+    #[test]
+    fn suppression_text_inside_a_string_literal_is_ignored() {
+        let source = "\
+fn f() {
+    let msg = \"// soroban-guard: allow(integer-division-truncation)\";
+    let other = amount / 3;
+}
+";
+        let suppressions = parse_suppressions(source, &[]);
+        assert!(
+            suppressions.line_checks.is_empty(),
+            "{:?}",
+            suppressions.line_checks
+        );
+    }
+
+    #[test]
+    fn standalone_suppression_still_targets_the_next_line() {
+        let source = "\
+fn f() {
+    // soroban-guard: allow(integer-division-truncation)
+    let fee = amount / 3;
+}
+";
+        let suppressions = parse_suppressions(source, &[]);
+        assert!(suppressions
+            .line_checks
+            .contains(&(3, "integer-division-truncation".to_string())));
     }
 }

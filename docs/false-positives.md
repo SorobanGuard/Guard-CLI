@@ -114,6 +114,17 @@ Rules:
 - The check name inside `allow(...)` must exactly match the check's `name()` value.
 - Multiple checks can be suppressed with a comma-separated list:
   `// soroban-guard: allow(delegate-call-risk, missing-event-emission)`
+- **Trailing form:** the annotation can also follow code on the same line, and then
+  suppresses matching findings on that line only:
+
+  ```rust
+  let fee = amount * rate / 10_000; // soroban-guard: allow(integer-division-truncation)
+  ```
+
+  Comment detection skips string and char literals, so text such as
+  `"// soroban-guard: allow(x)"` inside a string is not treated as a suppression. A
+  string literal that spans several lines is not tracked, so avoid putting the
+  annotation on the continuation line of a multi-line string.
 
 Place the same annotation immediately above a function declaration to suppress that check for all findings reported in that function:
 
