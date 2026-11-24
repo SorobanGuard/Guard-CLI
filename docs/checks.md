@@ -12,7 +12,7 @@ This document describes what each Soroban Guard Core check looks for and why it 
 
 In an `impl` block marked with `#[contractimpl]` or `#[soroban_sdk::contractimpl]`, any function whose body:
 
-1. Performs a storage mutation through `env.storage()` (heuristic: method `set`, `remove`, or `append` on a receiver chain that includes `.storage()`), and  
+1. Performs a storage mutation through `env.storage()` (heuristic: method `set`, `remove`, `append`, `update`, or `try_update` on a receiver chain that includes `.storage()`), and  
 2. Never calls `env.require_auth()` (parameter name **`env`**: `env.require_auth()`).
 
 **Why it matters**
@@ -35,7 +35,7 @@ Contract state updates should be gated. This rule recognizes both `env.require_a
 
 **What it detects**
 
-In a `#[contractimpl]` method, a storage mutation through `env.storage()` (`set`, `remove`, or `append`) occurs before any call to `env.require_auth()` or `env.require_auth_for_args()` on the same `Env` binding.
+In a `#[contractimpl]` method, a storage mutation through `env.storage()` (`set`, `remove`, `append`, `update`, or `try_update`) occurs before any call to `env.require_auth()` or `env.require_auth_for_args()` on the same `Env` binding.
 
 **Why it matters**
 
@@ -136,8 +136,8 @@ Names like `set_owner` strongly suggest privilege; without any auth call the sca
 
 **What it detects**
 
-1. **Temporary storage writes** — `env.storage().temporary()` in the receiver chain of a storage mutation (`set`, `remove`, `extend_ttl`, `bump`, `append`).
-2. **Dynamic `Symbol::new` keys** — `Symbol::new(&env, …)` where the second argument is **not** a string literal (e.g. derived from a parameter). Literal second args like `Symbol::new(&env, "fixed")` are ignored.
+1. **Temporary storage writes** — `env.storage().temporary()` in the receiver chain of a storage mutation (`set`, `remove`, `append`, `update`, `try_update`).
+2. **Dynamic `Symbol::new` storage keys** — `Symbol::new(&env, …)` whose second argument is **not** a string literal or `const`, when that symbol reaches the key argument of a storage call (`get`, `get_unchecked`, `has`, `set`, `remove`, `update`, `try_update`, `extend_ttl`, `bump`, `append` on a `.storage()` chain), either directly or through `let` bindings (`let key = (Symbol::new(&env, &tag), user);`). A dynamic symbol used only as an `invoke_contract` function name or an event topic is not reported.
 
 **Why it matters**
 
@@ -147,7 +147,8 @@ Names like `set_owner` strongly suggest privilege; without any auth call the sca
 **Limitations**
 
 - Does not analyze `symbol_short!(...)` macros beyond normal parsing.
-- `Symbol::new` with a `const` or macro-expanded literal may still be flagged if it is not a `syn::Lit::Str`.
+- `Symbol::new` with a macro-expanded literal may still be flagged if it is not a `syn::Lit::Str`.
+- Data flow is tracked through `let` bindings in the same function only; a symbol passed into a helper function that writes storage is not followed.
 
 **Fixture:** `test-contracts/storage-vulnerable/`, `test-contracts/storage-safe/`
 
@@ -310,7 +311,7 @@ Integer division truncates the fractional part, which can lead to precision loss
 
 **What it detects**
 
-In `#[contractimpl]` methods: storage mutations (`set`, `remove`, `extend_ttl`, `bump`, `append`) that occur in a function body that contains no call to `env.events().publish()`.
+In `#[contractimpl]` methods: storage mutations (`set`, `remove`, `append`, `update`, `try_update`) that occur in a function body that contains no call to `env.events().publish()`.
 
 **Why it matters**
 
@@ -582,7 +583,7 @@ Panics abort the transaction with an unhelpful, generic error and can leave the 
 
 **What it detects**
 
-In `#[contractimpl]` methods, writes to persistent storage (`env.storage().persistent().set(...)`, `remove(...)`, or `append(...)`) that are not followed by an `env.storage().persistent().extend_ttl(...)` call in the same function.
+In `#[contractimpl]` methods, writes to persistent storage (`env.storage().persistent().set(...)`, `remove(...)`, `append(...)`, `update(...)`, or `try_update(...)`) that are not followed by an `env.storage().persistent().extend_ttl(...)` call in the same function.
 
 **Why it matters**
 
@@ -640,7 +641,19 @@ impl Contract {
 
 **What it detects**
 
-Inside `#[contractimpl]` public methods: `loop { … }`, `while <cond> { … }`, or `for <pattern> in <expr> { … }` constructs. The check treats every loop expression as potentially large or unbounded.
+Loops inside `#[contractimpl]` public methods whose iteration count is not bounded by a constant:
+
+- `for` over a function parameter or a storage-loaded `Vec`/`Map` whose `.len()` is never compared against a literal or `const`, or over a range with a non-constant end (`0..n`);
+- `while` whose condition does not compare against a literal or `const` (`while true`, `while i < n`);
+- `loop` with no `if <comparison with literal/const> { break }` counter guard.
+
+These shapes are **not** reported because their bound is a constant:
+
+- `for i in 0..10`, `for i in 0..=MAX` (also with `.rev()` / `.step_by(..)`), where the end is a literal or `const`;
+- `for x in items.iter().take(MAX)`;
+- `for x in [a, b, c]`, and loops over a `[T; N]` or `BytesN<N>` binding;
+- `for x in items.iter()` when the function checks `items.len()` against a literal or `const` (e.g. `if items.len() > MAX { panic!(..) }`);
+- `while i < 10`, and `loop { …; if i >= MAX { break; } }`.
 
 **Why it matters**
 
@@ -648,8 +661,8 @@ Soroban contracts run under a fixed compute-budget cap. An unbounded loop can ex
 
 **Limitations**
 
-- Does not distinguish loops with a provably finite iteration count (e.g. `while i < 10`) from genuinely unbounded ones — all `loop`, `while`, and `for` constructs are flagged.
-- It does not estimate collection size or iteration count, so a bounded `for` loop may still be reported.
+- The bound must be visible in the same function: a length check done in a helper, or a counter compared against a value loaded from storage, is not recognised.
+- A `.len()` comparison anywhere in the function counts as a cap; the check does not verify that it guards the loop.
 - Loops inside private helper functions called from a `#[contractimpl]` method are not detected.
 
 **Fixture:** `test-contracts/large-loop-vulnerable/`, `test-contracts/large-loop-safe/`
@@ -660,43 +673,47 @@ Soroban contracts run under a fixed compute-budget cap. An unbounded loop can ex
 
 **What it detects**
 
-Public methods in `#[contractimpl]` that:
+Soroban already provides replay protection for `require_auth`: every `SorobanAuthorizationEntry` carries a nonce and an expiration ledger, and the host verifies and consumes that nonce. A function protected by `address.require_auth()` therefore does not need its own nonce. This check only reports the cases where replay protection is the contract's job, and only when the function writes storage (`set`, `remove`, `append`, `update`, `try_update`) and never references a nonce (an identifier, `symbol_short!` key or storage-key string containing `nonce`, `sequence`, `seq_num` or `replay`):
 
-1. Accept at least one `Address` parameter, and
-2. Perform a storage write (`set`, `remove`, `append`, `push`, or `push_back`), and
-3. Contain no reference to a nonce or replay-protection identifier — specifically, no identifier matching `nonce`, `sequence`, `seq_num`, or `replay` in the function body.
+1. **Self-verified signatures** — any `#[contractimpl]` function (including `__check_auth`) that calls `ed25519_verify`, `secp256k1_recover` or `secp256r1_verify`. The host never sees that signature, so it cannot stop the same signed payload being submitted again. This is reported even if the function also calls `require_auth` for some other address.
+2. **Acting for an address without auth** — a public method that takes an `Address` parameter and writes storage, but never calls `require_auth`, `require_auth_for_args` or an auth helper (`require_auth_*`, `assert_auth`, `check_auth`), so nothing binds the call to that address's host-managed nonce.
 
 **Why it matters**
 
-Off-chain-signed meta-transactions (e.g. permit-style flows, delegated actions) must include a nonce or sequence number to prevent replay attacks. Without one, an observer can re-submit a valid signed payload to repeat the state-mutating operation indefinitely on behalf of the signer.
+Permit-style flows, relayed meta-transactions and other code that checks signatures itself must include a nonce (or a deadline plus a record of used payloads) in the signed message. Without one, anyone who sees a valid signature can resubmit it and repeat the state change on behalf of the signer.
 
 **Example**
 
 ```rust
 #[contractimpl]
 impl Contract {
-	pub fn set_balance(env: Env, user: Address, amount: i128) {
-		// Finding: Address parameter + storage write, no nonce reference.
-		user.require_auth();
-		env.storage().persistent().set(&user, &amount);
+	// Not reported: the host's per-address nonce protects `require_auth`.
+	pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+		from.require_auth();
+		env.storage().persistent().set(&to, &amount);
 	}
 
-	pub fn set_balance_protected(env: Env, user: Address, amount: i128, nonce: u64) {
-		user.require_auth();
-		let key = (symbol_short!("nonce"), user.clone());
-		let expected: u64 = env.storage().persistent().get(&key).unwrap_or(0);
-		assert_eq!(nonce, expected, "bad nonce");
-		env.storage().persistent().set(&key, &(nonce + 1));
-		env.storage().persistent().set(&user, &amount);
+	// Finding: the contract verifies the signature itself and keeps no nonce.
+	pub fn claim(env: Env, pk: BytesN<32>, msg: Bytes, sig: BytesN<64>) {
+		env.crypto().ed25519_verify(&pk, &msg, &sig);
+		env.storage().persistent().set(&pk, &true);
+	}
+
+	// No finding: the signed message carries a nonce that is checked and consumed.
+	pub fn claim_once(env: Env, pk: BytesN<32>, msg: Bytes, sig: BytesN<64>, nonce: u64) {
+		let used: u64 = env.storage().persistent().get(&pk).unwrap_or(0);
+		assert!(nonce > used);
+		env.crypto().ed25519_verify(&pk, &msg, &sig);
+		env.storage().persistent().set(&pk, &nonce);
 	}
 }
 ```
 
 **Limitations**
 
-- Detection is purely identifier-based; a nonce stored under a differently-named variable (e.g. `counter`, `ts`) will not clear the finding.
-- Does not verify that the nonce value is actually checked or incremented — only that a recognised keyword appears in the function body.
-- Validation done inside a helper function called from the flagged method is not visible to this check.
+- Nonce detection is name-based: any identifier or key string containing a nonce keyword counts, even if it is not actually compared.
+- An auth helper with an unusual name (e.g. `only_owner(&env)`) is not recognised, so case 2 can still fire on a method that is authorized through it; `missing-require-auth` will usually report the same method.
+- Signature checks done in a helper function are not followed.
 
 **Fixture:** `test-contracts/nonce-vulnerable/`, `test-contracts/nonce-safe/`
 
@@ -771,7 +788,7 @@ Deploying or uploading contract WASM is a privileged operation. Without an autho
 
 **What it detects**
 
-Public admin-mutating functions inside `#[contractimpl]` whose name matches a sensitive set (`set_owner`, `set_admin`, `transfer_ownership`, `set_operator`) that write to storage via `set`, `remove`, or `append` but contain no call to `env.events().publish()`.
+Public admin-mutating functions inside `#[contractimpl]` whose name matches a sensitive set (`set_owner`, `set_admin`, `transfer_ownership`, `set_operator`) that write to storage via `set`, `remove`, `append`, `update`, or `try_update` but contain no call to `env.events().publish()`.
 
 **Why it matters**
 

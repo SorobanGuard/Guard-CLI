@@ -1,5 +1,6 @@
 //! Persistent storage writes that never extend the entry's TTL in the same function.
 
+use crate::util::is_persistent_storage_mutation_call;
 use crate::util::{
     contractimpl_functions_excluding_test, receiver_chain_contains_persistent,
     receiver_chain_contains_storage,
@@ -74,10 +75,6 @@ fn is_persistent_chain(m: &ExprMethodCall) -> bool {
     receiver_chain_contains_storage(&m.receiver) && receiver_chain_contains_persistent(&m.receiver)
 }
 
-fn is_persistent_mutation(m: &ExprMethodCall) -> bool {
-    matches!(m.method.to_string().as_str(), "set" | "remove" | "append") && is_persistent_chain(m)
-}
-
 fn is_persistent_extend_ttl(m: &ExprMethodCall) -> bool {
     // `bump` is the legacy (pre-`extend_ttl`) spelling of the same TTL operation; older or
     // unmigrated Soroban code still uses it, so accept both.
@@ -123,7 +120,7 @@ struct TtlVisitor {
 
 impl Visit<'_> for TtlVisitor {
     fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
-        if is_persistent_mutation(i) {
+        if is_persistent_storage_mutation_call(i) {
             // First argument to `.set(&key, &value)` / `.remove(&key)` / `.append(&key, &value)`
             // is the storage key.
             if let Some(first_arg) = i.args.first() {
@@ -353,6 +350,27 @@ impl C {
             2,
             "expected two findings (one per unextended key), got: {hits:#?}"
         );
+        Ok(())
+    }
+
+    /// #1051: a persistent `update` creates or rewrites an entry that needs a TTL bump.
+    #[test]
+    fn flags_persistent_update_without_extend_ttl() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+const K: soroban_sdk::Symbol = symbol_short!("k");
+#[contractimpl]
+impl C {
+    pub fn add(env: Env, amount: i128) {
+        env.require_auth();
+        env.storage().persistent().update(&K, |old: Option<i128>| old.unwrap_or(0) + amount);
+    }
+}
+"#,
+        )?;
+        assert_eq!(MissingTtlExtensionCheck.run(&file, "").len(), 1);
         Ok(())
     }
 }

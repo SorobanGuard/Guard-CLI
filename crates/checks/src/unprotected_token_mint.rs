@@ -1,3 +1,4 @@
+use crate::util::is_storage_mutation_call;
 use crate::util::{
     self, contractimpl_functions_excluding_test, env_param_name, pat_ident_name,
     receiver_chain_contains, receiver_chain_contains_storage,
@@ -77,13 +78,8 @@ struct StorageMutationVisitor {
 
 impl<'ast> Visit<'ast> for StorageMutationVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if self.line.is_none() {
-            let name = node.method.to_string();
-            if matches!(name.as_str(), "set" | "remove" | "extend_ttl" | "bump" | "append")
-                && receiver_chain_contains_storage(&node.receiver)
-            {
-                self.line = Some(node.span().start().line);
-            }
+        if self.line.is_none() && is_storage_mutation_call(node) {
+            self.line = Some(node.span().start().line);
         }
         visit::visit_expr_method_call(self, node);
     }
@@ -311,6 +307,22 @@ mod tests {
         let check = UnprotectedTokenMintCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        Ok(())
+    }
+
+    /// #1051: a mint that bumps supply with `update` is still a mint.
+    #[test]
+    fn flags_unprotected_mint_with_update_only_write() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn mint(env: Env, to: Address, amount: u128) {
+        env.storage().instance().update(&symbol_short!("supply"), |old: Option<u128>| old.unwrap_or(0) + amount);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert_eq!(UnprotectedTokenMintCheck.run(&file, src).len(), 1);
         Ok(())
     }
 }

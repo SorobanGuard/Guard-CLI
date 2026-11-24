@@ -4,7 +4,7 @@
 // is invalid.
 use std::collections::HashMap;
 
-use soroban_sdk::{contractimpl, symbol_short, Address, Bytes, Env, Symbol, Vec};
+use soroban_sdk::{contractimpl, symbol_short, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 // Triggers `mutable-global-state`: mutable global state is unsafe in deterministic contracts.
 static mut CALL_COUNT: u32 = 0;
@@ -209,10 +209,13 @@ impl AllFindingsContract {
         client.transfer(&env.current_contract_address(), &to, &amount);
     }
 
-    // Triggers `missing-nonce`: state-mutating method with an `Address` parameter lacks
-    // replay protection.
-    pub fn update_profile(env: Env, user: Address) {
+    // Triggers `missing-nonce`: the method checks a signature itself and writes storage
+    // without a nonce, so the host's replay protection does not apply and the same signed
+    // payload can be submitted again.
+    pub fn update_profile(env: Env, user: Address, signer: BytesN<32>, signature: BytesN<64>) {
         env.require_auth();
+        let payload = Bytes::from_slice(&env, b"profile");
+        env.crypto().ed25519_verify(&signer, &payload, &signature);
         env.storage().instance().set(&symbol_short!("profile"), &user);
     }
 

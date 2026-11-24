@@ -15,4 +15,11 @@ impl NonceSafe {
         env.storage().instance().set(&symbol_short!("nonce"), &nonce);
         env.storage().instance().set(&symbol_short!("val"), &new_val);
     }
+
+    /// `require_auth` is backed by the host's per-address nonce, so no contract nonce is
+    /// needed here.
+    pub fn set_profile(env: Env, user: Address, new_val: u32) {
+        user.require_auth();
+        env.storage().persistent().set(&user, &new_val);
+    }
 }

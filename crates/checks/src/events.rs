@@ -1,10 +1,8 @@
 
 //! Detection of state-changing functions (storage writes) without event emission.
 
-use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_events,
-    receiver_chain_contains_storage,
-};
+use crate::util::is_storage_mutation_call;
+use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_events};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -53,17 +51,6 @@ impl Check for MissingEventEmissionCheck {
         }
         out
     }
-}
-
-fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    if !matches!(
-        name.as_str(),
-        "set" | "remove" | "extend_ttl" | "bump" | "append"
-    ) {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
 }
 
 fn is_event_publish_call(m: &ExprMethodCall) -> bool {
@@ -151,5 +138,40 @@ impl Contract {
         let file = parse_file(src).unwrap();
         let findings = MissingEventEmissionCheck.run(&file, src);
         assert!(findings.is_empty());
+    }
+
+    /// #1051: an `update`-only state change still needs an event.
+    #[test]
+    fn flags_update_only_mutation_without_event() {
+        let src = r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct Contract;
+#[contractimpl]
+impl Contract {
+    pub fn add(env: Env, amount: i128) {
+        env.storage().instance().update(&symbol_short!("bal"), |old: Option<i128>| old.unwrap_or(0) + amount);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        assert_eq!(MissingEventEmissionCheck.run(&file, src).len(), 1);
+    }
+
+    /// #1051: extending a TTL does not change state, so it needs no event.
+    #[test]
+    fn passes_extend_ttl_only() {
+        let src = r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct Contract;
+#[contractimpl]
+impl Contract {
+    pub fn keep_alive(env: Env) {
+        env.storage().persistent().extend_ttl(&symbol_short!("bal"), 100, 1000);
+        env.storage().instance().bump(100, 1000);
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        assert!(MissingEventEmissionCheck.run(&file, src).is_empty());
     }
 }

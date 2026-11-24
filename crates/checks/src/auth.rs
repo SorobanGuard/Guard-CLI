@@ -268,4 +268,43 @@ impl Contract {
         assert!(hits.is_empty());
         Ok(())
     }
+
+    /// #1051: `update` writes storage just like `set`.
+    #[test]
+    fn flags_update_only_mutation_without_auth() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct Contract;
+const K: soroban_sdk::Symbol = symbol_short!("k");
+#[contractimpl]
+impl Contract {
+    pub fn add(env: Env, amount: i128) {
+        env.storage().persistent().update(&K, |old: Option<i128>| old.unwrap_or(0) + amount);
+    }
+}
+"#,
+        )?;
+        assert_eq!(hits.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_try_update_only_mutation_without_auth() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct Contract;
+const K: soroban_sdk::Symbol = symbol_short!("k");
+#[contractimpl]
+impl Contract {
+    pub fn add(env: Env, amount: i128) {
+        let _ = env.storage().instance().try_update(&K, |old: Option<i128>| Ok::<i128, ()>(old.unwrap_or(0) + amount));
+    }
+}
+"#,
+        )?;
+        assert_eq!(hits.len(), 1);
+        Ok(())
+    }
 }

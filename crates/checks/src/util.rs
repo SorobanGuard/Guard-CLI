@@ -266,19 +266,44 @@ pub(crate) fn receiver_chain_contains_events(expr: &Expr) -> bool {
     receiver_chain_contains(expr, "events")
 }
 
-/// Does this method call mutate persisted contract state in a way that requires prior
-/// authorization?
+/// Storage methods that change what is stored.
+///
+/// `update(&key, |old| ..)` and `try_update(&key, |old| ..)` exist on `Persistent`,
+/// `Temporary` and `Instance` storage and write the closure's result back, so they are
+/// writes exactly like `set`.
 ///
 /// Deliberately excludes `extend_ttl`/`bump`: extending a ledger entry's time-to-live does
 /// not change the stored value, cannot move funds, and cannot escalate privilege — in Soroban
 /// it is a deliberately permissionless operation (anyone paying the rent may keep an entry
-/// alive). Only `set`, `remove`, and `append` actually change what is stored.
+/// alive). Also excludes `Vec`/`Map` methods such as `push`/`push_back`: those mutate an
+/// in-memory value, and only a later `set`/`update` persists it.
+pub(crate) const STORAGE_MUTATION_METHODS: &[&str] =
+    &["set", "remove", "append", "update", "try_update"];
+
+/// Is `name` one of [`STORAGE_MUTATION_METHODS`]?
+pub(crate) fn is_storage_mutation_method(name: &str) -> bool {
+    STORAGE_MUTATION_METHODS.contains(&name)
+}
+
+/// Does this method call mutate persisted contract state (`env.storage().<kind>().set/
+/// remove/append/update/try_update(..)`)?
+///
+/// This is the one canonical storage-write predicate; every check should use it (or one of
+/// the `*_storage_mutation_call` variants built on top of it) instead of keeping a private
+/// method list, so the checks agree on what counts as a write.
 pub(crate) fn is_storage_mutation_call(m: &syn::ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    if !matches!(name.as_str(), "set" | "remove" | "append") {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
+    is_storage_mutation_method(&m.method.to_string())
+        && receiver_chain_contains_storage(&m.receiver)
+}
+
+/// [`is_storage_mutation_call`] restricted to `env.storage().persistent()`.
+pub(crate) fn is_persistent_storage_mutation_call(m: &syn::ExprMethodCall) -> bool {
+    is_storage_mutation_call(m) && receiver_chain_contains_persistent(&m.receiver)
+}
+
+/// [`is_storage_mutation_call`] restricted to `env.storage().temporary()`.
+pub(crate) fn is_temporary_storage_mutation_call(m: &syn::ExprMethodCall) -> bool {
+    is_storage_mutation_call(m) && receiver_chain_contains_temporary(&m.receiver)
 }
 
 /// Is `receiver` something `.require_auth()` / `.require_auth_for_args()` can be legally

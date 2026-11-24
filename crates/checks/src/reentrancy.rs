@@ -1,5 +1,6 @@
 //! Reentrancy-risk: `invoke_contract` after a storage write without a re-read.
 
+use crate::util::is_storage_mutation_call;
 use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
@@ -54,16 +55,6 @@ impl Check for ReentrancyRiskCheck {
     }
 }
 
-fn is_storage_write(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    // `extend_ttl`/`bump` only change a storage entry's expiration, not its stored
-    // value, so they cannot open a checks-effects-interactions hazard on their own.
-    if !matches!(name.as_str(), "set" | "remove" | "append") {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
-}
-
 fn is_storage_read(m: &ExprMethodCall) -> bool {
     let name = m.method.to_string();
     if !matches!(name.as_str(), "get" | "get_unchecked" | "has") {
@@ -88,7 +79,7 @@ struct ReentrancyVisitor {
 
 impl<'ast> Visit<'ast> for ReentrancyVisitor {
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
-        if is_storage_write(i) {
+        if is_storage_mutation_call(i) {
             self.wrote = true;
             self.re_read_after_write = false;
         } else if self.wrote && is_storage_read(i) {
@@ -319,5 +310,22 @@ impl C {
             1,
             "write then invoke in same branch should still be flagged; got: {hits:#?}"
         );
+    }
+
+    /// #1051: an `update` before a cross-contract call is a write before the call.
+    #[test]
+    fn flags_invoke_after_update_only_mutation() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn transfer(env: Env, to: Address, amount: i128) {
+        env.storage().persistent().update(&to, |old: Option<i128>| old.unwrap_or(0) + amount);
+        env.invoke_contract::<()>(&to, &soroban_sdk::symbol_short!("cb"), soroban_sdk::vec![&env]);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
     }
 }

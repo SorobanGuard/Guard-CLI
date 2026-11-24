@@ -340,4 +340,21 @@ impl C {
 "#);
         assert!(hits.is_empty());
     }
+
+    /// #1051: an `update` before `require_auth` is a write before auth.
+    #[test]
+    fn flags_require_auth_after_update_only_mutation() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Address, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn deposit(env: Env, from: Address, amount: i128) {
+        env.storage().persistent().update(&from, |old: Option<i128>| old.unwrap_or(0) + amount);
+        from.require_auth();
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+    }
 }
