@@ -27,8 +27,8 @@ impl Check for MissingRequireAuthCheck {
             let env_param = env_param_name(&method.sig);
             let address_params = address_param_names(&method.sig);
             let mut scan = FuncBodyScan::new(env_param.as_deref(), address_params);
-            scan.visit_block(&method.block);
-            if !scan.storage_write || scan.env_require_auth || scan.auth_helper_called {
+            let state = scan.scan_block(&method.block, AuthState::default());
+            if !state.storage_write || state.env_require_auth || state.auth_helper_called {
                 continue;
             }
             let line = first_storage_write_line(&method.block)
@@ -102,13 +102,41 @@ fn address_local_binding(pat: &Pat) -> Option<String> {
     }
 }
 
-struct FuncBodyScan {
-    env_name: String,
-    address_names: Vec<String>,
-    address_locals: HashSet<String>,
+/// Per-path state used to decide whether an auth call *dominates* a write.
+#[derive(Clone, Default)]
+struct AuthState {
     storage_write: bool,
     env_require_auth: bool,
     auth_helper_called: bool,
+    address_locals: HashSet<String>,
+}
+
+impl AuthState {
+    /// Merge the exit states of mutually exclusive branches. Auth must hold on
+    /// every path to count; a write on any path still counts.
+    fn merge_branches(branches: Vec<AuthState>) -> AuthState {
+        let mut storage_write = false;
+        let mut env_require_auth = !branches.is_empty();
+        let mut auth_helper_called = !branches.is_empty();
+        let mut address_locals = HashSet::new();
+        for branch in branches {
+            storage_write |= branch.storage_write;
+            env_require_auth &= branch.env_require_auth;
+            auth_helper_called &= branch.auth_helper_called;
+            address_locals.extend(branch.address_locals);
+        }
+        AuthState {
+            storage_write,
+            env_require_auth,
+            auth_helper_called,
+            address_locals,
+        }
+    }
+}
+
+struct FuncBodyScan {
+    env_name: String,
+    address_names: Vec<String>,
 }
 
 impl FuncBodyScan {
@@ -116,36 +144,162 @@ impl FuncBodyScan {
         Self {
             env_name: env_name.unwrap_or("env").to_string(),
             address_names,
-            address_locals: HashSet::new(),
-            storage_write: false,
-            env_require_auth: false,
-            auth_helper_called: false,
+        }
+    }
+
+    fn is_auth_call(&self, m: &ExprMethodCall, locals: &HashSet<String>) -> bool {
+        is_env_require_auth(m, &self.env_name, &self.address_names, locals)
+            || is_auth_helper_method_call(m, &self.env_name, &self.address_names, locals)
+    }
+
+    fn scan_block(&mut self, block: &Block, mut state: AuthState) -> AuthState {
+        for stmt in &block.stmts {
+            self.scan_stmt(stmt, &mut state);
+        }
+        state
+    }
+
+    fn scan_stmt(&mut self, stmt: &Stmt, state: &mut AuthState) {
+        match stmt {
+            Stmt::Local(local) => {
+                if let (Some(name), Some(init)) =
+                    (address_local_binding(&local.pat), &local.init)
+                {
+                    state.address_locals.insert(name);
+                    let mut isolated = AuthState {
+                        address_locals: state.address_locals.clone(),
+                        ..AuthState::default()
+                    };
+                    self.scan_expr(&init.expr, &mut isolated);
+                    state.storage_write |= isolated.storage_write;
+                }
+            }
+            Stmt::Expr(expr, _) => self.scan_expr(expr, state),
+            _ => {
+                // Items/macros cannot dominate a later write in a way this
+                // check can prove; conservatively ignore them.
+            }
+        }
+    }
+
+    fn scan_expr(&mut self, expr: &Expr, state: &mut AuthState) {
+        match expr {
+            Expr::MethodCall(m) => {
+                // Receiver and arguments are evaluated before the call.
+                self.scan_expr(&m.receiver, state);
+                for arg in &m.args {
+                    self.scan_expr(arg, state);
+                }
+                if is_storage_mutation_call(m) {
+                    state.storage_write = true;
+                }
+                if is_env_require_auth(m, &self.env_name, &self.address_names, &state.address_locals) {
+                    state.env_require_auth = true;
+                }
+                if is_auth_helper_method_call(m, &self.env_name, &self.address_names, &state.address_locals) {
+                    state.auth_helper_called = true;
+                }
+            }
+            Expr::If(expr_if) => {
+                // The condition always executes, so auth there is unconditional.
+                self.scan_expr(&expr_if.cond, state);
+                let mut then_state = state.clone();
+                then_state = self.scan_block(&expr_if.then_branch, then_state);
+
+                let mut branches = vec![then_state];
+                if let Some((_, else_expr)) = &expr_if.else_branch {
+                    let mut else_state = state.clone();
+                    self.scan_expr(else_expr, &mut else_state);
+                    branches.push(else_state);
+                } else {
+                    // No else arm: the "do nothing" path has no auth.
+                    branches.push(state.clone());
+                }
+                *state = AuthState::merge_branches(branches);
+            }
+            Expr::Match(expr_match) => {
+                self.scan_expr(&expr_match.expr, state);
+                let mut branches = Vec::new();
+                for arm in &expr_match.arms {
+                    let mut arm_state = state.clone();
+                    if let Some((_, guard)) = &arm.guard {
+                        self.scan_expr(guard, &mut arm_state);
+                    }
+                    self.scan_expr(&arm.body, &mut arm_state);
+                    branches.push(arm_state);
+                }
+                if branches.is_empty() {
+                    branches.push(state.clone());
+                }
+                *state = AuthState::merge_branches(branches);
+            }
+            Expr::Loop(_) | Expr::While(_) | Expr::ForLoop(_) => {
+                // A loop can execute zero times, so auth inside it never
+                // dominates later writes. Collect writes conservatively.
+                let mut body_state = state.clone();
+                let mut collector = visitor::StorageOnly { storage_write: false };
+                visit::visit_expr(&mut collector, expr);
+                body_state.storage_write |= collector.storage_write;
+                state.storage_write |= body_state.storage_write;
+            }
+            Expr::Closure(_) => {
+                // Closures may never be called: their auth cannot gate writes.
+                let mut collector = visitor::StorageOnly { storage_write: false };
+                visit::visit_expr(&mut collector, expr);
+                state.storage_write |= collector.storage_write;
+            }
+            Expr::Block(block) => {
+                let inner = self.scan_block(&block.block, state.clone());
+                state.storage_write |= inner.storage_write;
+                state.env_require_auth |= inner.env_require_auth;
+                state.auth_helper_called |= inner.auth_helper_called;
+                state.address_locals = inner.address_locals;
+            }
+            Expr::Paren(p) => self.scan_expr(&p.expr, state),
+            Expr::Group(g) => self.scan_expr(&g.expr, state),
+            Expr::Reference(r) => self.scan_expr(&r.expr, state),
+            Expr::Assign(a) => {
+                self.scan_expr(&a.left, state);
+                self.scan_expr(&a.right, state);
+            }
+            Expr::Call(c) => {
+                self.scan_expr(&c.func, state);
+                for arg in &c.args {
+                    self.scan_expr(arg, state);
+                }
+            }
+            Expr::Let(l) => self.scan_expr(&l.expr, state),
+            Expr::Return(r) => {
+                if let Some(e) = &r.expr {
+                    self.scan_expr(e, state);
+                }
+            }
+            _ => {
+                // Unknown expression kinds are traversed for storage writes
+                // only; auth found there is not treated as dominating.
+                let mut collector = visitor::StorageOnly { storage_write: false };
+                visit::visit_expr(&mut collector, expr);
+                state.storage_write |= collector.storage_write;
+            }
         }
     }
 }
 
-impl<'ast> Visit<'ast> for FuncBodyScan {
-    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
-        if let Stmt::Local(local) = stmt {
-            if let (Some(name), Some(_init)) = (address_local_binding(&local.pat), &local.init) {
-                self.address_locals.insert(name);
-            }
-        }
-        visit::visit_stmt(self, stmt);
+mod visitor {
+    use super::*;
+    use syn::visit::Visit;
+
+    pub(super) struct StorageOnly {
+        pub(super) storage_write: bool,
     }
 
-    fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
-        if is_storage_mutation_call(i) {
-            self.storage_write = true;
+    impl<'ast> Visit<'ast> for StorageOnly {
+        fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
+            if is_storage_mutation_call(i) {
+                self.storage_write = true;
+            }
+            visit::visit_expr_method_call(self, i);
         }
-        if is_env_require_auth(i, &self.env_name, &self.address_names, &self.address_locals) {
-            self.env_require_auth = true;
-        }
-        if is_auth_helper_method_call(i, &self.env_name, &self.address_names, &self.address_locals)
-        {
-            self.auth_helper_called = true;
-        }
-        visit::visit_expr_method_call(self, i);
     }
 }
 
@@ -266,6 +420,124 @@ impl Contract {
 "#,
         )?;
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    // ── Issue #1049: branch-sensitive auth dominance ────────────────────────
+
+    #[test]
+    fn conditional_auth_does_not_gate_a_later_write() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn withdraw(env: Env, to: Address, amount: i128) {
+        if amount > 100 {
+            to.require_auth();
+        }
+        env.storage().persistent().set(&Symbol::new(&env, "bal"), &0);
+    }
+}
+"#,
+        )?;
+        assert_eq!(hits.len(), 1, "auth in one if arm must not gate the write");
+        Ok(())
+    }
+
+    #[test]
+    fn auth_in_both_if_arms_gates_a_later_write() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn withdraw(env: Env, to: Address, amount: i128) {
+        if amount > 100 {
+            to.require_auth();
+        } else {
+            to.require_auth();
+        }
+        env.storage().persistent().set(&Symbol::new(&env, "bal"), &0);
+    }
+}
+"#,
+        )?;
+        assert!(hits.is_empty(), "auth on every path must gate the write");
+        Ok(())
+    }
+
+    #[test]
+    fn auth_in_one_match_arm_does_not_gate_a_later_write() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn withdraw(env: Env, to: Address, kind: u32) {
+        match kind {
+            1 => to.require_auth(),
+            _ => (),
+        }
+        env.storage().persistent().set(&Symbol::new(&env, "bal"), &0);
+    }
+}
+"#,
+        )?;
+        assert_eq!(hits.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn auth_inside_a_loop_does_not_gate_a_later_write() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn withdraw(env: Env, to: Address, count: u32) {
+        for _ in 0..count {
+            to.require_auth();
+        }
+        env.storage().persistent().set(&Symbol::new(&env, "bal"), &0);
+    }
+}
+"#,
+        )?;
+        assert_eq!(hits.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn auth_inside_a_closure_does_not_gate_a_later_write() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn withdraw(env: Env, to: Address) {
+        let check = || to.require_auth();
+        env.storage().persistent().set(&Symbol::new(&env, "bal"), &0);
+    }
+}
+"#,
+        )?;
+        assert_eq!(hits.len(), 1);
         Ok(())
     }
 }
