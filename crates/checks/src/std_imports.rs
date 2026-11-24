@@ -14,14 +14,21 @@ impl Check for ForbiddenStdImportsCheck {
         CHECK_NAME
     }
 
-    fn run(&self, _file: &File, source: &str) -> Vec<Finding> {
+    fn run(&self, file: &File, source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         if !source.contains("#[contractimpl]") && !source.contains("#[contract]") {
             return out;
         }
+        // `#[cfg(test)]` modules build for the host, where `std` is available,
+        // so `extern crate std; use std::println;` inside them is fine (#1062).
+        let test_ranges = crate::util::test_only_line_ranges(file);
         let mut in_block_comment = false;
         for (idx, line) in source.lines().enumerate() {
             let trimmed = line.trim_start();
+
+            // Block-comment state is still tracked above for correctness, but a
+            // line inside a test-only item is never reported.
+            let in_test = crate::util::in_any_range(&test_ranges, idx + 1);
 
             // Track block comment boundaries.
             if in_block_comment {
@@ -30,7 +37,7 @@ impl Check for ForbiddenStdImportsCheck {
                     in_block_comment = false;
                     // Continue processing the remainder below.
                     let after = &trimmed[end + 2..];
-                    if code_contains_std(after) {
+                    if !in_test && code_contains_std(after) {
                         push_finding(&mut out, idx, trimmed);
                     }
                 }
@@ -48,7 +55,7 @@ impl Check for ForbiddenStdImportsCheck {
                 in_block_comment = true;
                 // Analyse only the portion before the `/*`.
                 let before = &trimmed[..trimmed.find("/*").unwrap()];
-                if code_contains_std(before) {
+                if !in_test && code_contains_std(before) {
                     push_finding(&mut out, idx, trimmed);
                 }
                 continue;
@@ -62,7 +69,7 @@ impl Check for ForbiddenStdImportsCheck {
             // Strip string literal content so
             //   `let s = "uses std::mem-style layout";`
             // is not flagged.
-            if code_contains_std(code_part) {
+            if !in_test && code_contains_std(code_part) {
                 push_finding(&mut out, idx, trimmed);
             }
         }
@@ -282,6 +289,98 @@ impl C {
         let file = parse_file(source)?;
         let hits = ForbiddenStdImportsCheck.run(&file, source);
         assert_eq!(hits.len(), 1, "real std:: import must still be flagged");
+        Ok(())
+    }
+
+    // ---- #1062: std:: inside test-only modules must not be flagged ----
+
+    #[test]
+    fn ignores_std_inside_cfg_test_module() -> Result<(), syn::Error> {
+        let source = r#"
+#![no_std]
+use soroban_sdk::{contract, contractimpl, Env};
+
+#[contract]
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn hello(env: Env) {
+        let _ = env;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    extern crate std;
+    use std::println;
+    use std::vec::Vec;
+
+    #[test]
+    fn t() {
+        let v: Vec<u32> = std::vec![1];
+        println!("{:?}", v);
+    }
+}
+"#;
+        let file = parse_file(source)?;
+        let hits = ForbiddenStdImportsCheck.run(&file, source);
+        assert!(hits.is_empty(), "std:: inside #[cfg(test)] mod must not be flagged: {hits:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_std_inside_cfg_all_test_module() -> Result<(), syn::Error> {
+        let source = r#"
+#[contract]
+pub struct C;
+
+#[cfg(all(test, feature = "testutils"))]
+mod helpers {
+    use std::string::String;
+}
+"#;
+        let file = parse_file(source)?;
+        let hits = ForbiddenStdImportsCheck.run(&file, source);
+        assert!(hits.is_empty(), "std:: inside #[cfg(all(test, ..))] must not be flagged");
+        Ok(())
+    }
+
+    #[test]
+    fn still_flags_top_level_std_import_next_to_test_module() -> Result<(), syn::Error> {
+        let source = r#"
+use std::vec::Vec;
+
+#[contract]
+pub struct C;
+
+#[cfg(test)]
+mod test {
+    extern crate std;
+    use std::println;
+}
+"#;
+        let file = parse_file(source)?;
+        let hits = ForbiddenStdImportsCheck.run(&file, source);
+        assert_eq!(hits.len(), 1, "only the top-level import should be flagged: {hits:?}");
+        assert_eq!(hits[0].line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn still_flags_std_under_cfg_not_test() -> Result<(), syn::Error> {
+        let source = r#"
+#[contract]
+pub struct C;
+
+#[cfg(not(test))]
+mod prod {
+    use std::vec::Vec;
+}
+"#;
+        let file = parse_file(source)?;
+        let hits = ForbiddenStdImportsCheck.run(&file, source);
+        assert_eq!(hits.len(), 1, "#[cfg(not(test))] is production code and must be flagged");
         Ok(())
     }
 }

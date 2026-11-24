@@ -50,6 +50,52 @@ fn meta_mentions_test(meta: &syn::Meta) -> bool {
     }
 }
 
+/// 1-based, inclusive line ranges of test-only code: modules gated by
+/// `#[cfg(test)]` or named `tests` / `test` (the same rule as
+/// [`contractimpl_functions_excluding_test`]), and any other item
+/// carrying `#[cfg(test)]` or `#[test]`. Spans include the item's attributes.
+pub(crate) fn test_only_line_ranges(file: &syn::File) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    collect_test_ranges(&file.items, &mut out);
+    out
+}
+
+fn collect_test_ranges(items: &[syn::Item], out: &mut Vec<(usize, usize)>) {
+    for item in items {
+        let attrs: &[syn::Attribute] = match item {
+            syn::Item::Mod(m) => {
+                if is_cfg_test(&m.attrs) || m.ident == "tests" || m.ident == "test" {
+                    out.push(line_range(item));
+                } else if let Some((_, nested)) = &m.content {
+                    collect_test_ranges(nested, out);
+                }
+                continue;
+            }
+            syn::Item::Fn(f) => &f.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            syn::Item::Const(c) => &c.attrs,
+            syn::Item::Static(st) => &st.attrs,
+            syn::Item::Struct(st) => &st.attrs,
+            syn::Item::Enum(e) => &e.attrs,
+            _ => continue,
+        };
+        if is_cfg_test(attrs) || attrs.iter().any(|a| a.path().is_ident("test")) {
+            out.push(line_range(item));
+        }
+    }
+}
+
+fn line_range(item: &syn::Item) -> (usize, usize) {
+    let span = syn::spanned::Spanned::span(item);
+    (span.start().line, span.end().line)
+}
+
+pub(crate) fn in_any_range(ranges: &[(usize, usize)], line: usize) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| line >= *start && line <= *end)
+}
+
 /// Every function item inside a `#[contractimpl]` impl that is **not** inside a
 /// `#[cfg(test)]` module or a module named `tests`.
 pub fn contractimpl_functions_excluding_test(file: &syn::File) -> Vec<&syn::ImplItemFn> {
