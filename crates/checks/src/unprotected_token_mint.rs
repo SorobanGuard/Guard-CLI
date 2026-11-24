@@ -1,3 +1,4 @@
+use crate::sensitive_names::SensitiveNames;
 use crate::util::{
     self, contractimpl_functions_excluding_test, env_param_name, pat_ident_name,
     receiver_chain_contains, receiver_chain_contains_storage,
@@ -10,7 +11,25 @@ use syn::{Block, Expr, ExprMethodCall};
 const CHECK_NAME: &str = "unprotected-token-mint";
 const MINT_NAMES: &[&str] = &["mint", "burn", "issue", "redeem", "create_tokens"];
 
-pub struct UnprotectedTokenMintCheck;
+pub struct UnprotectedTokenMintCheck {
+    names: SensitiveNames,
+}
+
+impl UnprotectedTokenMintCheck {
+    pub fn new() -> Self {
+        Self::with_names(SensitiveNames::from_names(MINT_NAMES))
+    }
+
+    pub fn with_names(names: SensitiveNames) -> Self {
+        Self { names }
+    }
+}
+
+impl Default for UnprotectedTokenMintCheck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Check for UnprotectedTokenMintCheck {
     fn name(&self) -> &str {
@@ -21,7 +40,7 @@ impl Check for UnprotectedTokenMintCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let name = method.sig.ident.to_string();
-            if is_mint_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
+            if self.names.matches(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
                 let env_name = env_param_name(&method.sig).unwrap_or_else(|| "env".to_string());
                 let address_names = util::address_param_names(&method.sig);
                 let sensitive_line = first_storage_mutation_line(&method.block);
@@ -58,10 +77,6 @@ impl Check for UnprotectedTokenMintCheck {
         }
         out
     }
-}
-
-fn is_mint_name(name: &str) -> bool {
-    MINT_NAMES.contains(&name)
 }
 
 fn first_storage_mutation_line(block: &Block) -> Option<usize> {
@@ -282,6 +297,26 @@ impl C {
         let check = UnprotectedTokenMintCheck;
         let findings = check.run(&file, src);
         assert!(findings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn flags_extra_configured_name() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn airdrop(env: Env, to: Address, amount: u128) {
+        env.storage().instance().set(&symbol_short!("supply"), &amount);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = UnprotectedTokenMintCheck::with_names(
+            SensitiveNames::from_names(MINT_NAMES).with_extra(["airdrop"]),
+        );
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "airdrop");
         Ok(())
     }
 

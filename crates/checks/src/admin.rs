@@ -2,7 +2,7 @@
 
 use crate::util::{
     contractimpl_functions_excluding_test, is_admin_var_name, pat_ident_name,
-    receiver_chain_contains, receiver_chain_contains_storage,
+    receiver_chain_contains, receiver_chain_contains_storage, SensitiveNames,
 };
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
@@ -11,47 +11,29 @@ use syn::{Block, Expr, ExprIf, ExprMethodCall, File, Visibility};
 
 const CHECK_NAME: &str = "unprotected-admin";
 
-/// Known high-risk entrypoint names (exact match, snake_case).
-const SENSITIVE_NAMES: &[&str] = &[
-    "set_owner",
-    "set_admin",
-    "transfer_ownership",
-    "pause",
-    "unpause",
-    "migrate",
-    "upgrade",
-    "emergency_pause",
-    "emergency_stop",
-    "grant_role",
-    "revoke_role",
-    "withdraw_fees",
-    "set_fee",
-    "set_fees",
-    "renounce_ownership",
-    "destroy",
-    "kill",
-];
-
-/// Prefixes that mark a function as sensitive (e.g., `set_admin_fee`, `pause_withdrawals`,
-/// `emergency_shutdown`).
-const SENSITIVE_PREFIXES: &[&str] = &["set_admin", "pause_", "emergency_"];
-
 /// `pub` methods whose name matches a sensitive admin pattern and whose body never calls
 /// `require_auth` or `require_auth_for_args` (any receiver).
 pub struct UnprotectedAdminCheck {
-    extra_names: Vec<String>,
+    names: SensitiveNames,
 }
 
 impl UnprotectedAdminCheck {
     pub fn new() -> Self {
         Self {
-            extra_names: Vec::new(),
+            names: SensitiveNames::admin(),
         }
     }
 
-    /// Extend the built-in `SENSITIVE_NAMES` list with project-specific names.
+    /// Extend the built-in admin name list with project-specific names.
     pub fn with_extra_names(extra: Vec<String>) -> Self {
-        Self { extra_names: extra }
+        Self {
+            names: SensitiveNames::admin().with_extra(extra),
+        }
+    }
+
+    /// Use a fully customised name matcher.
+    pub fn with_names(names: SensitiveNames) -> Self {
+        Self { names }
     }
 }
 
@@ -73,7 +55,7 @@ impl Check for UnprotectedAdminCheck {
                 continue;
             }
             let name = method.sig.ident.to_string();
-            if !is_sensitive_name(&name, &self.extra_names) {
+            if !self.names.matches(&name) {
                 continue;
             }
             let addr_names = crate::util::address_param_names(&method.sig);
@@ -105,14 +87,6 @@ impl Check for UnprotectedAdminCheck {
         }
         out
     }
-}
-
-fn is_sensitive_name(name: &str, extra: &[String]) -> bool {
-    SENSITIVE_NAMES.contains(&name)
-        || SENSITIVE_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-        || extra.iter().any(|e| e == name)
 }
 
 fn body_has_auth_gate(block: &Block, env_name: Option<&str>, address_names: &[String]) -> bool {
@@ -571,6 +545,70 @@ impl C {
         let hits = UnprotectedAdminCheck::new().run(&file, "");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].function_name, "set_admin");
+        Ok(())
+    }
+
+    #[test]
+    fn matches_builtin_exact_name() {
+        let names = SensitiveNames::admin();
+        assert!(names.matches("set_owner"));
+        assert!(names.matches("transfer_ownership"));
+        assert!(!names.matches("hello"));
+    }
+
+    #[test]
+    fn matches_builtin_prefix() {
+        let names = SensitiveNames::admin();
+        assert!(names.matches("set_admin_fee"));
+        assert!(names.matches("pause_withdrawals"));
+        assert!(names.matches("emergency_shutdown"));
+    }
+
+    #[test]
+    fn extra_entries_extend_matching() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn rotate_keys(env: Env) {
+        let _ = env;
+    }
+}
+"#,
+        )?;
+        let hits = UnprotectedAdminCheck::new().run(&file, "");
+        assert!(hits.is_empty());
+
+        let check = UnprotectedAdminCheck::with_extra_names(vec!["rotate_keys".to_string()]);
+        let hits = check.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function_name, "rotate_keys");
+        Ok(())
+    }
+
+    #[test]
+    fn with_names_uses_custom_matcher() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn set_owner(env: Env) {
+        let _ = env;
+    }
+}
+"#,
+        )?;
+        let check = UnprotectedAdminCheck::with_names(SensitiveNames::empty());
+        let hits = check.run(&file, "");
+        assert!(hits.is_empty());
         Ok(())
     }
 

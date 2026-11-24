@@ -94,6 +94,51 @@ fn malformed_explicit_config_exits_two() {
 }
 
 #[test]
+fn config_min_severity_error_names_config_file() {
+    let root = temporary_directory("config-min-severity");
+    std::fs::create_dir_all(root.join("contract/src")).unwrap();
+    std::fs::write(root.join("contract/src/lib.rs"), "pub fn harmless() {}\n").unwrap();
+    let config = root.join("soroban-guard.toml");
+    std::fs::write(&config, "[scan]\npath = \"contract\"\nmin_severity = \"critical\"\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .arg("scan")
+        .current_dir(&root)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&config.display().to_string()), "{stderr}");
+    assert!(stderr.contains("[scan] min_severity"), "{stderr}");
+    assert!(!stderr.contains("--fail-on"), "{stderr}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn config_disabled_check_error_names_config_file() {
+    let root = temporary_directory("config-disabled-check");
+    std::fs::create_dir_all(root.join("contract/src")).unwrap();
+    std::fs::write(root.join("contract/src/lib.rs"), "pub fn harmless() {}\n").unwrap();
+    let config = root.join("soroban-guard.toml");
+    std::fs::write(
+        &config,
+        "[scan]\npath = \"contract\"\n\n[checks]\ndisabled = [\"not-a-check\"]\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-guard"))
+        .arg("scan")
+        .current_dir(&root)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&config.display().to_string()), "{stderr}");
+    assert!(stderr.contains("not-a-check"), "{stderr}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn no_config_flag_disables_discovery() {
     let root = temporary_directory("no-config");
     std::fs::create_dir_all(root.join("contract/src")).unwrap();

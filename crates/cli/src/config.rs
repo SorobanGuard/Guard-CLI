@@ -1,7 +1,43 @@
 //! `soroban-guard.toml` configuration file support.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// Where a resolved setting value came from.
+///
+/// Used to build error messages that name the actual origin of a bad value
+/// instead of always blaming a CLI flag the user may never have passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueSource {
+    /// The value came from the named CLI flag (e.g. `--fail-on`).
+    Flag(&'static str),
+    /// The value came from the config file at this path.
+    Config(PathBuf),
+}
+
+impl ValueSource {
+    /// Render a human-readable origin for an error about `key`.
+    ///
+    /// For a flag this is just the flag name (`--fail-on`); for a config
+    /// file it is `<path>: <key>` (e.g. `/repo/soroban-guard.toml: [scan] min_severity`).
+    pub fn describe(&self, key: &str) -> String {
+        match self {
+            ValueSource::Flag(flag) => (*flag).to_string(),
+            ValueSource::Config(path) => format!("{}: {key}", path.display()),
+        }
+    }
+}
+
+impl fmt::Display for ValueSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValueSource::Flag(flag) => write!(f, "{flag}"),
+            ValueSource::Config(path) => write!(f, "{}", path.display()),
+        }
+    }
+}
 
 /// Top-level config file structure.
 ///
@@ -33,14 +69,28 @@ pub struct ScanConfig {
 pub struct ChecksConfig {
     /// Check names to skip.
     pub disabled: Vec<String>,
+    /// Global extra sensitive function-name patterns applied to every
+    /// name-gated check.
     pub sensitive_names: SensitiveNamesConfig,
+    /// Per-check overrides, keyed by check name (e.g. `unprotected-token-mint`).
+    ///
+    /// Each entry may add its own `extra_names` on top of the global list.
+    pub per_check: BTreeMap<String, PerCheckNamesConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SensitiveNamesConfig {
-    /// Extra function names added to the built-in `SENSITIVE_NAMES` list.
+    /// Extra function-name patterns added to the built-in name lists.
     pub extra: Vec<String>,
+}
+
+/// Per-check name configuration (e.g. `[checks.unprotected-token-mint]`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PerCheckNamesConfig {
+    /// Extra function-name patterns for this specific check.
+    pub extra_names: Vec<String>,
 }
 
 /// Search upward from `scan_path` for the nearest `soroban-guard.toml`.
@@ -295,6 +345,39 @@ mod tests {
         let (cfg, path) = resolve(&root, None, true).unwrap();
         assert!(cfg.is_none());
         assert!(path.is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn value_source_describes_flags_and_config_paths() {
+        let flag = ValueSource::Flag("--fail-on");
+        assert_eq!(flag.describe("[scan] min_severity"), "--fail-on");
+        assert_eq!(flag.to_string(), "--fail-on");
+
+        let cfg = ValueSource::Config(PathBuf::from("/repo/soroban-guard.toml"));
+        assert_eq!(
+            cfg.describe("[scan] min_severity"),
+            "/repo/soroban-guard.toml: [scan] min_severity"
+        );
+        assert_eq!(cfg.to_string(), "/repo/soroban-guard.toml");
+    }
+
+    #[test]
+    fn per_check_extra_names_are_parsed() {
+        let root = temp_root("per-check");
+        fs::write(
+            root.join("soroban-guard.toml"),
+            "[checks.sensitive_names]\nextra = [\"global_*\"]\n\n\
+             [checks.per_check.unprotected-token-mint]\nextra_names = [\"mint_*\"]\n",
+        )
+        .unwrap();
+
+        let (cfg, _) = load(&root).unwrap();
+        let cfg = cfg.unwrap();
+        assert_eq!(cfg.checks.sensitive_names.extra, vec!["global_*".to_string()]);
+        let per = cfg.checks.per_check.get("unprotected-token-mint").unwrap();
+        assert_eq!(per.extra_names, vec!["mint_*".to_string()]);
 
         fs::remove_dir_all(root).unwrap();
     }

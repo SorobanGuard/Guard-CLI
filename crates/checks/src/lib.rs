@@ -70,6 +70,8 @@ pub use uninitialized_storage_read::UninitializedStorageReadCheck;
 pub use unprotected_contract_deployment::UnprotectedContractDeploymentCheck;
 pub use unprotected_token_mint::UnprotectedTokenMintCheck;
 pub use unprotected_upgrade::UnprotectedUpgradeCheck;
+pub use SensitiveNames;
+pub use SensitiveNamesConfig;
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -261,12 +263,12 @@ pub fn default_checks() -> Vec<Box<dyn Check + Send + Sync>> {
 
 #[cfg(test)]
 mod registry_tests {
-    use super::{default_checks, default_checks_with_config};
+    use super::{default_checks, default_checks_with_config, SensitiveNamesConfig};
 
     #[test]
     fn default_and_configured_check_lists_share_same_names() {
         let default_names: Vec<_> = default_checks().iter().map(|check| check.name().to_string()).collect();
-        let configured_names: Vec<_> = default_checks_with_config(&[], &[])
+        let configured_names: Vec<_> = default_checks_with_config(&[], &SensitiveNamesConfig::default())
             .iter()
             .map(|check| check.name().to_string())
             .collect();
@@ -280,7 +282,10 @@ mod registry_tests {
 
         for names in [
             default_checks().iter().map(|c| c.name().to_string()).collect::<Vec<_>>(),
-            default_checks_with_config(&[], &[]).iter().map(|c| c.name().to_string()).collect::<Vec<_>>(),
+            default_checks_with_config(&[], &SensitiveNamesConfig::default())
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect::<Vec<_>>(),
         ] {
             let unique: HashSet<_> = names.iter().cloned().collect();
             assert_eq!(names.len(), unique.len(), "duplicate check name found in {names:?}");
@@ -288,19 +293,120 @@ mod registry_tests {
     }
 }
 
+/// Name-matching configuration shared by every name-gated check.
+///
+/// `extra` applies to **all** name-gated checks; `per_check` adds names to a
+/// single check, keyed by the check's [`Check::name`] (e.g.
+/// `"unprotected-token-mint"`). Entries are matched as described in
+/// `docs/configuration.md`: an entry is either an exact function name or a
+/// prefix pattern ending in `*` (e.g. `"set_*"`).
+#[derive(Clone, Debug, Default)]
+pub struct SensitiveNamesConfig {
+    /// Extra names/patterns applied to every name-gated check.
+    pub extra: Vec<String>,
+    /// Per-check extra names/patterns, keyed by check name.
+    pub per_check: BTreeMap<String, Vec<String>>,
+}
+
+impl SensitiveNamesConfig {
+    /// Build the resolved [`SensitiveNames`] for a check from its canonical
+    /// defaults plus the global `extra` and the check's own `extra_names`.
+    pub fn resolve(&self, check_name: &str, defaults: &[&str]) -> SensitiveNames {
+        let mut names = SensitiveNames::from_defaults(defaults);
+        names.extend(self.extra.iter().cloned());
+        if let Some(per_check) = self.per_check.get(check_name) {
+            names.extend(per_check.iter().cloned());
+        }
+        names
+    }
+}
+
+/// Resolved set of sensitive name patterns for a single check.
+///
+/// Each entry is either an exact function name or a prefix pattern ending in
+/// `*`. Matching is case-sensitive.
+#[derive(Clone, Debug, Default)]
+pub struct SensitiveNames {
+    entries: Vec<String>,
+}
+
+impl SensitiveNames {
+    /// Create an empty set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a set from canonical default names.
+    pub fn from_defaults(defaults: &[&str]) -> Self {
+        Self { entries: defaults.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// Add a single name or pattern.
+    pub fn push(&mut self, entry: impl Into<String>) {
+        self.entries.push(entry.into());
+    }
+
+    /// Add several names or patterns.
+    pub fn extend<I: IntoIterator<Item = String>>(&mut self, entries: I) {
+        self.entries.extend(entries);
+    }
+
+    /// The configured entries, in insertion order.
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    /// Returns `true` if `name` matches any configured entry.
+    ///
+    /// An entry ending in `*` is a prefix pattern (the `*` is stripped and the
+    /// remainder must be a prefix of `name`); any other entry must match
+    /// `name` exactly.
+    pub fn matches(&self, name: &str) -> bool {
+        self.entries.iter().any(|entry| match entry.strip_suffix('*') {
+            Some(prefix) => name.starts_with(prefix),
+            None => name == entry,
+        })
+    }
+}
+
 /// Like [`default_checks`] but applies config-file settings:
 /// - `disabled`: check names to omit
-/// - `extra_sensitive_names`: extra names added to `UnprotectedAdminCheck`
+/// - `names`: sensitive-name configuration threaded into every name-gated check
 pub fn default_checks_with_config(
     disabled: &[String],
-    extra_sensitive_names: &[String],
+    names: &SensitiveNamesConfig,
 ) -> Vec<Box<dyn Check + Send + Sync>> {
     let mut checks = all_checks_base();
-    // `UnprotectedAdminCheck` is the only check whose construction is config-driven; swap the
-    // plain instance from `all_checks_base()` for one built with the extra sensitive names.
+    // Swap the plain instances from `all_checks_base()` for config-driven ones.
     for check in checks.iter_mut() {
-        if check.name() == UnprotectedAdminCheck::new().name() {
-            *check = Box::new(UnprotectedAdminCheck::with_extra_names(extra_sensitive_names.to_vec()));
+        let name = check.name().to_string();
+        match name.as_str() {
+            n if n == UnprotectedAdminCheck::new().name() => {
+                *check = Box::new(UnprotectedAdminCheck::with_names(
+                    names.resolve(n, admin::DEFAULT_SENSITIVE_NAMES),
+                ));
+            }
+            n if n == MissingZeroAddressCheck::new().name() => {
+                *check = Box::new(MissingZeroAddressCheck::with_names(
+                    names.resolve(n, zero_address::DEFAULT_SENSITIVE_NAMES),
+                ));
+            }
+            n if n == UnprotectedUpgradeCheck::new().name() => {
+                *check = Box::new(UnprotectedUpgradeCheck::with_names(
+                    names.resolve(n, unprotected_upgrade::DEFAULT_SENSITIVE_NAMES),
+                ));
+            }
+            n if n == UnprotectedTokenMintCheck::new().name() => {
+                *check = Box::new(UnprotectedTokenMintCheck::with_names(
+                    names.resolve(n, unprotected_token_mint::DEFAULT_SENSITIVE_NAMES),
+                ));
+            }
+            n if n == MissingEventForAdminChangeCheck::new().name() => {
+                *check = Box::new(MissingEventForAdminChangeCheck::with_names(
+                    names.resolve(n, missing_event_for_admin_change::DEFAULT_SENSITIVE_NAMES),
+                ));
+            }
+            _ => {}
         }
     }
     checks.retain(|c| !disabled.contains(&c.name().to_string()));

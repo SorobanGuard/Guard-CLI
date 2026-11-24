@@ -43,13 +43,34 @@ disabled = ["unsafe-randomness", "reentrancy"]
 
 [checks.sensitive_names]
 # Extra function-name patterns to treat as sensitive (admin/privileged),
-# on top of the built-in list used exclusively by the `unprotected-admin` check.
-# Note: other checks that have their own sensitive-name lists do NOT currently
-# read this option. Today this includes `missing-zero-address-check`,
-# `unprotected-upgrade`, `unprotected-token-mint`, and
-# `unprotected-contract-deployment`.
+# on top of the built-in lists used by every name-gated check:
+# `unprotected-admin`, `missing-zero-address-check`, `unprotected-upgrade`,
+# `unprotected-token-mint`, and `missing-event-for-admin-change`.
 extra = ["drain", "sweep", "rescue_funds"]
+
+# Per-check extras: extend only the named check, on top of the global `extra`
+# and that check's built-in list. The table key is the check's `list-checks`
+# name.
+[checks.sensitive_names.unprotected-token-mint]
+extra_names = ["mint_rewards"]
+
+[checks.sensitive_names.unprotected-admin]
+extra_names = ["rotate_owner"]
 ```
+
+### Matching semantics
+
+Each entry in `extra` (and in a per-check `extra_names` list) is matched
+against a function name as follows:
+
+- An entry that ends with `*` is a **prefix** match: `drain*` matches
+  `drain`, `drain_funds`, and `drainAll`.
+- Any other entry is an **exact** match: `drain` matches only `drain`.
+
+Matching is case-sensitive and applies to the function's simple name (no
+module path). The effective name set for a check is its built-in list, plus
+the global `extra` entries, plus that check's own `extra_names` entries.
+=======
 
 ## Field reference
 
@@ -58,13 +79,15 @@ extra = ["drain", "sweep", "rescue_funds"]
 | `[scan] path` | string | unset | Scan path used when `scan` is given no positional path. The config is looked up from the current directory (same upward search as above), and a relative value is resolved against the current directory, not the config file's location. If neither a path argument nor this key is set, the scan exits `2`. |
 | `[scan] min_severity` | `"high"` \| `"medium"` \| `"low"` | unset | Same as `--fail-on`: exit `1` when a finding at or above this severity is present. |
 | `[checks] disabled` | list of strings | `[]` | Check names to skip, merged with any `--disable-check` flags. Unknown names cause the scan to exit `2`. |
-| `[checks.sensitive_names] extra` | list of strings | `[]` | Additional function-name patterns treated as privileged/admin-like, appended to the built-in list used **only** by `unprotected-admin`. Other checks (`missing-zero-address-check`, `unprotected-upgrade`, `unprotected-token-mint`, `unprotected-contract-deployment`) maintain their own separate hardcoded lists and are not affected by this option. |
+| `[checks.sensitive_names] extra` | list of strings | `[]` | Additional function-name patterns treated as privileged/admin-like, appended to the built-in list of **every** name-gated check (`unprotected-admin`, `missing-zero-address-check`, `unprotected-upgrade`, `unprotected-token-mint`, `missing-event-for-admin-change`). An entry ending in `*` is a prefix match; any other entry is an exact match (case-sensitive). |
+| `[checks.sensitive_names.<check>] extra_names` | list of strings | `[]` | Additional function-name patterns applied **only** to the check named `<check>` (a `list-checks` name), on top of the global `extra` and that check's built-in list. Same exact/prefix matching rules as `extra`. |
 
 ## Example
 
 A contract crate that wants CI to fail on Medium findings, skip the
 randomness check (it uses an audited off-chain oracle instead), and flag a
-custom `drain` function as sensitive:
+custom `drain` function as sensitive across all name-gated checks, plus a
+`mint_rewards` function as sensitive only for `unprotected-token-mint`:
 
 ```toml
 # soroban-guard.toml
@@ -76,6 +99,9 @@ disabled = ["unsafe-randomness"]
 
 [checks.sensitive_names]
 extra = ["drain"]
+
+[checks.sensitive_names.unprotected-token-mint]
+extra_names = ["mint_rewards"]
 ```
 
 ```bash
