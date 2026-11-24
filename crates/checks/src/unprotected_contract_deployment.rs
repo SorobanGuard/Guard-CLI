@@ -48,7 +48,7 @@ impl Check for UnprotectedContractDeploymentCheck {
                                     .to_string(),
                             ),
                             suggestion: Some(
-                                "Add env.require_auth() before deployment operations"
+                                "Call `require_auth()` on the caller/admin `Address` (for example `let admin: Address = env.storage().instance().get(&ADMIN).unwrap(); admin.require_auth();`). `Env::require_auth` is not public soroban-sdk API."
                                     .to_string(),
                             ),
                         });
