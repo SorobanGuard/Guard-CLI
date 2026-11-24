@@ -22,6 +22,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `unsafe-storage-patterns`: the temporary-storage `get_unchecked` rule (soroban-sdk
+  has no such method) is replaced by one for `temporary().get(..).unwrap()` /
+  `.expect(..)` and for unwrapping the `Option` passed to a temporary
+  `update` / `try_update` closure. `get_unchecked` is also dropped from the read
+  predicates in `reentrancy-risk`, `panic-in-contract` and
+  `uninitialized-storage-read` (#1055).
+- `reentrancy-risk`: external calls now include `try_invoke_contract` and any
+  method called on a contract client built with `<X>Client::new(..)`
+  (`token::Client`, `TokenClient`, generated clients, `use … as` aliases) (#1056).
+- `reentrancy-risk`: calls and storage reads in an `if` / `if let` condition are
+  now seen (#1057).
+- `unsafe-randomness`: removed the dead `visit_impl_item_fn` override; a test now
+  asserts that no default check reports an empty `function_name` for a finding
+  inside a method (#1058).
 - `unsafe-storage-patterns`: `Symbol::new` detection now matches the last two
   path segments, so the fully-qualified `soroban_sdk::Symbol::new(...)` form is
   caught, not just the two-segment `Symbol::new(...)`.

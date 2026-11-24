@@ -51,10 +51,56 @@ fn is_temporary_storage_mutation(m: &ExprMethodCall) -> bool {
     is_storage_mutation_call(m) && receiver_chain_contains_temporary(&m.receiver)
 }
 
-fn is_temporary_get_unchecked(m: &ExprMethodCall) -> bool {
-    m.method == "get_unchecked"
-        && receiver_chain_contains_storage(&m.receiver)
-        && receiver_chain_contains_temporary(&m.receiver)
+fn is_temporary_chain(expr: &Expr) -> bool {
+    receiver_chain_contains_storage(expr) && receiver_chain_contains_temporary(expr)
+}
+
+/// `env.storage().temporary().get(&k).unwrap()` / `.expect(..)`: temporary entries are
+/// deleted when their TTL lapses, so this panics after expiry (#1055).
+fn is_temporary_get_unwrap(m: &ExprMethodCall) -> bool {
+    if m.method != "unwrap" && m.method != "expect" {
+        return false;
+    }
+    matches!(&*m.receiver, Expr::MethodCall(get) if get.method == "get" && is_temporary_chain(&get.receiver))
+}
+
+/// Lines of `old.unwrap()` / `old.expect(..)` inside the closure passed to
+/// `env.storage().temporary().update(&k, |old| ..)` / `try_update(..)`, where `old` is the
+/// closure's `Option<V>` parameter — `None` once the entry has expired.
+fn temporary_update_closure_unwraps(m: &ExprMethodCall) -> Vec<usize> {
+    if (m.method != "update" && m.method != "try_update") || !is_temporary_chain(&m.receiver) {
+        return Vec::new();
+    }
+    struct UnwrapFinder<'a> {
+        param: &'a str,
+        lines: Vec<usize>,
+    }
+    impl Visit<'_> for UnwrapFinder<'_> {
+        fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
+            if (i.method == "unwrap" || i.method == "expect")
+                && matches!(&*i.receiver, Expr::Path(p) if p.path.is_ident(self.param))
+            {
+                self.lines.push(i.span().start().line);
+            }
+            visit::visit_expr_method_call(self, i);
+        }
+    }
+    let mut lines = Vec::new();
+    for arg in &m.args {
+        let Expr::Closure(closure) = arg else {
+            continue;
+        };
+        let Some(param) = closure.inputs.first().and_then(crate::util::pat_ident_name) else {
+            continue;
+        };
+        let mut finder = UnwrapFinder {
+            param: &param,
+            lines: Vec::new(),
+        };
+        finder.visit_expr(&closure.body);
+        lines.extend(finder.lines);
+    }
+    lines
 }
 
 /// Matches a call whose *last two* path segments are `Symbol::new` — so both
@@ -131,16 +177,22 @@ struct StorageVisitor<'a> {
 
 impl Visit<'_> for StorageVisitor<'_> {
     fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
-        if is_temporary_get_unchecked(i) {
+        let mut unwrap_lines = Vec::new();
+        if is_temporary_get_unwrap(i) {
+            unwrap_lines.push(i.method.span().start().line);
+        }
+        unwrap_lines.extend(temporary_update_closure_unwraps(i));
+        for line in unwrap_lines {
             self.out.push(Finding {
                 check_name: CHECK_NAME.to_string(),
                 severity: Severity::Medium,
                 file_path: String::new(),
-                line: i.span().start().line,
+                line,
                 function_name: self.fn_name.clone(),
                 description: format!(
-                    "Method `{}` calls `get_unchecked` on temporary storage. \
-                     If the entry has expired the call will panic at runtime.",
+                    "Method `{}` unwraps a value read from **temporary** storage. Temporary \
+                     entries are deleted when their TTL lapses, so this panics once the entry \
+                     has expired.",
                     self.fn_name
                 ),
                 rule_url: Some(
@@ -148,7 +200,8 @@ impl Visit<'_> for StorageVisitor<'_> {
                         .to_string(),
                 ),
                 suggestion: Some(
-                    "Use `env.storage().temporary().get(&key)` (returns `Option`) and handle the missing case."
+                    "Handle the missing case: `match env.storage().temporary().get(&key) { Some(v) => .., None => .. }`, \
+                     or `unwrap_or(default)`; in an `update`/`try_update` closure, match on the `Option` argument."
                         .to_string(),
                 ),
             });
@@ -216,27 +269,107 @@ mod tests {
     use crate::Check;
     use syn::parse_file;
 
-    #[test]
-    fn flags_temporary_get_unchecked() -> Result<(), syn::Error> {
-        let file = parse_file(
-            r#"
-use soroban_sdk::{contractimpl, symbol_short, Env};
+    fn run_src(src: &str) -> Result<Vec<Finding>, syn::Error> {
+        Ok(UnsafeStoragePatternsCheck.run(&parse_file(src)?, src))
+    }
 
+    /// #1055: `temporary().get(..).unwrap()` panics once the entry has expired.
+    #[test]
+    fn flags_temporary_get_unwrap_and_expect() -> Result<(), syn::Error> {
+        let hits = run_src(
+            r#"
+use soroban_sdk::{contract, contractimpl, symbol_short, Env, Symbol};
+
+#[contract]
 pub struct C;
 
-const K: soroban_sdk::Symbol = symbol_short!("k");
+const K: Symbol = symbol_short!("k");
 
 #[contractimpl]
 impl C {
     pub fn load(env: Env) -> u32 {
-        env.storage().temporary().get_unchecked(&K)
+        env.storage().temporary().get(&K).unwrap()
+    }
+
+    pub fn load_or_panic(env: Env) -> u32 {
+        env.storage().temporary().get::<Symbol, u32>(&K).expect("expired")
     }
 }
 "#,
         )?;
-        let hits = UnsafeStoragePatternsCheck.run(&file, "");
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].description.contains("get_unchecked"));
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(hits.iter().all(|h| h.description.contains("expired")));
+        assert_eq!(hits[0].function_name, "load");
+        assert_eq!(hits[1].function_name, "load_or_panic");
+        Ok(())
+    }
+
+    /// #1055: unwrapping the `Option` handed to an `update` / `try_update` closure.
+    #[test]
+    fn flags_unwrap_in_temporary_update_closures() -> Result<(), syn::Error> {
+        let hits = run_src(
+            r#"
+use soroban_sdk::{contract, contractimpl, symbol_short, Env, Symbol};
+
+#[contract]
+pub struct C;
+
+const K: Symbol = symbol_short!("k");
+
+#[contractimpl]
+impl C {
+    pub fn bump(env: Env) -> u32 {
+        env.storage().temporary().update(&K, |old: Option<u32>| old.unwrap() + 1)
+    }
+
+    pub fn try_bump(env: Env) -> Result<u32, ()> {
+        env.storage()
+            .temporary()
+            .try_update(&K, |old: Option<u32>| Ok(old.expect("expired") + 1))
+    }
+}
+"#,
+        )?;
+        let unwraps: Vec<_> = hits
+            .iter()
+            .filter(|h| h.description.contains("unwraps"))
+            .collect();
+        assert_eq!(unwraps.len(), 2, "{hits:?}");
+        Ok(())
+    }
+
+    /// #1055: handling the missing case, or persistent storage, is fine.
+    #[test]
+    fn ignores_handled_temporary_reads_and_persistent_unwrap() -> Result<(), syn::Error> {
+        let hits = run_src(
+            r#"
+use soroban_sdk::{contract, contractimpl, symbol_short, Env, Symbol};
+
+#[contract]
+pub struct C;
+
+const K: Symbol = symbol_short!("k");
+
+#[contractimpl]
+impl C {
+    pub fn load(env: Env) -> u32 {
+        env.storage().temporary().get(&K).unwrap_or(0)
+    }
+
+    pub fn load_match(env: Env) -> u32 {
+        match env.storage().temporary().get::<Symbol, u32>(&K) {
+            Some(v) => v,
+            None => 0,
+        }
+    }
+
+    pub fn load_persistent(env: Env) -> u32 {
+        env.storage().persistent().get(&K).unwrap()
+    }
+}
+"#,
+        )?;
+        assert!(hits.is_empty(), "{hits:?}");
         Ok(())
     }
 

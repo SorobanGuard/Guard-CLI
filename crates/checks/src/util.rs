@@ -317,6 +317,60 @@ pub(crate) fn receiver_chain_contains_persistent(expr: &Expr) -> bool {
     receiver_chain_contains(expr, "persistent")
 }
 
+/// Names introduced by `use …::X as Y;` anywhere in the file's top-level `use` items, for
+/// every original name `X` that satisfies `wanted`. Lets checks recognise a renamed type
+/// (`use soroban_sdk::token::Client as Tok;` → `Tok`).
+pub(crate) fn collect_use_renames(
+    file: &syn::File,
+    wanted: impl Fn(&str) -> bool,
+) -> HashSet<String> {
+    fn walk(tree: &syn::UseTree, wanted: &dyn Fn(&str) -> bool, out: &mut HashSet<String>) {
+        match tree {
+            syn::UseTree::Rename(rename) => {
+                if wanted(&rename.ident.to_string()) {
+                    out.insert(rename.rename.to_string());
+                }
+            }
+            syn::UseTree::Path(path) => walk(&path.tree, wanted, out),
+            syn::UseTree::Group(group) => {
+                for nested in &group.items {
+                    walk(nested, wanted, out);
+                }
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+        }
+    }
+    let mut out = HashSet::new();
+    for item in &file.items {
+        if let Item::Use(use_item) = item {
+            walk(&use_item.tree, &wanted, &mut out);
+        }
+    }
+    out
+}
+
+/// For a constructor call `…::<Type>::new(…)` (looking through a leading `&` or parens),
+/// the `Type` identifier. Used to recognise contract-client constructors such as
+/// `token::Client::new(&env, &id)`, `TokenClient::new(..)` or a generated `FooClient::new(..)`.
+pub(crate) fn ctor_type_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Reference(r) => ctor_type_name(&r.expr),
+        Expr::Paren(p) => ctor_type_name(&p.expr),
+        Expr::Call(call) => {
+            let Expr::Path(p) = &*call.func else {
+                return None;
+            };
+            let segs = &p.path.segments;
+            let n = segs.len();
+            if n < 2 || segs[n - 1].ident != "new" {
+                return None;
+            }
+            Some(segs[n - 2].ident.to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Is `name` one of the Soroban SDK cross-contract call entry points —
 /// `invoke_contract`, `invoke_contract_check`, or the fallible `try_invoke_contract`?
 /// Shared by the checks that need to recognise a cross-contract call regardless of

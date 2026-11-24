@@ -10,7 +10,7 @@ use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
 use syn::visit::{self, Visit};
-use syn::{Expr, ExprMethodCall, File, Item, Pat, Stmt};
+use syn::{Expr, ExprMethodCall, File, Pat, Stmt};
 
 const CHECK_NAME: &str = "missing-balance-check";
 
@@ -189,59 +189,15 @@ fn ident_of(e: &Expr) -> Option<String> {
 /// Collect every `use ...::Client as X` / `use ...::TokenClient as X` alias so a renamed
 /// token-client type (`Tok::new(...)`) is still recognised as a token-client constructor.
 fn collect_token_client_aliases(file: &File) -> HashSet<String> {
-    let mut aliases = HashSet::new();
-    for item in &file.items {
-        if let Item::Use(use_item) = item {
-            collect_aliases_from_use_tree(&use_item.tree, &mut aliases);
-        }
-    }
-    aliases
-}
-
-/// `syn::UseTree` is an enum (`Path`/`Name`/`Rename`/`Glob`/`Group`), not a
-/// struct with `rename`/`prefix`/`group` fields — those don't exist. A
-/// renamed import (`use a::b::TokenClient as Tc;`) parses as nested `Path`
-/// nodes (`a`, then `b`) wrapping a terminal `Rename` node holding the
-/// original name (`ident`, here `TokenClient`) and the new one (`rename`,
-/// `Tc`); a group (`use a::{X, Y as Z};`) parses as a `Group` of `UseTree`s,
-/// each needing the same walk.
-fn collect_aliases_from_use_tree(tree: &syn::UseTree, out: &mut HashSet<String>) {
-    match tree {
-        syn::UseTree::Rename(rename) => {
-            if rename.ident == "Client" || rename.ident == "TokenClient" {
-                out.insert(rename.rename.to_string());
-            }
-        }
-        syn::UseTree::Path(path) => collect_aliases_from_use_tree(&path.tree, out),
-        syn::UseTree::Group(group) => {
-            for nested in &group.items {
-                collect_aliases_from_use_tree(nested, out);
-            }
-        }
-        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
-    }
+    crate::util::collect_use_renames(file, |name| name == "Client" || name == "TokenClient")
 }
 
 /// Is `expr` a call to `token::Client::new(...)`, `TokenClient::new(...)`, an aliased client
 /// type (`Tok::new(...)` where `Tok` aliases `Client`/`TokenClient`), or any path ending in
 /// `Client::new` / `TokenClient::new`? Also looks through a leading `&`.
 fn expr_is_token_client_ctor(expr: &Expr, aliases: &HashSet<String>) -> bool {
-    match expr {
-        Expr::Reference(r) => expr_is_token_client_ctor(&r.expr, aliases),
-        Expr::Call(call) => {
-            let Expr::Path(p) = &*call.func else {
-                return false;
-            };
-            let segs = &p.path.segments;
-            let n = segs.len();
-            if n < 2 || segs[n - 1].ident != "new" {
-                return false;
-            }
-            let ty = &segs[n - 2].ident;
-            ty == "Client" || ty == "TokenClient" || aliases.contains(&ty.to_string())
-        }
-        _ => false,
-    }
+    crate::util::ctor_type_name(expr)
+        .is_some_and(|ty| ty == "Client" || ty == "TokenClient" || aliases.contains(&ty))
 }
 
 #[cfg(test)]

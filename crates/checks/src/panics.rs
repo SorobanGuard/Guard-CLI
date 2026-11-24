@@ -6,7 +6,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{Expr, ExprMethodCall, File};
 
-/// Returns true when `expr` is **exactly** `.get(…)`/`.get_unchecked(…)` chained directly onto a
+/// Returns true when `expr` is **exactly** `.get(…)` chained directly onto a
 /// `.storage()` receiver chain — the same pattern that
 /// `uninitialized_storage_read::UninitializedStorageReadCheck` reports under its own, more
 /// specific, `uninitialized-storage-read` finding. Only that single-hop pattern is suppressed
@@ -17,10 +17,7 @@ use syn::{Expr, ExprMethodCall, File};
 ///                 `storage.get(&k).unwrap_or(0).checked_mul(x).unwrap()` → NOT suppressed here
 fn is_storage_get(expr: &Expr) -> bool {
     match expr {
-        Expr::MethodCall(m) => {
-            (m.method == "get" || m.method == "get_unchecked")
-                && receiver_chain_contains_storage(&m.receiver)
-        }
+        Expr::MethodCall(m) => m.method == "get" && receiver_chain_contains_storage(&m.receiver),
         _ => false,
     }
 }
