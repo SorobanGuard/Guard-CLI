@@ -179,15 +179,29 @@ fn has_generated_file_header(path: &Path) -> Result<bool, std::io::Error> {
     let mut reader = std::io::BufReader::new(file);
     let mut line = String::new();
 
-    for _ in 0..5 {
+    // Read up to 20 lines to handle license headers and attributes
+    for _ in 0..20 {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
             break;
         }
         let trimmed = line.trim_start();
+        
+        // Check for line comments (// and //!)
         if trimmed.starts_with("// @generated")
             || trimmed.starts_with("// Code generated")
             || trimmed.starts_with("// DO NOT EDIT")
+            || trimmed.starts_with("//! @generated")
+            || trimmed.starts_with("//! Code generated")
+            || trimmed.starts_with("//! DO NOT EDIT")
+        {
+            return Ok(true);
+        }
+        
+        // Check for block comments (/* ... */)
+        if trimmed.contains("/* @generated */")
+            || trimmed.contains("/* Code generated")
+            || trimmed.contains("/* DO NOT EDIT */")
         {
             return Ok(true);
         }
