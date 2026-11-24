@@ -1422,7 +1422,7 @@ mod tests {
                 function_name: "set_balance".to_string(),
                 description: "Missing require_auth".to_string(),
                 rule_url: Some(rule_url.to_string()),
-                suggestion: Some("Add env.require_auth();".to_string()),
+                suggestion: Some("Call `require_auth()` on the caller/admin `Address` (for example `let admin: Address = env.storage().instance().get(&ADMIN).unwrap(); admin.require_auth();`). `Env::require_auth` is not public soroban-sdk API.".to_string()),
             },
             Finding {
                 check_name: "unchecked-arithmetic".to_string(),
@@ -1480,7 +1480,7 @@ mod tests {
         );
         // New Suggestion column
         assert!(
-            contents.contains("Add env.require_auth();"),
+            contents.contains("Call `require_auth()` on the caller/admin `Address` (for example `let admin: Address = env.storage().instance().get(&ADMIN).unwrap(); admin.require_auth();`). `Env::require_auth` is not public soroban-sdk API."),
             "should contain the suggestion"
         );
         // Column headers

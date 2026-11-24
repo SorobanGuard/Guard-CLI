@@ -42,16 +42,14 @@ impl Check for MissingRequireAuthCheck {
                 line,
                 function_name: fn_name.clone(),
                 description: format!(
-                    "Method `{fn_name}` writes to `{env_name}.storage()` but does not call \
-                     `{env_name}.require_auth()`. Callers may mutate contract state without proving \
-                     they are authorized."
+                    "Method `{fn_name}` writes to `{env_name}.storage()` but does not call `require_auth()` on the caller/admin `Address`. Callers may mutate contract state without proving they are authorized."
                 ),
                 rule_url: Some(
                     "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-require-auth-high"
                         .to_string(),
                 ),
                 suggestion: Some(format!(
-                    "Add `{env_name}.require_auth();` as the first statement in the function body."
+                    "Call `require_auth()` on the caller/admin `Address` (for example `let admin: Address = env.storage().instance().get(&ADMIN).unwrap(); admin.require_auth();`). `Env::require_auth` is not public soroban-sdk API."
                 )),
             });
         }

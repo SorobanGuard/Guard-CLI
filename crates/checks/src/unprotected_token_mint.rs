@@ -49,7 +49,7 @@ impl Check for UnprotectedTokenMintCheck {
                                 .to_string(),
                         ),
                         suggestion: Some(
-                            "Add env.require_auth() before the mint/burn operation to restrict it to authorized callers"
+                            "Call `require_auth()` on the caller/admin `Address` before the mint/burn operation to restrict it to authorized callers."
                                 .to_string(),
                         ),
                     });

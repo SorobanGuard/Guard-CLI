@@ -651,3 +651,34 @@ impl C {
 "#,
     );
 }
+
+// ─── Issue #1050: no suggestion may recommend non-public Env::require_auth ──
+
+#[test]
+fn no_suggestion_recommends_env_require_auth() {
+    let src = r#"
+use soroban_sdk::{contractimpl, Env, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn set_val(env: Env, v: u32) {
+        env.storage().persistent().set(&Symbol::new(&env, "k"), &v);
+    }
+}
+"#;
+    let file = parse_file(src).expect("snippet should parse");
+    let mut findings = 0;
+    for check in default_checks() {
+        for finding in check.run(&file, src) {
+            findings += 1;
+            if let Some(suggestion) = finding.suggestion {
+                assert!(
+                    !suggestion.contains("env.require_auth()"),
+                    "check `{}` suggests non-public env.require_auth(): {suggestion}",
+                    finding.check_name
+                );
+            }
+        }
+    }
+    assert!(findings > 0, "fixture should trigger at least one check");
+}

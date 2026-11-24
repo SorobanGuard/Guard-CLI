@@ -49,7 +49,7 @@ impl Check for UnprotectedUpgradeCheck {
                             "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-upgrade-high"
                                 .to_string(),
                         ),
-                        suggestion: Some("Add env.require_auth() at the start".to_string()),
+                        suggestion: Some("Call `require_auth()` on the caller/admin `Address` (for example `let admin: Address = env.storage().instance().get(&ADMIN).unwrap(); admin.require_auth();`). `Env::require_auth` is not public soroban-sdk API.".to_string()),
                     });
                 }
             }
