@@ -1,5 +1,6 @@
 //! Hardcoded Stellar address strings (`G...` or `C...`, 56 chars) baked into contract source.
 
+use crate::util::{in_any_range, test_only_line_ranges};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::File;
@@ -68,52 +69,6 @@ fn enclosing_function(spans: &[(usize, usize, String)], line: usize) -> &str {
         .find(|(start, end, _)| line >= *start && line <= *end)
         .map(|(_, _, name)| name.as_str())
         .unwrap_or("module")
-}
-
-/// 1-based, inclusive line ranges of test-only code: modules gated by
-/// `#[cfg(test)]` or named `tests` / `test` (the same rule as
-/// [`crate::util::contractimpl_functions_excluding_test`]), and any other item
-/// carrying `#[cfg(test)]` or `#[test]`. Spans include the item's attributes.
-fn test_only_line_ranges(file: &File) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    collect_test_ranges(&file.items, &mut out);
-    out
-}
-
-fn collect_test_ranges(items: &[syn::Item], out: &mut Vec<(usize, usize)>) {
-    for item in items {
-        let attrs: &[syn::Attribute] = match item {
-            syn::Item::Mod(m) => {
-                if crate::util::is_cfg_test(&m.attrs) || m.ident == "tests" || m.ident == "test" {
-                    out.push(line_range(item));
-                } else if let Some((_, nested)) = &m.content {
-                    collect_test_ranges(nested, out);
-                }
-                continue;
-            }
-            syn::Item::Fn(f) => &f.attrs,
-            syn::Item::Impl(i) => &i.attrs,
-            syn::Item::Const(c) => &c.attrs,
-            syn::Item::Static(st) => &st.attrs,
-            syn::Item::Struct(st) => &st.attrs,
-            syn::Item::Enum(e) => &e.attrs,
-            _ => continue,
-        };
-        if crate::util::is_cfg_test(attrs) || attrs.iter().any(|a| a.path().is_ident("test")) {
-            out.push(line_range(item));
-        }
-    }
-}
-
-fn line_range(item: &syn::Item) -> (usize, usize) {
-    let span = item.span();
-    (span.start().line, span.end().line)
-}
-
-fn in_any_range(ranges: &[(usize, usize)], line: usize) -> bool {
-    ranges
-        .iter()
-        .any(|(start, end)| line >= *start && line <= *end)
 }
 
 /// Line-range/name triples for every `#[contractimpl]` method in the file.

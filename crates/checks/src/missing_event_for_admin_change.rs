@@ -1,6 +1,7 @@
-use crate::util::contractimpl_functions_excluding_test;
-use crate::util::receiver_chain_contains_events;
-use crate::util::receiver_chain_contains_storage;
+use crate::util::{
+    contractimpl_functions_excluding_test, env_param_name, is_event_publish_call,
+    is_storage_mutation_call,
+};
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
 use syn::spanned::Spanned;
@@ -22,7 +23,8 @@ impl Check for MissingEventForAdminChangeCheck {
             let name = method.sig.ident.to_string();
             if is_admin_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
                 let has_storage_write = has_storage_write(&method.block);
-                let has_event = has_event_emit(&method.block);
+                let env_name = env_param_name(&method.sig).unwrap_or_else(|| "env".to_string());
+                let has_event = has_event_emit(&method.block, &env_name);
 
                 if has_storage_write && !has_event {
                     findings.push(Finding {
@@ -65,31 +67,30 @@ struct StorageWriteVisitor {
 
 impl<'ast> Visit<'ast> for StorageWriteVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if matches!(
-            node.method.to_string().as_str(),
-            "set" | "remove" | "append"
-        ) && receiver_chain_contains_storage(&node.receiver)
-        {
+        if is_storage_mutation_call(node) {
             self.found_write = true;
         }
         visit::visit_expr_method_call(self, node);
     }
 }
 
-fn has_event_emit(block: &syn::Block) -> bool {
-    let mut visitor = EventVisitor::default();
+fn has_event_emit(block: &syn::Block, env_name: &str) -> bool {
+    let mut visitor = EventVisitor {
+        env_name,
+        found_event: false,
+    };
     visit::visit_block(&mut visitor, block);
     visitor.found_event
 }
 
-#[derive(Default)]
-struct EventVisitor {
+struct EventVisitor<'a> {
+    env_name: &'a str,
     found_event: bool,
 }
 
-impl<'ast> Visit<'ast> for EventVisitor {
+impl<'ast> Visit<'ast> for EventVisitor<'_> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "publish" && receiver_chain_contains_events(&node.receiver) {
+        if is_event_publish_call(node, self.env_name) {
             self.found_event = true;
         }
         visit::visit_expr_method_call(self, node);
@@ -164,6 +165,23 @@ mod tests {
         let check = MissingEventForAdminChangeCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
+        Ok(())
+    }
+
+    /// #1060: a `#[contractevent]` `.publish(&env)` counts as the admin-change event.
+    #[test]
+    fn ignores_admin_change_with_contractevent_publish() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn set_owner(env: Env, new_owner: Address) {
+        env.storage().instance().set(&symbol_short!("owner"), &new_owner);
+        OwnerChanged { new_owner }.publish(&env);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert!(MissingEventForAdminChangeCheck.run(&file, src).is_empty());
         Ok(())
     }
 }

@@ -104,9 +104,14 @@ impl AllFindingsContract {
         env.storage().instance().set(&symbol_short!("owner"), &owner);
     }
 
-    // Triggers `unchecked-invoke-return`: cross-contract call return value is ignored.
+    // Triggers `unchecked-invoke-return`: the fallible `try_invoke_contract` returns the
+    // callee's failure as a `Result`, and that result is dropped.
     pub fn notify(env: Env, callee: Address) {
-        env.invoke_contract::<()>(&callee, &symbol_short!("notify"), soroban_sdk::vec![&env]);
+        let _ = env.try_invoke_contract::<(), soroban_sdk::InvokeError>(
+            &callee,
+            &symbol_short!("notify"),
+            soroban_sdk::vec![&env],
+        );
     }
 
     // Triggers `missing-balance-check`: token transfer occurs without a preceding

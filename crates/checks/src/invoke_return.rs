@@ -1,7 +1,21 @@
-//! Flags `env.invoke_contract(…)` / `env.invoke_contract_check(…)` calls whose return value is silently discarded.
+//! Flags fallible cross-contract calls whose result is silently discarded.
+//!
+//! `env.invoke_contract(..)` / `invoke_contract_check(..)` return `T` and trap the whole
+//! transaction if the callee fails, so there is no failure to ignore and discarding a
+//! (often unit) return value is fine. The calls that *can* fail silently are the fallible
+//! ones, which return a `Result` the caller must inspect:
+//!
+//! - `env.try_invoke_contract(..)`;
+//! - `try_*` methods on a contract client — an expression or `let` binding built with
+//!   `<X>Client::new(..)` (`token::Client`, `TokenClient`, a generated `FooClient`),
+//!   e.g. `client.try_transfer(..)`.
+//!
+//! A result is discarded when the call is a bare statement, bound to `_` / `_name`, or bound
+//! to a name that is never read.
 
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
+use std::collections::HashSet;
 use syn::visit::{self, Visit};
 use syn::{Block, Expr, ExprMethodCall, File, Ident, Pat, Stmt};
 
@@ -21,6 +35,7 @@ impl Check for UncheckedInvokeReturnCheck {
             let mut scan = InvokeReturnScan {
                 fn_name,
                 findings: Vec::new(),
+                client_bindings: HashSet::new(),
             };
             scan.visit_block(&method.block);
             out.extend(scan.findings);
@@ -32,6 +47,8 @@ impl Check for UncheckedInvokeReturnCheck {
 struct InvokeReturnScan {
     fn_name: String,
     findings: Vec<Finding>,
+    /// Local bindings holding a contract client (`let c = token::Client::new(..)`).
+    client_bindings: HashSet<String>,
 }
 
 impl InvokeReturnScan {
@@ -43,17 +60,19 @@ impl InvokeReturnScan {
             line: m.method.span().start().line,
             function_name: self.fn_name.clone(),
             description: format!(
-                "Return value of `{}` in `{}` is discarded. \
-                 A failure in the callee will be silently ignored, potentially \
-                 leaving the contract in an inconsistent state.",
-                m.method, self.fn_name
+                "Result of the fallible call `{}` in `{}` is discarded. Unlike \
+                 `invoke_contract`, which traps the transaction when the callee fails, \
+                 `{}` returns the failure as a `Result`, so ignoring it lets the \
+                 function carry on as if the call had succeeded.",
+                m.method, self.fn_name, m.method
             ),
             rule_url: Some(
                 "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-invoke-return-medium"
                     .to_string(),
             ),
             suggestion: Some(
-                "Bind the return value and handle or assert it."
+                "Match on the `Result` (or call `.unwrap()` / `?`) and handle the error case, \
+                 or use the non-`try_` variant if a failure should abort the transaction."
                     .to_string(),
             ),
         });
@@ -64,16 +83,17 @@ impl<'ast> Visit<'ast> for InvokeReturnScan {
     fn visit_block(&mut self, block: &'ast Block) {
         for (i, stmt) in block.stmts.iter().enumerate() {
             match stmt {
-                // Bare expression statement (semicolon present): `env.invoke_contract(...);`
+                // Bare expression statement (semicolon present): `env.try_invoke_contract(...);`
                 Stmt::Expr(Expr::MethodCall(m), Some(_)) => {
-                    if is_invoke_contract(m) {
+                    if self.is_fallible_call(m) {
                         self.push_finding(m);
                     }
                 }
-                // Local variable binding: `let _ = env.invoke_contract(...);`
+                // Local variable binding: `let _ = env.try_invoke_contract(...);`
                 Stmt::Local(local) => {
                     if let Some(init) = &local.init {
-                        if let Some(m) = extract_invoke_contract(&init.expr) {
+                        self.track_client_binding(&local.pat, &init.expr);
+                        if let Some(m) = self.extract_fallible_call(&init.expr) {
                             let pat = match &local.pat {
                                 Pat::Type(pt) => &*pt.pat,
                                 other => other,
@@ -100,26 +120,69 @@ impl<'ast> Visit<'ast> for InvokeReturnScan {
     }
 }
 
-fn is_invoke_contract(m: &ExprMethodCall) -> bool {
-    m.method == "invoke_contract" || m.method == "invoke_contract_check"
+/// `X::new(..)` where `X` ends with `Client` (looking through `&` and parens).
+fn is_client_ctor(expr: &Expr) -> bool {
+    match expr {
+        Expr::Reference(r) => is_client_ctor(&r.expr),
+        Expr::Paren(p) => is_client_ctor(&p.expr),
+        Expr::Call(call) => {
+            let Expr::Path(p) = &*call.func else {
+                return false;
+            };
+            let segs = &p.path.segments;
+            let n = segs.len();
+            n >= 2
+                && segs[n - 1].ident == "new"
+                && segs[n - 2].ident.to_string().ends_with("Client")
+        }
+        _ => false,
+    }
 }
 
-fn extract_invoke_contract(expr: &Expr) -> Option<&ExprMethodCall> {
-    match expr {
-        Expr::MethodCall(m) => {
-            if is_invoke_contract(m) {
-                Some(m)
+impl InvokeReturnScan {
+    fn track_client_binding(&mut self, pat: &Pat, init: &Expr) {
+        let pat = match pat {
+            Pat::Type(pt) => &*pt.pat,
+            other => other,
+        };
+        if let Pat::Ident(pi) = pat {
+            let name = pi.ident.to_string();
+            if is_client_ctor(init) {
+                self.client_bindings.insert(name);
             } else {
-                extract_invoke_contract(&m.receiver)
+                self.client_bindings.remove(&name);
             }
         }
-        Expr::Paren(p) => extract_invoke_contract(&p.expr),
-        // A `?` on the invoke call already propagates a callee failure to the
-        // caller — it is the opposite of silently ignoring it. Any discarded
-        // binding here (e.g. `let _ = env.invoke_contract(...)?;`) only throws
-        // away the `Ok` payload, which this check does not flag.
-        Expr::Try(_) => None,
-        _ => None,
+    }
+
+    fn is_client_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Path(p) => p
+                .path
+                .get_ident()
+                .is_some_and(|i| self.client_bindings.contains(&i.to_string())),
+            Expr::Reference(r) => self.is_client_expr(&r.expr),
+            Expr::Paren(p) => self.is_client_expr(&p.expr),
+            other => is_client_ctor(other),
+        }
+    }
+
+    /// `try_invoke_contract(..)`, or a `try_*` method on a contract client.
+    fn is_fallible_call(&self, m: &ExprMethodCall) -> bool {
+        m.method == "try_invoke_contract"
+            || (m.method.to_string().starts_with("try_") && self.is_client_expr(&m.receiver))
+    }
+
+    /// The fallible call whose `Result` *is* `expr` (looking through parens). A call
+    /// further down a method chain (`client.try_transfer(..).is_ok()`,
+    /// `.unwrap()`) has its result inspected, so it is not returned.
+    fn extract_fallible_call<'e>(&self, expr: &'e Expr) -> Option<&'e ExprMethodCall> {
+        match expr {
+            Expr::MethodCall(m) if self.is_fallible_call(m) => Some(m),
+            Expr::Paren(p) => self.extract_fallible_call(&p.expr),
+            // `?` propagates the call's error to the caller — the opposite of ignoring it.
+            _ => None,
+        }
     }
 }
 
@@ -233,7 +296,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        env.invoke_contract::<()>(&callee, &Symbol::short("do"), ());
+        env.try_invoke_contract::<(), soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
     }
 }
 "#);
@@ -249,27 +312,12 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        let _ = env.invoke_contract::<()>(&callee, &Symbol::short("do"), ());
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
     }
 }
 "#);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].severity, Severity::Medium);
-    }
-
-    #[test]
-    fn flags_let_underscore_invoke_contract_check() {
-        let hits = run(r#"
-use soroban_sdk::{contractimpl, Env, Symbol, Address};
-pub struct C;
-#[contractimpl]
-impl C {
-    pub fn f(env: Env, callee: Address) {
-        let _ = env.invoke_contract_check::<()>(&callee, &Symbol::short("do"), ());
-    }
-}
-"#);
-        assert_eq!(hits.len(), 1);
     }
 
     #[test]
@@ -280,7 +328,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        let _result = env.invoke_contract::<()>(&callee, &Symbol::short("do"), ());
+        let _result = env.try_invoke_contract::<(), soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
     }
 }
 "#);
@@ -295,7 +343,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        let res = env.invoke_contract::<i128>(&callee, &Symbol::short("do"), ());
+        let res = env.try_invoke_contract::<i128, soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
     }
 }
 "#);
@@ -310,8 +358,8 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) -> i128 {
-        let res: i128 = env.invoke_contract(&callee, &Symbol::short("do"), ());
-        res + 1
+        let res = env.try_invoke_contract::<i128, soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
+        res.unwrap().unwrap() + 1
     }
 }
 "#);
@@ -326,8 +374,8 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        let res: i128 = env.invoke_contract(&callee, &Symbol::short("do"), ());
-        assert!(res > 0);
+        let res = env.try_invoke_contract::<i128, soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
+        assert!(res.is_ok());
     }
 }
 "#);
@@ -342,7 +390,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) -> Result<(), soroban_sdk::Error> {
-        let _ = env.invoke_contract::<()>(&callee, &Symbol::short("do"), ())?;
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(&callee, &Symbol::short("do"), ())?;
         Ok(())
     }
 }
@@ -358,7 +406,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        let _: () = env.invoke_contract::<()>(&callee, &Symbol::short("do"), ());
+        let _: Result<_, _> = env.try_invoke_contract::<(), soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
     }
 }
 "#);
@@ -377,7 +425,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        let res: i128 = env.invoke_contract(&callee, &Symbol::short("do"), ());
+        let res = env.try_invoke_contract::<i128, soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
         let res = 5i128;   // shadows without reading the invoke result
         let _ = res;
     }
@@ -396,12 +444,72 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) -> i128 {
-        let res: i128 = env.invoke_contract(&callee, &Symbol::short("do"), ());
-        let res = res + 1;  // RHS reads original `res` before shadowing
+        let res = env.try_invoke_contract::<i128, soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
+        let res = res.unwrap().unwrap() + 1;  // RHS reads original `res` before shadowing
         res
     }
 }
 "#);
         assert!(hits.is_empty(), "RHS of shadowing let reads original binding — should pass; got: {hits:#?}");
+    }
+
+    /// #1059: `invoke_contract` traps on failure, so there is nothing to ignore.
+    #[test]
+    fn passes_discarded_plain_invoke_contract() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Symbol, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn f(env: Env, callee: Address) {
+        env.invoke_contract::<()>(&callee, &Symbol::short("do"), ());
+        let _ = env.invoke_contract_check::<()>(&callee, &Symbol::short("do"), ());
+    }
+}
+"#);
+        assert!(hits.is_empty(), "{hits:#?}");
+    }
+
+    /// #1059: a client's `try_*` method returns a `Result` that can be dropped.
+    #[test]
+    fn flags_discarded_client_try_method() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, token, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn pay(env: Env, tok: Address, to: Address, amount: i128) {
+        let client = token::Client::new(&env, &tok);
+        client.try_transfer(&env.current_contract_address(), &to, &amount);
+        let _ = token::TokenClient::new(&env, &tok).try_burn(&to, &amount);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 2, "{hits:#?}");
+        assert!(hits[0].description.contains("try_transfer"));
+        assert!(!hits[0].description.contains("silently ignored"));
+    }
+
+    /// #1059: inspecting the `Result`, or non-client `try_*` methods, is fine.
+    #[test]
+    fn passes_checked_try_calls_and_non_client_try_methods() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, token, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn pay(env: Env, tok: Address, to: Address, amount: i128) -> bool {
+        let client = token::Client::new(&env, &tok);
+        if client.try_transfer(&env.current_contract_address(), &to, &amount).is_err() {
+            return false;
+        }
+        let ok = client.try_burn(&to, &amount).is_ok();
+        let n: u32 = 5u64.try_into().unwrap();
+        let _ = n;
+        ok
+    }
+}
+"#);
+        assert!(hits.is_empty(), "{hits:#?}");
     }
 }

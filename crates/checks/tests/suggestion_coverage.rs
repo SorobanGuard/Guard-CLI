@@ -385,7 +385,7 @@ pub struct C;
 #[contractimpl]
 impl C {
     pub fn f(env: Env, callee: Address) {
-        env.invoke_contract::<()>(&callee, &Symbol::short("do"), ());
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(&callee, &Symbol::short("do"), ());
     }
 }
 "#,
@@ -492,7 +492,7 @@ fn unprotected_upgrade_has_suggestion() {
 #[contractimpl]
 impl C {
     pub fn upgrade(env: Env, new_code: Bytes) {
-        env.invoke_wasm(&new_code);
+        env.deployer().update_current_contract_wasm(new_code);
     }
 }
 "#,

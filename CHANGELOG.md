@@ -22,6 +22,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `unchecked-invoke-return`: now targets fallible calls whose `Result` is
+  dropped (`try_invoke_contract`, and `try_*` methods on a `<X>Client::new(..)`
+  client). Plain `invoke_contract` is no longer reported, since it traps on
+  failure; the description no longer claims its failures are ignored (#1059).
+- `missing-event-emission` / `missing-event-for-admin-change`: a
+  `#[contractevent]` struct's `.publish(&env)` counts as an event, and
+  `missing-event-emission` uses the shared storage-write predicate, so
+  `extend_ttl` / `bump` alone no longer require an event (#1060).
+- `unprotected-upgrade`: detects the real upgrade API,
+  `env.deployer().update_current_contract_wasm(..)`, in any exported method
+  instead of a non-existent `invoke_wasm` in name-matched methods; fixtures use
+  the real SDK call (#1061).
+- `forbidden-std-imports`: lines inside `#[cfg(test)]` / test-only items are
+  skipped, using the test-range helper now shared with `hardcoded-address` in
+  `util` (#1062).
 - `unsafe-storage-patterns`: `Symbol::new` detection now matches the last two
   path segments, so the fully-qualified `soroban_sdk::Symbol::new(...)` form is
   caught, not just the two-segment `Symbol::new(...)`.

@@ -1,12 +1,15 @@
 //! `use std::` imports in files that also use Soroban contract attributes — these break the `no_std` WASM build.
 
+use crate::util::{in_any_range, test_only_line_ranges};
 use crate::{Check, Finding, Severity};
 use syn::File;
 
 const CHECK_NAME: &str = "forbidden-std-imports";
 
 /// Soroban contracts must compile to `no_std`; any `use std::...` import breaks the WASM build.
-/// Works directly on the raw source text rather than the parsed AST.
+/// Works directly on the raw source text rather than the parsed AST, but skips lines inside
+/// test-only items (`#[cfg(test)]` / `#[cfg(all(test, ..))]` modules and items, `mod tests`,
+/// `#[test]` functions): those build for the host, where `std` is available.
 pub struct ForbiddenStdImportsCheck;
 
 impl Check for ForbiddenStdImportsCheck {
@@ -14,14 +17,30 @@ impl Check for ForbiddenStdImportsCheck {
         CHECK_NAME
     }
 
-    fn run(&self, _file: &File, source: &str) -> Vec<Finding> {
+    fn run(&self, file: &File, source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
         if !source.contains("#[contractimpl]") && !source.contains("#[contract]") {
             return out;
         }
+        let test_ranges = test_only_line_ranges(file);
         let mut in_block_comment = false;
         for (idx, line) in source.lines().enumerate() {
             let trimmed = line.trim_start();
+            // Block-comment state still has to be tracked through test code, so only the
+            // reporting is skipped there.
+            let in_test_code = in_any_range(&test_ranges, idx + 1);
+            if in_test_code {
+                if in_block_comment {
+                    if trimmed.contains("*/") {
+                        in_block_comment = false;
+                    }
+                } else if strip_line_comment(trimmed).contains("/*")
+                    && !strip_line_comment(trimmed).contains("*/")
+                {
+                    in_block_comment = true;
+                }
+                continue;
+            }
 
             // Track block comment boundaries.
             if in_block_comment {
@@ -282,6 +301,45 @@ impl C {
         let file = parse_file(source)?;
         let hits = ForbiddenStdImportsCheck.run(&file, source);
         assert_eq!(hits.len(), 1, "real std:: import must still be flagged");
+        Ok(())
+    }
+
+    /// #1062: `std` inside a `#[cfg(test)]` module builds for the host and is fine;
+    /// a top-level `use std::…` in the same file is still reported.
+    #[test]
+    fn ignores_std_inside_cfg_test_module() -> Result<(), syn::Error> {
+        let src = r#"#![no_std]
+use soroban_sdk::{contract, contractimpl, Env};
+use std::vec::Vec;
+
+#[contract]
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn hello(_env: Env) {}
+}
+
+#[cfg(test)]
+mod test {
+    extern crate std;
+    use std::println;
+    /* a block comment mentioning std::fmt */
+    #[test]
+    fn prints() {
+        println!("{}", std::format!("{}", 1));
+    }
+}
+
+#[cfg(all(test, feature = "testutils"))]
+mod more_tests {
+    use std::string::String;
+}
+"#;
+        let file = syn::parse_file(src)?;
+        let findings = ForbiddenStdImportsCheck.run(&file, src);
+        let lines: Vec<_> = findings.iter().map(|f| f.line).collect();
+        assert_eq!(lines, [3], "{findings:#?}");
         Ok(())
     }
 }
