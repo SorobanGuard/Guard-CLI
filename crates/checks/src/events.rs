@@ -2,7 +2,7 @@
 //! Detection of state-changing functions (storage writes) without event emission.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_events,
+    exported_entrypoint_functions_excluding_test, receiver_chain_contains_events,
     receiver_chain_contains_storage,
 };
 use crate::{Check, Finding, Severity};
@@ -22,7 +22,7 @@ impl Check for MissingEventEmissionCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
+        for method in exported_entrypoint_functions_excluding_test(file) {
             let mut scan = FuncBodyScan::default();
             scan.visit_block(&method.block);
             if !scan.storage_write || scan.event_emitted {

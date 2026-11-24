@@ -84,6 +84,45 @@ pub fn contractimpl_functions_with_type_excluding_test(
     out
 }
 
+/// Every **exported** entrypoint inside a `#[contractimpl]` impl that is not inside a
+/// `#[cfg(test)]` module or a module named `tests`. See [`is_exported_entrypoint`]: `pub`
+/// methods of inherent impls and every method of trait impls.
+pub fn contractimpl_entrypoints_excluding_test(file: &syn::File) -> Vec<&syn::ImplItemFn> {
+    let mut out = Vec::new();
+    collect_contractimpl_entrypoints(&file.items, false, &mut out);
+    out
+}
+
+fn collect_contractimpl_entrypoints<'a>(
+    items: &'a [Item],
+    in_test_mod: bool,
+    out: &mut Vec<&'a syn::ImplItemFn>,
+) {
+    for item in items {
+        match item {
+            Item::Mod(m) => {
+                let is_test = in_test_mod
+                    || is_cfg_test(&m.attrs)
+                    || m.ident == "tests"
+                    || m.ident == "test";
+                if let Some((_, nested)) = &m.content {
+                    collect_contractimpl_entrypoints(nested, is_test, out);
+                }
+            }
+            Item::Impl(item_impl) if !in_test_mod && is_contractimpl(item_impl) => {
+                for impl_item in &item_impl.items {
+                    if let ImplItem::Fn(m) = impl_item {
+                        if is_exported_entrypoint(item_impl, m) {
+                            out.push(m);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +282,145 @@ mod integration {
         assert_eq!(pat_ident_name(&pat), None);
         Ok(())
     }
+
+    #[test]
+    fn is_exported_entrypoint_pub_inherent_method_is_exported() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+#[contractimpl]
+impl C {
+    pub fn live(env: Env) {
+        let _ = env;
+    }
+}
+"#,
+        )?;
+        let Item::Impl(item_impl) = &file.items[0] else {
+            panic!("expected impl");
+        };
+        let ImplItem::Fn(m) = &item_impl.items[0] else {
+            panic!("expected fn");
+        };
+        assert!(is_exported_entrypoint(item_impl, m));
+        Ok(())
+    }
+
+    #[test]
+    fn is_exported_entrypoint_private_inherent_helper_is_not_exported() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+#[contractimpl]
+impl C {
+    fn write_balance(env: &Env, amount: i128) {
+        let _ = (env, amount);
+    }
+}
+"#,
+        )?;
+        let Item::Impl(item_impl) = &file.items[0] else {
+            panic!("expected impl");
+        };
+        let ImplItem::Fn(m) = &item_impl.items[0] else {
+            panic!("expected fn");
+        };
+        assert!(!is_exported_entrypoint(item_impl, m));
+        Ok(())
+    }
+
+    #[test]
+    fn is_exported_entrypoint_trait_impl_method_is_exported() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+#[contractimpl]
+impl Trait for C {
+    fn live(env: Env) {
+        let _ = env;
+    }
+}
+"#,
+        )?;
+        let Item::Impl(item_impl) = &file.items[0] else {
+            panic!("expected impl");
+        };
+        let ImplItem::Fn(m) = &item_impl.items[0] else {
+            panic!("expected fn");
+        };
+        assert!(is_exported_entrypoint(item_impl, m));
+        Ok(())
+    }
+
+    #[test]
+    fn entrypoints_excluding_test_skips_private_helpers() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+#[contractimpl]
+impl C {
+    pub fn live(env: Env) {
+        let _ = env;
+    }
+
+    fn write_balance(env: &Env, amount: i128) {
+        let _ = (env, amount);
+    }
+}
+"#,
+        )?;
+        let methods = contractimpl_entrypoints_excluding_test(&file);
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].sig.ident.to_string(), "live");
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_is_auth_gate_rejects_current_contract_address() -> Result<(), syn::Error> {
+        let expr: Expr = syn::parse_str("env.current_contract_address()")?;
+        assert!(!receiver_is_auth_gate(
+            &expr,
+            "env",
+            &[],
+            &HashSet::new()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_is_auth_gate_accepts_clone_of_address_param() -> Result<(), syn::Error> {
+        let expr: Expr = syn::parse_str("admin.clone()")?;
+        assert!(receiver_is_auth_gate(
+            &expr,
+            "env",
+            &["admin".to_string()],
+            &HashSet::new()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_is_auth_gate_accepts_self_admin_field() -> Result<(), syn::Error> {
+        let expr: Expr = syn::parse_str("self.admin")?;
+        assert!(receiver_is_auth_gate(
+            &expr,
+            "env",
+            &[],
+            &HashSet::new()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_is_auth_gate_rejects_unrelated_method_call() -> Result<(), syn::Error> {
+        let expr: Expr = syn::parse_str("some_lookup().require_auth()")?;
+        let Expr::MethodCall(m) = &expr else {
+            panic!("expected method call");
+        };
+        assert!(!receiver_is_auth_gate(
+            &m.receiver,
+            "env",
+            &[],
+            &HashSet::new()
+        ));
+        Ok(())
+    }
 }
 
 /// Does the receiver chain of `expr` contain a call to `.<method>()`? Walks back through
@@ -284,15 +462,24 @@ pub(crate) fn is_storage_mutation_call(m: &syn::ExprMethodCall) -> bool {
 /// Is `receiver` something `.require_auth()` / `.require_auth_for_args()` can be legally
 /// called on? Recognizes the `Env` parameter, `Address` parameters, function-local bindings
 /// of type `Address`, field accesses (`self.admin`, `self.owner`), and method-chain receivers
-/// (`admin.clone()`, `get_admin(&env)`) — all of which yield an `Address`/auth-invoker in
-/// practice. A bare path that is none of the above (a random local) is *not* treated as an
-/// auth gate, so unrelated `.require_auth()` calls don't silence the check.
+/// that plausibly yield an `Address` (`admin.clone()`, `get_admin(&env)`) — all of which yield
+/// an `Address`/auth-invoker in practice. A bare path that is none of the above (a random
+/// local) is *not* treated as an auth gate, so unrelated `.require_auth()` calls don't silence
+/// the check.
+///
+/// `env.current_contract_address().require_auth()` is explicitly rejected: it authorises the
+/// contract itself and gives no protection against arbitrary callers (a known Soroban
+/// anti-pattern), so it must never count as an auth gate.
 pub(crate) fn receiver_is_auth_gate(
     receiver: &Expr,
     env_name: &str,
     address_names: &[String],
     address_locals: &HashSet<String>,
 ) -> bool {
+    // Self-authorisation never authenticates the caller.
+    if receiver_chain_contains(receiver, "current_contract_address") {
+        return false;
+    }
     match receiver {
         Expr::Path(p) => {
             p.path.is_ident(env_name)
@@ -302,9 +489,74 @@ pub(crate) fn receiver_is_auth_gate(
                     .map(|i| address_locals.contains(&i.to_string()))
                     .unwrap_or(false)
         }
-        Expr::Field(_) | Expr::MethodCall(_) => true,
+        Expr::Field(f) => field_is_auth_gate(&f.base, env_name, address_names, address_locals),
+        Expr::MethodCall(m) => {
+            method_call_is_auth_gate(m, env_name, address_names, address_locals)
+        }
         _ => false,
     }
+}
+
+/// Is a field access (`self.admin`, `self.owner`) plausibly the caller/admin `Address`?
+/// Only `self.<field>` where the field name looks like the privileged account, or a field
+/// whose base is itself an auth gate, is accepted.
+fn field_is_auth_gate(
+    base: &Expr,
+    env_name: &str,
+    address_names: &[String],
+    address_locals: &HashSet<String>,
+) -> bool {
+    if let Expr::Path(p) = base {
+        if p.path.is_ident("self") {
+            return true;
+        }
+    }
+    receiver_is_auth_gate(base, env_name, address_names, address_locals)
+}
+
+/// Is a method-call receiver (`admin.clone()`, `get_admin(&env)`) plausibly the caller/admin
+/// `Address`? Accepts `.clone()` of an address param/local, a storage `get` of an admin key,
+/// or a call whose receiver is itself an auth gate.
+fn method_call_is_auth_gate(
+    m: &syn::ExprMethodCall,
+    env_name: &str,
+    address_names: &[String],
+    address_locals: &[String],
+) -> bool {
+    let name = m.method.to_string();
+    if name == "clone" {
+        return receiver_is_auth_gate(&m.receiver, env_name, address_names, address_locals);
+    }
+    if name == "get" && receiver_chain_contains_storage(&m.receiver) {
+        // `env.storage().*.get(&ADMIN)` — accept when the key argument looks like an admin key.
+        return m.args.iter().any(|arg| expr_mentions_admin_key(arg));
+    }
+    receiver_is_auth_gate(&m.receiver, env_name, address_names, address_locals)
+}
+
+/// Does `expr` mention an identifier that looks like an admin/owner key?
+fn expr_mentions_admin_key(expr: &Expr) -> bool {
+    match expr {
+        Expr::Path(p) => p
+            .path
+            .get_ident()
+            .map(|i| is_admin_var_name(&i.to_string()))
+            .unwrap_or(false),
+        Expr::Reference(r) => expr_mentions_admin_key(&r.expr),
+        _ => false,
+    }
+}
+
+/// Is `method` an exported entrypoint of the enclosing `#[contractimpl]` impl?
+///
+/// For an inherent impl (`impl C { .. }`) only `pub fn`s are exported; non-`pub` helpers
+/// cannot be invoked externally and must not be analysed as entrypoints. Every method of a
+/// trait impl (`impl Trait for C { .. }`) is exported.
+pub(crate) fn is_exported_entrypoint(item_impl: &ItemImpl, method: &syn::ImplItemFn) -> bool {
+    if item_impl.trait_.is_some() {
+        return true;
+    }
+    matches!(method.vis, syn::Visibility::Public(_))
 }
 
 /// Does the receiver chain of `expr` contain a call to `.temporary()`?

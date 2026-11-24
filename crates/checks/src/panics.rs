@@ -1,6 +1,6 @@
 //! Panic-in-contract: `panic!`, `unwrap()`, `expect(…)`, `unreachable!()` in contract methods.
 
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{exported_entrypoint_functions_excluding_test, receiver_chain_contains_storage};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -38,7 +38,7 @@ impl Check for PanicInContractCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
+        for method in exported_entrypoint_functions_excluding_test(file) {
             let fn_name = method.sig.ident.to_string();
             let mut v = PanicVisitor {
                 fn_name: fn_name.clone(),

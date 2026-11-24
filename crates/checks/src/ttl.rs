@@ -1,7 +1,7 @@
 //! Persistent storage writes that never extend the entry's TTL in the same function.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, receiver_chain_contains_persistent,
+    contractimpl_exported_functions_excluding_test, receiver_chain_contains_persistent,
     receiver_chain_contains_storage,
 };
 use crate::{Check, Finding, Severity};
@@ -31,7 +31,7 @@ impl Check for MissingTtlExtensionCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
+        for method in contractimpl_exported_functions_excluding_test(file) {
             let fn_name = method.sig.ident.to_string();
             let mut v = TtlVisitor {
                 mutations: Vec::new(),
