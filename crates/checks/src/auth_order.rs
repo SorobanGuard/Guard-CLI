@@ -2,7 +2,8 @@
 //! parameter - made *after* a storage write in `#[contractimpl]` methods.
 
 use crate::util::{
-    contractimpl_functions_excluding_test, is_storage_mutation_call, receiver_is_auth_gate,
+    contractimpl_exported_entrypoints_excluding_test, is_storage_mutation_call,
+    receiver_is_auth_gate,
 };
 use crate::{Check, Finding, Severity};
 use std::collections::HashSet;
@@ -23,7 +24,7 @@ impl Check for AuthAfterStorageWriteCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
+        for method in contractimpl_exported_entrypoints_excluding_test(file) {
             let env_param = env_param_name(&method.sig);
             let env_name = env_param.as_deref().unwrap_or("env");
             let address_params = address_param_names(&method.sig);
@@ -321,6 +322,26 @@ impl C {
 }
 "#);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn flags_self_authorisation_require_auth_after_storage_write() {
+        // #1048: `env.current_contract_address().require_auth()` authorises the
+        // contract itself and is not a valid auth gate, so a post-write call is
+        // still flagged.
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn set_price(env: Env, p: i128) {
+        env.storage().instance().set(&0, &p);
+        env.current_contract_address().require_auth();
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].check_name, CHECK_NAME);
     }
 
     #[test]

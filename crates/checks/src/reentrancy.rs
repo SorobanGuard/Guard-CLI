@@ -1,6 +1,6 @@
 //! Reentrancy-risk: `invoke_contract` after a storage write without a re-read.
 
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{contractimpl_exported_entrypoints_excluding_test, receiver_chain_contains_storage};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -20,7 +20,7 @@ impl Check for ReentrancyRiskCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
+        for method in contractimpl_exported_entrypoints_excluding_test(file) {
             let fn_name = method.sig.ident.to_string();
             let mut v = ReentrancyVisitor::default();
             v.visit_block(&method.block);

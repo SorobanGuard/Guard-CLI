@@ -1,7 +1,7 @@
 //! Missing `env.require_auth()` before storage writes in `#[contractimpl]` methods.
 
 use crate::util::{
-    address_param_names, contractimpl_functions_excluding_test, env_param_name,
+    address_param_names, contractimpl_entrypoints_excluding_test, env_param_name,
     is_storage_mutation_call, receiver_is_auth_gate, type_is_address,
 };
 use crate::{Check, Finding, Severity};
@@ -23,7 +23,7 @@ impl Check for MissingRequireAuthCheck {
 
     fn run(&self, file: &File, _source: &str) -> Vec<Finding> {
         let mut out = Vec::new();
-        for method in contractimpl_functions_excluding_test(file) {
+        for method in contractimpl_entrypoints_excluding_test(file) {
             let env_param = env_param_name(&method.sig);
             let address_params = address_param_names(&method.sig);
             let mut scan = FuncBodyScan::new(env_param.as_deref(), address_params);
@@ -266,6 +266,60 @@ impl Contract {
 "#,
         )?;
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_private_storage_writing_helper() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn transfer(env: Env, from: Address, amount: i128) {
+        from.require_auth();
+        write_balance(&env, amount);
+    }
+
+    fn write_balance(env: &Env, amount: i128) {
+        env.storage().persistent().set(&Symbol::new(env, "bal"), &amount);
+    }
+}
+"#,
+        )?;
+        assert!(
+            hits.is_empty(),
+            "non-pub helper is not an entrypoint and must not be flagged: {hits:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flags_self_authorisation_via_current_contract_address() -> Result<(), syn::Error> {
+        let hits = run_on_src(
+            r#"
+use soroban_sdk::{contractimpl, Env, Symbol};
+
+pub struct Contract;
+
+#[contractimpl]
+impl Contract {
+    pub fn set_price(env: Env, p: i128) {
+        env.current_contract_address().require_auth();
+        env.storage().instance().set(&Symbol::new(&env, "price"), &p);
+    }
+}
+"#,
+        )?;
+        assert_eq!(
+            hits.len(),
+            1,
+            "`current_contract_address().require_auth()` must not count as an auth gate: {hits:?}"
+        );
+        assert_eq!(hits[0].function_name, "set_price");
         Ok(())
     }
 }
