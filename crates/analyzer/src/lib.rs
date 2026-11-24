@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use soroban_guard_checks::util::contractimpl_functions_with_type_excluding_test;
 use soroban_guard_checks::{default_checks, Check, Finding};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -55,6 +55,14 @@ pub enum ScanError {
     },
     #[error("Failed to parse {path}: {message}")]
     Parse { path: PathBuf, message: String },
+    #[error("Failed to parse Cargo manifest {path}: {message}")]
+    ManifestParse { path: PathBuf, message: String },
+    #[error("Check `{check}` failed on Cargo manifest {path}: {message}")]
+    ManifestCheck {
+        check: String,
+        path: PathBuf,
+        message: String,
+    },
     #[error("Check `{check}` panicked on {path}: {message}")]
     CheckPanic {
         check: String,
@@ -303,23 +311,6 @@ fn is_suppressed(finding: &Finding, suppressions: &Suppressions, fn_spans: &[FnS
     ))
 }
 
-/// The path relative to `root` shown in findings: the bare file name when `root`
-/// itself is a single file, otherwise the path stripped of the `root` prefix.
-/// Shared by every scan entry point so the copies of this logic can't drift (issue #630).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    } else {
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
-    }
-}
-
 /// Drop only findings that are identical in everything a reader would use to tell
 /// them apart. Keying on `(file, line, check_name)` alone collapsed distinct
 /// same-line findings from checks that legitimately report more than once per line
@@ -382,6 +373,8 @@ fn scan_error_path(err: &ScanError) -> PathBuf {
         | ScanError::PermissionDenied { path }
         | ScanError::IoRead { path, .. }
         | ScanError::Parse { path, .. }
+        | ScanError::ManifestParse { path, .. }
+        | ScanError::ManifestCheck { path, .. }
         | ScanError::CheckPanic { path, .. }
         | ScanError::Traversal { path, .. } => path.clone(),
         ScanError::Io(_) | ScanError::InvalidGlobPattern { .. } | ScanError::Multiple(_) => {
@@ -419,7 +412,7 @@ fn collect_scan_results<T>(results: Vec<Result<T, ScanError>>) -> Result<Vec<T>,
 fn compile_globs(patterns: &[String]) -> Result<Vec<glob::Pattern>, ScanError> {
     let mut compiled = Vec::with_capacity(patterns.len());
     for p in patterns {
-        match glob::Pattern::new(p) {
+        match glob::Pattern::new(&p.replace('\\', "/")) {
             Ok(pattern) => compiled.push(pattern),
             Err(e) => {
                 return Err(ScanError::InvalidGlobPattern {
@@ -443,9 +436,13 @@ enum PathVerdict {
 }
 
 fn glob_hit(patterns: &[glob::Pattern], label: &Path, path: &Path) -> bool {
+    let label = path_to_report_string(label);
+    let path = path_to_report_string(path);
+    let label = Path::new(&label);
+    let path = Path::new(&path);
     patterns
         .iter()
-        .any(|p| p.matches_path(label) || p.matches_path(path))
+        .any(|pattern| pattern.matches_path(label) || pattern.matches_path(path))
 }
 
 /// The single filter every scan entry point applies to a candidate source file:
@@ -579,6 +576,7 @@ fn run_checks_for_file(
                 for finding in &mut hits {
                     finding.file_path.clone_from(&file_label);
                 }
+
                 findings.extend(
                     hits.into_iter()
                         .filter(|finding| !is_suppressed(finding, &suppressions, &fn_spans)),
@@ -605,6 +603,183 @@ fn run_checks_for_file(
     suppress_redundant_division_finding(&mut findings);
     dedup_findings(&mut findings);
     Ok((findings, check_panics))
+}
+
+fn nearest_manifest(path: &Path) -> Option<PathBuf> {
+    let mut directory = path.parent()?;
+    loop {
+        let candidate = directory.join("Cargo.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        directory = directory.parent()?;
+    }
+}
+
+fn workspace_pattern_matches(document: &toml::Value, key: &str, relative: &Path) -> bool {
+    let Some(patterns) = document
+        .get("workspace")
+        .and_then(|workspace| workspace.get(key))
+        .and_then(toml::Value::as_array)
+    else {
+        return false;
+    };
+    let relative = path_to_report_string(relative);
+    patterns
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .any(|pattern| {
+            glob::Pattern::new(&pattern.replace('\\', "/")).is_ok_and(|pattern| {
+                let mut candidate = Path::new(&relative);
+                loop {
+                    if pattern.matches_path(candidate) {
+                        return true;
+                    }
+                    let Some(parent) = candidate.parent() else {
+                        return false;
+                    };
+                    candidate = parent;
+                }
+            })
+        })
+}
+
+fn workspace_manifest_path(
+    manifest_path: &Path,
+    manifest_source: &str,
+) -> Result<Option<PathBuf>, ScanError> {
+    let manifest: toml::Value =
+        toml::from_str(manifest_source).map_err(|error| ScanError::ManifestParse {
+            path: manifest_path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    if let Some(workspace_dir) = manifest
+        .get("package")
+        .and_then(|package| package.get("workspace"))
+        .and_then(toml::Value::as_str)
+    {
+        return Ok(Some(
+            manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(workspace_dir)
+                .join("Cargo.toml"),
+        ));
+    }
+    if manifest.get("workspace").is_some() {
+        return Ok(Some(manifest_path.to_path_buf()));
+    }
+
+    let package_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut parent = package_dir.parent();
+    while let Some(directory) = parent {
+        let candidate = directory.join("Cargo.toml");
+        if candidate.is_file() {
+            let source =
+                std::fs::read_to_string(&candidate).map_err(|error| ScanError::IoRead {
+                    path: candidate.clone(),
+                    source: error,
+                })?;
+            let document: toml::Value =
+                toml::from_str(&source).map_err(|error| ScanError::ManifestParse {
+                    path: candidate.clone(),
+                    message: error.to_string(),
+                })?;
+            if document.get("workspace").is_some() {
+                let relative = package_dir.strip_prefix(directory).unwrap_or(package_dir);
+                if workspace_pattern_matches(&document, "exclude", relative) {
+                    return Ok(None);
+                }
+                return Ok(
+                    workspace_pattern_matches(&document, "members", relative).then_some(candidate)
+                );
+            }
+        }
+        parent = directory.parent();
+    }
+    Ok(None)
+}
+
+fn run_manifest_checks(
+    root: &Path,
+    paths: &[PathBuf],
+    checks: &[Box<dyn Check + Send + Sync>],
+) -> Result<(Vec<Finding>, Vec<ScanError>), ScanError> {
+    let mut source_groups: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for path in paths {
+        let Some(manifest_path) = nearest_manifest(path) else {
+            continue;
+        };
+        let source = std::fs::read_to_string(path).map_err(|error| ScanError::IoRead {
+            path: path.clone(),
+            source: error,
+        })?;
+        source_groups.entry(manifest_path).or_default().push(source);
+    }
+
+    let mut findings = Vec::new();
+    let mut panics = Vec::new();
+    for (manifest_path, contract_sources) in source_groups {
+        let manifest_source =
+            std::fs::read_to_string(&manifest_path).map_err(|error| ScanError::IoRead {
+                path: manifest_path.clone(),
+                source: error,
+            })?;
+        let profile_manifest_path = workspace_manifest_path(&manifest_path, &manifest_source)?;
+        let workspace_source = profile_manifest_path
+            .as_ref()
+            .map(|path| {
+                std::fs::read_to_string(&path).map_err(|error| ScanError::IoRead {
+                    path: path.clone(),
+                    source: error,
+                })
+            })
+            .transpose()?;
+
+        for check in checks {
+            let check_name = check.name().to_string();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                check.run_manifest(
+                    &manifest_source,
+                    workspace_source.as_deref(),
+                    &contract_sources,
+                )
+            }));
+            match result {
+                Ok(Ok(mut hits)) => {
+                    for finding in &mut hits {
+                        finding.file_path = file_label(
+                            profile_manifest_path.as_deref().unwrap_or(&manifest_path),
+                            root,
+                        );
+                    }
+                    findings.extend(hits);
+                }
+                Ok(Err(message)) => {
+                    return Err(ScanError::ManifestCheck {
+                        check: check_name,
+                        path: manifest_path,
+                        message,
+                    });
+                }
+                Err(payload) => {
+                    let message = if let Some(msg) = payload.downcast_ref::<&str>() {
+                        msg.to_string()
+                    } else if let Some(msg) = payload.downcast_ref::<String>() {
+                        msg.clone()
+                    } else {
+                        "panic payload was not a string".to_string()
+                    };
+                    panics.push(ScanError::CheckPanic {
+                        check: check_name,
+                        path: manifest_path.clone(),
+                        message,
+                    });
+                }
+            }
+        }
+    }
+    Ok((findings, panics))
 }
 
 /// Findings for a single source file.
@@ -649,7 +824,10 @@ pub fn scan_directory(
     .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
-    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let mut check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let (manifest_findings, manifest_panics) = run_manifest_checks(&root, &paths, &checks)?;
+    findings.extend(manifest_findings);
+    check_panics.extend(manifest_panics);
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -691,53 +869,64 @@ pub fn scan_directory_with_checks(
         })
         .collect::<Result<Vec<_>, ScanError>>()?;
 
+    let (manifest_findings, manifest_panics) = run_manifest_checks(&root, &paths, checks)?;
     let mut results: Vec<FileScanResult> = per_file.iter().map(|(r, _)| r.clone()).collect();
+    let mut manifest_groups: BTreeMap<String, Vec<Finding>> = BTreeMap::new();
+    for finding in manifest_findings {
+        manifest_groups
+            .entry(finding.file_path.clone())
+            .or_default()
+            .push(finding);
+    }
+    for (file_path, findings) in manifest_groups {
+        results.push(FileScanResult {
+            file_path,
+            findings,
+        });
+    }
     results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
-    let check_panics: Vec<ScanError> = per_file
+    let mut check_panics: Vec<ScanError> = per_file
         .into_iter()
         .flat_map(|(_, panics)| panics)
         .collect();
+    check_panics.extend(manifest_panics);
 
     Ok((results, files_scanned, files_skipped, check_panics))
 }
 
 /// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
 fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if let Some(unc) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else if let Some(path) = normalized.strip_prefix("//?/") {
+        path.to_string()
+    } else {
+        normalized
+    }
 }
 
 /// Label a finding's file relative to the scan root (or by file name when the
 /// root is itself a file).
 fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
+    let path_string = path_to_report_string(path);
+    let root_string = path_to_report_string(root);
+    if root.is_file() || path_string == root_string {
+        return path_string
+            .rsplit('/')
+            .next()
             .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
+            .to_string();
     }
-}
 
-/// Report-friendly path: lossy UTF-8 with `/` separators on every platform.
-fn path_to_report_string(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-/// Label a finding's file relative to the scan root (or by file name when the
-/// root is itself a file).
-fn file_label(path: &Path, root: &Path) -> String {
-    if root.is_file() {
-        path.file_name()
-            .map(Path::new)
-            .map(path_to_report_string)
-            .unwrap_or_default()
-    } else {
-        path_to_report_string(path.strip_prefix(root).unwrap_or(path))
+    let root_prefix = root_string.trim_end_matches('/');
+    if let Some(relative) = path_string.strip_prefix(root_prefix) {
+        if relative.starts_with('/') || root_prefix.is_empty() {
+            return relative.trim_start_matches('/').to_string();
+        }
     }
+    path_to_report_string(path.strip_prefix(root).unwrap_or(path))
 }
 
 /// Scan an explicit list of `.rs` file paths and aggregate findings from every default check.
@@ -804,7 +993,10 @@ pub fn scan_files(
     .unzip();
 
     let mut findings: Vec<Finding> = collected.into_iter().flatten().collect();
-    let check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let mut check_panics: Vec<ScanError> = panics.into_iter().flatten().collect();
+    let (manifest_findings, manifest_panics) = run_manifest_checks(&root, &selected, &checks)?;
+    findings.extend(manifest_findings);
+    check_panics.extend(manifest_panics);
 
     findings.sort_by(|a, b| {
         a.file_path
@@ -819,9 +1011,168 @@ pub fn scan_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use soroban_guard_checks::{Check, Severity};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn report_paths_normalize_windows_and_verbatim_prefixes() {
+        assert_eq!(
+            path_to_report_string(Path::new(r"C:\proj\src\lib.rs")),
+            "C:/proj/src/lib.rs"
+        );
+        assert_eq!(
+            path_to_report_string(Path::new(r"\\?\C:\proj\src\lib.rs")),
+            "C:/proj/src/lib.rs"
+        );
+        assert_eq!(
+            path_to_report_string(Path::new(r"\\?\UNC\server\share\src\lib.rs")),
+            "//server/share/src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn file_labels_strip_windows_drive_and_unc_roots_portably() {
+        assert_eq!(
+            file_label(Path::new(r"C:\proj\src\lib.rs"), Path::new(r"C:\proj")),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            file_label(
+                Path::new(r"\\server\share\proj\src\lib.rs"),
+                Path::new(r"\\server\share\proj")
+            ),
+            "src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn contract_manifest_checks_use_the_workspace_release_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-workspace-profile-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let member = root.join("member");
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"workspace-contract\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            member.join("src/lib.rs"),
+            "#[contract]\npub struct C;\n#[contractimpl]\nimpl C {}\n",
+        )
+        .unwrap();
+
+        let (findings, _, _, panics) = scan_directory(&root, &[], &[]).unwrap();
+        assert!(panics.is_empty());
+        let profile_findings: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.check_name == "release-profile-not-optimized")
+            .collect();
+        assert_eq!(profile_findings.len(), 5);
+        assert!(profile_findings
+            .iter()
+            .all(|finding| finding.file_path == "Cargo.toml"));
+
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n\
+             [profile.release]\nopt-level = \"z\"\nlto = true\npanic = \"abort\"\n\
+             codegen-units = 1\nstrip = \"symbols\"\n",
+        )
+        .unwrap();
+        let (findings, _, _, panics) = scan_directory(&root, &[], &[]).unwrap();
+        assert!(panics.is_empty());
+        assert!(findings
+            .iter()
+            .all(|finding| finding.check_name != "release-profile-not-optimized"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn slash_and_backslash_globs_match_windows_style_paths() {
+        let label = Path::new(r"src\lib.rs");
+        let path = Path::new(r"C:\proj\src\lib.rs");
+        for pattern in ["src/*.rs", r"src\*.rs"] {
+            let compiled = compile_globs(&[pattern.to_string()]).unwrap();
+            assert!(glob_hit(&compiled, label, path), "{pattern} should match");
+        }
+        let excluded = compile_globs(&[r"src\lib.rs".to_string()]).unwrap();
+        assert!(glob_hit(&excluded, label, path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_and_unc_roots_produce_slash_separated_labels() {
+        let drive = file_label(Path::new(r"C:\proj\src\lib.rs"), Path::new(r"C:\proj"));
+        let unc = file_label(
+            Path::new(r"\\server\share\proj\src\lib.rs"),
+            Path::new(r"\\server\share\proj"),
+        );
+        assert_eq!(drive, "src/lib.rs");
+        assert_eq!(unc, "src/lib.rs");
+        assert!(!drive.contains('\\'));
+        assert!(!unc.contains('\\'));
+    }
+
+    #[cfg(windows)]
+    struct PathFindingCheck;
+
+    #[cfg(windows)]
+    impl Check for PathFindingCheck {
+        fn name(&self) -> &str {
+            "path-finding"
+        }
+
+        fn run(&self, _file: &syn::File, _source: &str) -> Vec<Finding> {
+            vec![Finding {
+                check_name: self.name().to_string(),
+                severity: Severity::Low,
+                file_path: String::new(),
+                line: 1,
+                function_name: String::new(),
+                description: "path normalization test".to_string(),
+                rule_url: None,
+                suggestion: None,
+            }]
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn emitted_finding_paths_use_forward_slashes() {
+        let root = std::env::temp_dir().join(format!(
+            "soroban-guard-windows-path-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"path-test\"\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "pub struct C;\n").unwrap();
+
+        let (results, _, _, panics) =
+            scan_directory_with_checks(&root, &[], &[], &[Box::new(PathFindingCheck)]).unwrap();
+        assert!(panics.is_empty());
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].findings[0].file_path.contains('\\'));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn scan_single_rs_file_directly() {

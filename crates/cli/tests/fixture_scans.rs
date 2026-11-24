@@ -147,6 +147,8 @@ fn cli_scan_path_does_not_emit_duplicate_findings() {
             finding.file_path.clone(),
             finding.line,
             finding.check_name.clone(),
+            finding.function_name.clone(),
+            finding.description.clone(),
         );
         assert!(
             keys.insert(key),
@@ -277,4 +279,9 @@ fn input_length_fixtures() {
 #[test]
 fn large_loop_fixtures() {
     assert_fixture_pair("large-loop", "large-loop");
+}
+
+#[test]
+fn release_profile_optimization_fixtures() {
+    assert_fixture_pair("release-profile", "release-profile-not-optimized");
 }

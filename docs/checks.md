@@ -104,6 +104,41 @@ Wrapping arithmetic on `i128` / `u128` amounts can silently overflow. Prefer `ch
 
 ---
 
+## `release-profile-not-optimized` (Low)
+
+**What it detects**
+
+For a crate containing a non-test `#[contract]` or `#[contractimpl]` item, checks `[profile.release]` and any `[profile.release-*]` profiles for the recommended `opt-level = "z"`, `lto = true`, `panic = "abort"`, `codegen-units = 1`, and `strip = "symbols"` settings. Each missing or contrary setting is reported separately. A custom release profile inherits values from its configured parent profile.
+
+**Why it matters**
+
+Soroban contracts are uploaded as WASM. Size optimization reduces upload costs and helps keep artifacts within practical ledger and deployment limits.
+
+**How to fix**
+
+Add the recommended settings to the workspace root manifest, or to the crate manifest when it is not in a workspace:
+
+```toml
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = "symbols"
+```
+
+Workspace member crates use the profile configured in the workspace root `Cargo.toml`. Suppress an intentional exception with `// soroban-guard: allow(release-profile-not-optimized)` in the contract's Rust source.
+
+**Limitations**
+
+- Contract detection is syntax-based and only recognizes `#[contract]` and `#[contractimpl]` annotations in scanned Rust sources; macros that generate annotations are not expanded.
+- Only the `release` profile and custom profiles whose names start with `release-` are checked.
+- Per-package profile overrides and platform-specific build settings are not resolved.
+
+**Fixture:** `test-contracts/release-profile-vulnerable/`, `test-contracts/release-profile-safe/`
+
+---
+
 ## `unprotected-admin` (High)
 
 **Status:** Phase 2

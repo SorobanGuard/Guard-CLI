@@ -19,6 +19,7 @@ pub mod missing_nonce;
 pub mod overflow;
 pub mod panics;
 pub mod reentrancy;
+pub mod release_profile_not_optimized;
 pub mod reinit;
 pub mod std_imports;
 pub mod storage;
@@ -55,6 +56,7 @@ pub use missing_nonce::MissingNonceCheck;
 pub use overflow::UncheckedArithmeticCheck;
 pub use panics::PanicInContractCheck;
 pub use reentrancy::ReentrancyRiskCheck;
+pub use release_profile_not_optimized::ReleaseProfileNotOptimizedCheck;
 pub use reinit::ReInitializationRiskCheck;
 pub use std_imports::ForbiddenStdImportsCheck;
 pub use storage::UnsafeStoragePatternsCheck;
@@ -130,6 +132,19 @@ pub struct Finding {
 pub trait Check {
     fn name(&self) -> &str;
     fn run(&self, file: &File, source: &str) -> Vec<Finding>;
+
+    /// Run checks that inspect crate-level Cargo manifest settings.
+    ///
+    /// `contract_sources` contains the Rust sources associated with this manifest.
+    /// Most checks operate on one Rust file and can keep the default implementation.
+    fn run_manifest(
+        &self,
+        _manifest_source: &str,
+        _workspace_manifest_source: Option<&str>,
+        _contract_sources: &[String],
+    ) -> Result<Vec<Finding>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// Group a flat findings slice by `file_path`.
@@ -230,6 +245,7 @@ fn all_checks_base() -> Vec<Box<dyn Check + Send + Sync>> {
         Box::new(ReentrancyRiskCheck),
         Box::new(MissingEventForAdminChangeCheck),
         Box::new(MissingInputLengthBoundCheck),
+        Box::new(ReleaseProfileNotOptimizedCheck),
     ]
 }
 

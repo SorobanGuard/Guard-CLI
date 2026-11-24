@@ -1,5 +1,7 @@
 #![no_std]
 
+// Triggers `release-profile-not-optimized`: profile settings live in Cargo.toml.
+
 // Triggers `forbidden-std-imports`: Soroban contracts are `no_std`, so importing `std`
 // is invalid.
 use std::collections::HashMap;

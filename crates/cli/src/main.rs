@@ -996,6 +996,13 @@ const CHECK_METADATA: &[CheckMeta] = &[
         rule: "Authorization check occurs after a storage write",
         long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
     },
+    CheckMeta {
+        name: "release-profile-not-optimized",
+        severity: "low",
+        short: "Flags release profiles missing Soroban WASM optimizations",
+        rule: "Contract release profile is missing recommended size optimizations",
+        long: Some("Reports missing or contrary opt-level, lto, panic, codegen-units, and strip settings in release and release-like profiles for crates containing Soroban contracts."),
+    },
 ];
 
 fn check_meta(name: &str) -> Option<&'static CheckMeta> {
