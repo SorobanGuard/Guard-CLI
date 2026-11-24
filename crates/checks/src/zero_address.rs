@@ -1,5 +1,6 @@
 //! Missing zero-address check: `Address` parameters with no invalid-destination assertion.
 
+use crate::sensitive_names::SensitiveNames;
 use crate::util::contractimpl_functions_excluding_test;
 use crate::{Check, Finding, Severity};
 use syn::punctuated::Punctuated;
@@ -25,18 +26,29 @@ const CHECK_NAME: &str = "missing-zero-address-check";
 /// An authorization check such as `require_auth()` proves the *caller* is
 /// authorised; it says nothing about the *value* of the address argument being
 /// passed in, so it is not treated as a guard on its own.
-pub struct MissingZeroAddressCheck;
+pub struct MissingZeroAddressCheck {
+    names: SensitiveNames,
+}
 
-const SENSITIVE_NAMES: &[&str] = &[
-    "set_owner",
-    "set_admin",
-    "initialize",
-    "init",
-    "transfer_ownership",
-    "update_admin",
-    "set_manager",
-    "set_operator",
-];
+impl MissingZeroAddressCheck {
+    /// Creates the check with the built-in sensitive-name list.
+    pub fn new() -> Self {
+        Self {
+            names: SensitiveNames::default(),
+        }
+    }
+
+    /// Creates the check with a custom (possibly extended) sensitive-name matcher.
+    pub fn with_names(names: SensitiveNames) -> Self {
+        Self { names }
+    }
+}
+
+impl Default for MissingZeroAddressCheck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 fn is_address_type(ty: &Type) -> bool {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -189,8 +201,7 @@ impl Check for MissingZeroAddressCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let fn_name = method.sig.ident.to_string();
-            let is_sensitive = SENSITIVE_NAMES.contains(&fn_name.as_str());
-            if !is_sensitive {
+            if !self.names.matches(&fn_name) {
                 continue;
             }
             if !has_address_param(method) {
@@ -241,7 +252,12 @@ mod tests {
 
     fn run(src: &str) -> Vec<Finding> {
         let file = parse_file(src).expect("parse");
-        MissingZeroAddressCheck.run(&file, src)
+        MissingZeroAddressCheck::new().run(&file, src)
+    }
+
+    fn run_with_names(src: &str, names: SensitiveNames) -> Vec<Finding> {
+        let file = parse_file(src).expect("parse");
+        MissingZeroAddressCheck::with_names(names).run(&file, src)
     }
 
     #[test]
@@ -359,6 +375,41 @@ impl C {
 }
 "#);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn flags_extra_sensitive_name() {
+        let names = SensitiveNames::default().with_extra(["rotate_admin"]);
+        let hits = run_with_names(
+            r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn rotate_admin(env: Env, new_admin: Address) {
+        env.storage().instance().set(&"admin", &new_admin);
+    }
+}
+"#,
+            names,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].function_name, "rotate_admin");
+    }
+
+    #[test]
+    fn flags_builtin_update_admin() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn update_admin(env: Env, new_admin: Address) {
+        env.storage().instance().set(&"admin", &new_admin);
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]

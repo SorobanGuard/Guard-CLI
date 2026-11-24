@@ -1,3 +1,4 @@
+use crate::sensitive_names::SensitiveNames;
 use crate::util::{
     is_admin_var_name,
     self, contractimpl_functions_excluding_test, env_param_name, pat_ident_name,
@@ -11,7 +12,25 @@ use syn::{Block, Expr, ExprMethodCall};
 const CHECK_NAME: &str = "unprotected-upgrade";
 const SENSITIVE_NAMES: &[&str] = &["upgrade", "migrate", "set_wasm", "replace_wasm"];
 
-pub struct UnprotectedUpgradeCheck;
+pub struct UnprotectedUpgradeCheck {
+    names: SensitiveNames,
+}
+
+impl UnprotectedUpgradeCheck {
+    pub fn new() -> Self {
+        Self::with_names(SensitiveNames::from_builtin(SENSITIVE_NAMES))
+    }
+
+    pub fn with_names(names: SensitiveNames) -> Self {
+        Self { names }
+    }
+}
+
+impl Default for UnprotectedUpgradeCheck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Check for UnprotectedUpgradeCheck {
     fn name(&self) -> &str {
@@ -22,7 +41,7 @@ impl Check for UnprotectedUpgradeCheck {
         let mut out = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let name = method.sig.ident.to_string();
-            if is_sensitive_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
+            if self.names.matches(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
                 let env_name = env_param_name(&method.sig).unwrap_or_else(|| "env".to_string());
                 let address_names = util::address_param_names(&method.sig);
                 let sensitive_line = first_invoke_wasm_line(&method.block);
@@ -56,10 +75,6 @@ impl Check for UnprotectedUpgradeCheck {
         }
         out
     }
-}
-
-fn is_sensitive_name(name: &str) -> bool {
-    SENSITIVE_NAMES.contains(&name)
 }
 
 fn first_invoke_wasm_line(block: &Block) -> Option<usize> {
@@ -180,10 +195,29 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
+        let check = UnprotectedUpgradeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].check_name, "unprotected-upgrade");
+        Ok(())
+    }
+
+    #[test]
+    fn flags_extra_sensitive_name() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn set_wasm_hash(env: Env, new_code: Bytes) {
+        env.invoke_wasm(&new_code);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let names = SensitiveNames::from_builtin(SENSITIVE_NAMES).with_extra(["set_wasm_hash"]);
+        let check = UnprotectedUpgradeCheck::with_names(names);
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "set_wasm_hash");
         Ok(())
     }
 
@@ -199,7 +233,7 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
+        let check = UnprotectedUpgradeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
         Ok(())
@@ -217,7 +251,7 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
+        let check = UnprotectedUpgradeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         Ok(())
@@ -235,7 +269,7 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
+        let check = UnprotectedUpgradeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         Ok(())
@@ -252,7 +286,7 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
+        let check = UnprotectedUpgradeCheck::new();
         let findings = check.run(&file, src);
         assert!(findings.is_empty());
         Ok(())
@@ -271,7 +305,7 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
+        let check = UnprotectedUpgradeCheck::new();
         let findings = check.run(&file, src);
         assert!(findings.is_empty());
         Ok(())
@@ -290,7 +324,7 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let findings = UnprotectedUpgradeCheck.run(&file, src);
+        let findings = UnprotectedUpgradeCheck::new().run(&file, src);
         assert_eq!(findings.len(), 0);
         Ok(())
     }
@@ -318,7 +352,7 @@ mod tests {
 }
         "#;
         let file = parse_file(src)?;
-        let check = UnprotectedUpgradeCheck;
+        let check = UnprotectedUpgradeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         Ok(())

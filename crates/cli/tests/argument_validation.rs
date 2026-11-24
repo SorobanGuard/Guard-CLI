@@ -26,3 +26,16 @@ fn clap_rejects_output_without_structured_format() {
     assert!(stderr.contains("required"), "{stderr}");
     assert!(stderr.contains("--output"), "{stderr}");
 }
+
+#[test]
+fn invalid_fail_on_flag_value_blames_the_flag() {
+    let output = run(&["scan", ".", "--fail-on", "critical"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--fail-on"), "{stderr}");
+    assert!(stderr.contains("critical"), "{stderr}");
+    assert!(
+        !stderr.contains("soroban-guard.toml"),
+        "flag-originated error should not blame the config file: {stderr}"
+    );
+}

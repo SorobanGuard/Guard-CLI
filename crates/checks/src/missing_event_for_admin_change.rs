@@ -1,3 +1,4 @@
+use crate::sensitive_names::SensitiveNames;
 use crate::util::contractimpl_functions_excluding_test;
 use crate::util::receiver_chain_contains_events;
 use crate::util::receiver_chain_contains_storage;
@@ -9,7 +10,27 @@ use syn::spanned::Spanned;
 const CHECK_NAME: &str = "missing-event-for-admin-change";
 const ADMIN_NAMES: &[&str] = &["set_owner", "set_admin", "transfer_ownership", "set_operator"];
 
-pub struct MissingEventForAdminChangeCheck;
+pub struct MissingEventForAdminChangeCheck {
+    names: SensitiveNames,
+}
+
+impl MissingEventForAdminChangeCheck {
+    pub fn new() -> Self {
+        Self {
+            names: SensitiveNames::new(ADMIN_NAMES),
+        }
+    }
+
+    pub fn with_names(names: SensitiveNames) -> Self {
+        Self { names }
+    }
+}
+
+impl Default for MissingEventForAdminChangeCheck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Check for MissingEventForAdminChangeCheck {
     fn name(&self) -> &str {
@@ -20,7 +41,7 @@ impl Check for MissingEventForAdminChangeCheck {
         let mut findings = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
             let name = method.sig.ident.to_string();
-            if is_admin_name(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
+            if self.names.matches(&name) && matches!(method.vis, syn::Visibility::Public(_)) {
                 let has_storage_write = has_storage_write(&method.block);
                 let has_event = has_event_emit(&method.block);
 
@@ -46,10 +67,6 @@ impl Check for MissingEventForAdminChangeCheck {
         }
         findings
     }
-}
-
-fn is_admin_name(name: &str) -> bool {
-    ADMIN_NAMES.iter().any(|&a| name.contains(a))
 }
 
 fn has_storage_write(block: &syn::Block) -> bool {
@@ -112,11 +129,30 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = MissingEventForAdminChangeCheck;
+        let check = MissingEventForAdminChangeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].function_name, "set_owner");
         assert_eq!(findings[0].line, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_extra_name_missing_event() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn rotate_keys(env: Env, new_key: Address) {
+        env.storage().instance().set(&symbol_short!("key"), &new_key);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let check = MissingEventForAdminChangeCheck::with_names(SensitiveNames::new(ADMIN_NAMES)
+            .with_extra(["rotate_keys"]));
+        let findings = check.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].function_name, "rotate_keys");
         Ok(())
     }
 
@@ -132,7 +168,7 @@ impl C {
 }
         "#;
         let file = parse_file(src)?;
-        let check = MissingEventForAdminChangeCheck;
+        let check = MissingEventForAdminChangeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
         Ok(())
@@ -161,7 +197,7 @@ mod tests {
 }
         "#;
         let file = parse_file(src)?;
-        let check = MissingEventForAdminChangeCheck;
+        let check = MissingEventForAdminChangeCheck::new();
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
         Ok(())

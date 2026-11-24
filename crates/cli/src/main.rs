@@ -256,6 +256,59 @@ fn effective_fail_on(cli_value: Option<&str>, config_value: Option<&str>) -> Str
     cli_value.or(config_value).unwrap_or("high").to_string()
 }
 
+/// Where a setup value came from, so error messages can blame the right place
+/// (issue #1067): a CLI flag the user typed, or a discovered `soroban-guard.toml`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ValueSource {
+    /// A command-line flag, e.g. `--fail-on` or `--disable-check`.
+    Flag(&'static str),
+    /// A config file discovered by walking upward from the scan path.
+    Config(Option<PathBuf>),
+}
+
+impl ValueSource {
+    /// Human-readable origin, e.g. `--fail-on` or `/repo/soroban-guard.toml`.
+    fn label(&self) -> String {
+        match self {
+            ValueSource::Flag(flag) => (*flag).to_string(),
+            ValueSource::Config(Some(path)) => path.display().to_string(),
+            ValueSource::Config(None) => "soroban-guard.toml".to_string(),
+        }
+    }
+}
+
+/// Build the setup error for an unparseable `min_severity` / `--fail-on` value,
+/// naming where the value came from.
+fn invalid_min_severity_message(source: &ValueSource, bad: &str) -> String {
+    match source {
+        ValueSource::Flag(flag) => format!(
+            "{}: unknown value `{}` (expected high|medium|low)",
+            flag, bad
+        ),
+        ValueSource::Config(_) => format!(
+            "{}: [scan] min_severity: unknown value `{}` (expected high|medium|low)",
+            source.label(),
+            bad
+        ),
+    }
+}
+
+/// Build the setup error for an unknown disabled check name, naming where the
+/// name came from.
+fn unknown_check_message(name: &str, source: &ValueSource) -> String {
+    match source {
+        ValueSource::Flag(flag) => format!(
+            "unknown check `{}` (from {}). Run `soroban-guard list-checks` to see available checks.",
+            name, flag
+        ),
+        ValueSource::Config(_) => format!(
+            "{}: [checks] disabled: unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
+            source.label(),
+            name
+        ),
+    }
+}
+
 fn is_relevant_watch_path(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "rs") && !is_ignored_path(path)
 }
@@ -345,7 +398,7 @@ fn main() {
             };
 
             // Load soroban-guard.toml, searching upward from the scan path.
-            let cfg = match config::load(&scan_path) {
+            let (cfg, config_path) = match config::load(&scan_path) {
                 Ok((c, config_path)) => {
                     if verbose {
                         match &config_path {
@@ -353,7 +406,7 @@ fn main() {
                             None => eprintln!("No soroban-guard.toml found"),
                         }
                     }
-                    c.unwrap_or_default()
+                    (c.unwrap_or_default(), config_path)
                 }
                 Err(e) => {
                     emit_setup_error(&e.to_string(), json);
@@ -366,26 +419,39 @@ fn main() {
             // they did not — so we can correctly fall back to the config value
             // without the old `!= "high"` hack that broke explicit --fail-on high
             // (issue #667).
+            //
+            // Track where the effective value came from so a bad value blames the
+            // flag or the config file rather than always saying `--fail-on`
+            // (issue #1067).
+            let min_severity_source = if fail_on.is_some() {
+                ValueSource::Flag("--fail-on")
+            } else if cfg.scan.min_severity.is_some() {
+                ValueSource::Config(config_path.clone())
+            } else {
+                // Built-in default; never fails to parse.
+                ValueSource::Flag("--fail-on")
+            };
             let effective_fail_on =
                 effective_fail_on(fail_on.as_deref(), cfg.scan.min_severity.as_deref());
             let fail_threshold = match parse_fail_on(&effective_fail_on) {
                 Ok(sev) => sev,
                 Err(bad) => {
-                    emit_setup_error(
-                        &format!(
-                            "unknown --fail-on value `{}`. Expected one of: high, medium, low",
-                            bad
-                        ),
-                        json,
-                    );
+                    emit_setup_error(&invalid_min_severity_message(&min_severity_source, bad), json);
                 }
             };
 
-            // Merge config disabled list with --disable-check flags.
-            let mut all_disabled: Vec<String> = cfg.checks.disabled.clone();
+            // Merge config disabled list with --disable-check flags, remembering
+            // where each name came from so validation errors can name the source
+            // (issue #1067).
+            let mut all_disabled: Vec<(String, ValueSource)> = cfg
+                .checks
+                .disabled
+                .iter()
+                .map(|name| (name.clone(), ValueSource::Config(config_path.clone())))
+                .collect();
             for name in &disable_check {
-                if !all_disabled.contains(name) {
-                    all_disabled.push(name.clone());
+                if !all_disabled.iter().any(|(existing, _)| existing == name) {
+                    all_disabled.push((name.clone(), ValueSource::Flag("--disable-check")));
                 }
             }
 
@@ -393,24 +459,21 @@ fn main() {
             let known_checks = default_checks();
             {
                 let known_names: HashSet<&str> = known_checks.iter().map(|c| c.name()).collect();
-                for name in &all_disabled {
+                for (name, source) in &all_disabled {
                     if !known_names.contains(name.as_str()) {
-                        emit_setup_error(
-                            &format!(
-                                "unknown check `{}`. Run `soroban-guard list-checks` to see available checks.",
-                                name
-                            ),
-                            json,
-                        );
+                        emit_setup_error(&unknown_check_message(name, source), json);
                     }
                 }
             }
             if !all_disabled.is_empty() && !quiet {
-                eprintln!("note: disabled check(s): {}", all_disabled.join(", "));
+                let names: Vec<&str> = all_disabled.iter().map(|(name, _)| name.as_str()).collect();
+                eprintln!("note: disabled check(s): {}", names.join(", "));
             }
+            let disabled_names: Vec<String> =
+                all_disabled.iter().map(|(name, _)| name.clone()).collect();
 
             let extra_sensitive = &cfg.checks.sensitive_names.extra;
-            let active_checks = default_checks_with_config(&all_disabled, extra_sensitive);
+            let active_checks = default_checks_with_config(&disabled_names, extra_sensitive);
 
             // Build a ScanOptions struct to pass around cleanly.
             let opts = ScanOptions {
@@ -1779,6 +1842,52 @@ mod tests {
         assert_eq!(parse_fail_on("LOW"), Ok(Severity::Low));
     }
 
+    // ── setup error attribution (issue #1067) ────────────────────────────────
+
+    #[test]
+    fn config_min_severity_error_names_config_file() {
+        let source = ValueSource::Config(Some(PathBuf::from("/repo/soroban-guard.toml")));
+        let message = invalid_min_severity_message(&source, "critical");
+        assert_eq!(
+            message,
+            "/repo/soroban-guard.toml: [scan] min_severity: unknown value `critical` (expected high|medium|low)"
+        );
+        assert!(
+            !message.contains("--fail-on"),
+            "config-originated error must not blame --fail-on: {message}"
+        );
+    }
+
+    #[test]
+    fn flag_min_severity_error_names_flag() {
+        let source = ValueSource::Flag("--fail-on");
+        let message = invalid_min_severity_message(&source, "medim");
+        assert_eq!(
+            message,
+            "--fail-on: unknown value `medim` (expected high|medium|low)"
+        );
+    }
+
+    #[test]
+    fn config_disabled_check_error_names_config_file() {
+        let source = ValueSource::Config(Some(PathBuf::from("/repo/soroban-guard.toml")));
+        let message = unknown_check_message("foo", &source);
+        assert!(
+            message.starts_with("/repo/soroban-guard.toml: [checks] disabled: unknown check `foo`"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn flag_disabled_check_error_names_flag() {
+        let source = ValueSource::Flag("--disable-check");
+        let message = unknown_check_message("foo", &source);
+        assert!(
+            message.starts_with("unknown check `foo` (from --disable-check)"),
+            "got: {message}"
+        );
+    }
+
     #[test]
     fn parse_fail_on_rejects_unknown_string() {
         assert!(parse_fail_on("medim").is_err(), "typo should be rejected");
@@ -1823,8 +1932,102 @@ mod tests {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("unknown --fail-on value"),
-            "stderr should contain 'unknown --fail-on value', got: {stderr}"
+            stderr.contains("--fail-on: unknown value `medim`"),
+            "stderr should blame --fail-on, got: {stderr}"
+        );
+    }
+
+    /// A bad `[scan] min_severity` in `soroban-guard.toml` must blame the config
+    /// file, not `--fail-on`, which the user never passed (issue #1067).
+    #[test]
+    fn bad_config_min_severity_blames_config_file() {
+        let mut bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        bin.push("../../target/debug/soroban-guard");
+        if !bin.exists() {
+            eprintln!(
+                "note: skipping bad_config_min_severity_blames_config_file — binary not found at {}",
+                bin.display()
+            );
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "soroban-guard-cfg-sev-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("soroban-guard.toml");
+        fs::write(&config_path, "[scan]\nmin_severity = \"critical\"\n").unwrap();
+
+        let output = std::process::Command::new(&bin)
+            .args(["scan", dir.to_str().unwrap()])
+            .output()
+            .expect("failed to run soroban-guard binary");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "bad config min_severity should exit 2, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("soroban-guard.toml: [scan] min_severity: unknown value `critical`"),
+            "stderr should blame the config file, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("--fail-on"),
+            "stderr must not blame --fail-on, got: {stderr}"
+        );
+    }
+
+    /// An unknown name under `[checks] disabled` must name the config file
+    /// (issue #1067).
+    #[test]
+    fn bad_config_disabled_check_blames_config_file() {
+        let mut bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        bin.push("../../target/debug/soroban-guard");
+        if !bin.exists() {
+            eprintln!(
+                "note: skipping bad_config_disabled_check_blames_config_file — binary not found at {}",
+                bin.display()
+            );
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "soroban-guard-cfg-dis-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("soroban-guard.toml");
+        fs::write(&config_path, "[checks]\ndisabled = [\"foo\"]\n").unwrap();
+
+        let output = std::process::Command::new(&bin)
+            .args(["scan", dir.to_str().unwrap()])
+            .output()
+            .expect("failed to run soroban-guard binary");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "unknown config disabled check should exit 2, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("soroban-guard.toml: [checks] disabled: unknown check `foo`"),
+            "stderr should blame the config file, got: {stderr}"
         );
     }
 }
