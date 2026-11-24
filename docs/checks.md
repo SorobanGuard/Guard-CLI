@@ -243,7 +243,7 @@ The Soroban SDK requires a `#[contract]` struct to be present alongside `#[contr
 
 **What it detects**
 
-In `#[contractimpl]` methods: a call to `invoke_contract` or `try_call` where the contract address argument originates from `env.storage().*.get()` (i.e. a stored address), which indicates a dynamic delegate-like call pattern that can be exploited if the stored address is attacker-controlled.
+In `#[contractimpl]` methods: a call to `invoke_contract`, `invoke_contract_check` or `try_invoke_contract` where the contract address argument originates from `env.storage().*.get()` (i.e. a stored address), which indicates a dynamic delegate-like call pattern that can be exploited if the stored address is attacker-controlled.
 
 **Why it matters**
 

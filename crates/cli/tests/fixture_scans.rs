@@ -63,6 +63,41 @@ fn missing_require_auth_fixtures() {
 }
 
 #[test]
+fn balance_fixtures() {
+    assert_fixture_pair("balance", "missing-balance-check");
+}
+
+#[test]
+fn hardcoded_address_fixtures() {
+    assert_fixture_pair("hardcoded-address", "hardcoded-address");
+}
+
+#[test]
+fn reinit_fixtures() {
+    assert_fixture_pair("reinit", "re-initialization-risk");
+}
+
+#[test]
+fn unchecked_divisor_fixtures() {
+    assert_fixture_pair("unchecked-divisor", "unchecked-divisor");
+}
+
+#[test]
+fn unsafe_randomness_fixtures() {
+    assert_fixture_pair("unsafe-randomness", "unsafe-randomness");
+}
+
+#[test]
+fn xc_input_fixtures() {
+    assert_fixture_pair("xc-input", "unsafe-cross-contract-input");
+}
+
+#[test]
+fn contract_deployment_fixtures() {
+    assert_fixture_pair("contract-deployment", "unprotected-contract-deployment");
+}
+
+#[test]
 fn admin_fixtures() {
     assert_fixture_pair("admin", "unprotected-admin");
 }

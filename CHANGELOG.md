@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Trailing same-line suppressions:
+  `let x = a / b; // soroban-guard: allow(integer-division-truncation)` (#1066).
 - Inline `// soroban-guard: allow(check-name)` suppression annotations.
 - `examples/all-findings` demo contract that intentionally triggers every default check.
 - crates.io publishing metadata and release process documentation.
@@ -22,6 +24,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `delegate-call-risk`: uses the shared `is_invoke_contract_method_name`, so a
+  storage-derived callee reached through `try_invoke_contract` is reported; the
+  non-existent `env.try_call` is no longer matched (#1063).
+- Fixture coverage: `fixture_scans.rs` now asserts the balance, hardcoded-address,
+  reinit, unchecked-divisor, unsafe-randomness, xc-input and contract-deployment
+  pairs, and `registry_consistency` fails when a registered fixture pair has no
+  `assert_fixture_pair` (#1064).
+- Removed stale comments in `checks/src/lib.rs` and `analyzer/src/lib.rs` (#1065).
 - `unsafe-storage-patterns`: `Symbol::new` detection now matches the last two
   path segments, so the fully-qualified `soroban_sdk::Symbol::new(...)` form is
   caught, not just the two-segment `Symbol::new(...)`.

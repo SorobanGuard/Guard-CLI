@@ -5,10 +5,13 @@
 //! contract the attacker controls.
 //!
 //! Detection: within a single `#[contractimpl]` method, if a storage read expression
-//! (containing `.storage()`) exists alongside an `env.invoke_contract` / `env.try_call`,
-//! the method is flagged. This catches both inlined and variable-mediated patterns.
+//! (containing `.storage()`) exists alongside an `env.invoke_contract` /
+//! `env.invoke_contract_check` / `env.try_invoke_contract`, the method is flagged. This catches both inlined and variable-mediated patterns.
 
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+use crate::util::{
+    contractimpl_functions_excluding_test, is_invoke_contract_method_name,
+    receiver_chain_contains_storage,
+};
 use crate::{Check, Finding, Severity};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -17,7 +20,7 @@ use syn::{Expr, ExprMethodCall, File, FnArg, Pat, Signature, Type};
 const CHECK_NAME: &str = "delegate-call-risk";
 
 /// Flags `#[contractimpl]` methods that contain both a storage read (`.storage()`) and a
-/// cross-contract call (`env.invoke_contract` / `env.try_call`).
+/// cross-contract call (`env.invoke_contract` / `invoke_contract_check` / `try_invoke_contract`).
 pub struct DelegateCallRiskCheck;
 
 impl Check for DelegateCallRiskCheck {
@@ -45,7 +48,7 @@ impl Check for DelegateCallRiskCheck {
                         function_name: fn_name.to_string(),
                         description: format!(
                             "Method `{fn_name}` reads from storage and calls \
-                             `env.invoke_contract`/`env.try_call`. If storage can be \
+                             `env.invoke_contract` / `env.try_invoke_contract`. If storage can be \
                              poisoned (e.g., via upgrade or temp-storage race), the call \
                              can be redirected to an attacker-controlled contract.",
                         ),
@@ -78,7 +81,9 @@ impl<'ast> Visit<'ast> for DelegateVisitor {
         if receiver_chain_contains_storage(&i.receiver) && i.method == "get" {
             self.has_storage_read = true;
         }
-        if is_invoke_or_try_call(i) && is_env_receiver(&i.receiver, &self.env_ident) {
+        if is_invoke_contract_method_name(&i.method.to_string())
+            && is_env_receiver(&i.receiver, &self.env_ident)
+        {
             self.last_invoke_contract_line = Some(i.span().start().line);
         }
         visit::visit_expr_method_call(self, i);
@@ -90,10 +95,6 @@ impl<'ast> Visit<'ast> for DelegateVisitor {
         }
         visit::visit_expr(self, i);
     }
-}
-
-fn is_invoke_or_try_call(i: &ExprMethodCall) -> bool {
-    matches!(i.method.to_string().as_str(), "invoke_contract" | "try_call")
 }
 
 fn is_env_receiver(expr: &Expr, env_ident: &str) -> bool {
@@ -197,10 +198,10 @@ impl C {
     }
 
     #[test]
-    fn flags_try_call_with_storage_address() -> Result<(), syn::Error> {
+    fn flags_try_invoke_contract_with_storage_address() -> Result<(), syn::Error> {
         let file = parse_file(
             r#"
-use soroban_sdk::{contractimpl, Address, Env, Symbol};
+use soroban_sdk::{contractimpl, Address, Env, InvokeError, Symbol, Val};
 
 pub struct C;
 
@@ -208,13 +209,36 @@ pub struct C;
 impl C {
     pub fn call_external(env: Env) {
         let addr: Address = env.storage().instance().get(&0).unwrap();
-        let _ = env.try_call(&addr, &Symbol::new(&env, "do_thing"), ());
+        let _ = env.try_invoke_contract::<Val, InvokeError>(&addr, &Symbol::new(&env, "do_thing"), soroban_sdk::vec![&env]);
     }
 }
 "#,
         )?;
         let hits = DelegateCallRiskCheck.run(&file, "");
         assert_eq!(hits.len(), 1);
+        assert!(!hits[0].description.contains("try_call"));
+        Ok(())
+    }
+
+    /// `Env` has no `try_call`; a method of that name is not a cross-contract call.
+    #[test]
+    fn ignores_non_sdk_try_call() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env};
+
+pub struct C;
+
+#[contractimpl]
+impl C {
+    pub fn call_external(env: Env) {
+        let addr: Address = env.storage().instance().get(&0).unwrap();
+        let _ = env.try_call(&addr);
+    }
+}
+"#,
+        )?;
+        assert!(DelegateCallRiskCheck.run(&file, "").is_empty());
         Ok(())
     }
 
