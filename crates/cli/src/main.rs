@@ -76,6 +76,10 @@ enum Commands {
         /// Cap the number of findings printed to stdout (0 = unlimited, default: 0)
         #[arg(long, value_name = "N", default_value_t = 0)]
         max_findings: usize,
+        /// Base directory that SARIF `artifactLocation.uri` values are made relative to
+        /// (defaults to the git toplevel when available, otherwise the scan root)
+        #[arg(long, value_name = "DIR")]
+        sarif_base: Option<PathBuf>,
     },
     /// List the checks that are enabled by default
     ListChecks {
@@ -119,6 +123,8 @@ struct ScanOptions {
     exclude: Vec<String>,
     includes: Vec<String>,
     max_findings: usize,
+    /// Base directory SARIF URIs are made relative to (see `--sarif-base`).
+    sarif_base: PathBuf,
 }
 
 /// Whether scan results should be printed. `--quiet` suppresses output only while the
@@ -150,8 +156,12 @@ fn run_scan(
                 )
             } else if opts.sarif {
                 Some(
-                    serde_json::to_string_pretty(&build_sarif(&findings, files_skipped))
-                        .map_err(|e| e.to_string()),
+                    serde_json::to_string_pretty(&build_sarif(
+                        &findings,
+                        files_skipped,
+                        &opts.sarif_base,
+                    ))
+                    .map_err(|e| e.to_string()),
                 )
             } else if opts.markdown {
                 Some(Ok(render_markdown(&findings)))
@@ -313,6 +323,7 @@ fn main() {
             watch,
             no_clear,
             max_findings,
+            sarif_base,
         } => {
             if no_color || std::env::var_os("NO_COLOR").is_some() {
                 colored::control::set_override(false);
@@ -412,6 +423,15 @@ fn main() {
             let extra_sensitive = &cfg.checks.sensitive_names.extra;
             let active_checks = default_checks_with_config(&all_disabled, extra_sensitive);
 
+            // Resolve the base directory SARIF URIs are made relative to. An explicit
+            // `--sarif-base` wins; otherwise fall back to the git toplevel so that
+            // monorepo scans of a subdirectory still produce repository-relative paths
+            // (issue #1073); otherwise the scan root itself.
+            let resolved_sarif_base = match sarif_base {
+                Some(base) => base,
+                None => git_toplevel(&scan_path).unwrap_or_else(|| scan_path.clone()),
+            };
+
             // Build a ScanOptions struct to pass around cleanly.
             let opts = ScanOptions {
                 path: scan_path.clone(),
@@ -425,6 +445,7 @@ fn main() {
                 exclude: exclude.clone(),
                 includes: include.clone(),
                 max_findings,
+                sarif_base: resolved_sarif_base,
             };
 
             // Run the initial scan.
@@ -662,7 +683,110 @@ fn truncate(findings: &[Finding], max: usize) -> (&[Finding], usize) {
     }
 }
 
-fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value {
+/// Return the git toplevel directory that contains `path`, if any.
+///
+/// Uses `git rev-parse --show-toplevel` so that worktrees and submodules resolve
+/// the same way git itself does. Returns `None` when git is unavailable, `path`
+/// is not inside a repository, or the command fails for any other reason.
+fn git_toplevel(path: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+/// Convert a filesystem path into a `file://` URI suitable for SARIF
+/// `originalUriBaseIds`. Paths are made absolute and normalized; on Windows the
+/// drive letter is prefixed with a slash (`file:///C:/...`) per RFC 8089.
+fn path_to_file_uri(path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    // Normalize `.` and `..` components without touching the filesystem.
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        use std::path::Component;
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let mut uri = String::from("file://");
+    let mut parts: Vec<String> = Vec::new();
+    for component in normalized.components() {
+        use std::path::Component;
+        match component {
+            Component::Prefix(prefix) => {
+                // Windows drive prefix, e.g. `C:` — becomes `/C:` in the URI.
+                let s = prefix.as_os_str().to_string_lossy().replace('\\', "/");
+                parts.push(s);
+            }
+            Component::RootDir => {}
+            Component::Normal(part) => {
+                parts.push(part.to_string_lossy().replace('\\', "/"));
+            }
+            _ => {}
+        }
+    }
+    uri.push('/');
+    uri.push_str(&parts.join("/"));
+    uri
+}
+
+/// Make `file_path` (relative to the scan root) relative to `base`, returning a
+/// forward-slash URI path. When `file_path` is already relative to `base` it is
+/// returned unchanged; otherwise the scan root is reconstructed from `base` and
+/// the file path.
+fn sarif_uri(file_path: &str, scan_root: &Path, base: &Path) -> String {
+    let normalized = file_path.replace('\\', "/");
+    // Reconstruct the absolute path of the finding from the scan root.
+    let absolute = scan_root.join(&normalized);
+    let absolute = if absolute.is_absolute() {
+        absolute
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&absolute))
+            .unwrap_or(absolute)
+    };
+    let base_abs = if base.is_absolute() {
+        base.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(base))
+            .unwrap_or_else(|_| base.to_path_buf())
+    };
+    match absolute.strip_prefix(&base_abs) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => normalized,
+    }
+}
+
+fn build_sarif(findings: &[Finding], files_skipped: usize, base: &Path) -> serde_json::Value {
+    // Findings carry `file_path` relative to the scan root; SARIF consumers such as
+    // GitHub Code Scanning resolve `uri` against the repository root. Emit a
+    // `uriBaseId` plus `originalUriBaseIds` so paths can be rebased, and make `uri`
+    // relative to `base` (the git toplevel or an explicit `--sarif-base`) so
+    // monorepo scans of a subdirectory land on the correct file (issue #1073).
+    let scan_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Collect the highest severity observed for each check name so that
     // defaultConfiguration.level reflects the worst-case rule level rather than
     // whichever finding happens to appear first in the slice.
@@ -693,13 +817,14 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
     let results = findings
         .iter()
         .map(|finding| {
+            let uri = sarif_uri(&finding.file_path, &scan_root, base);
             serde_json::json!({
                 "ruleId": finding.check_name,
                 "level": severity_to_sarif_level(finding.severity),
                 "message": { "text": finding.description },
                 "locations": [{
                     "physicalLocation": {
-                        "artifactLocation": { "uri": finding.file_path },
+                        "artifactLocation": { "uri": uri, "uriBaseId": "SRCROOT" },
                         "region": { "startLine": finding.line }
                     }
                 }]
@@ -719,6 +844,9 @@ fn build_sarif(findings: &[Finding], files_skipped: usize) -> serde_json::Value 
                     "version": env!("CARGO_PKG_VERSION"),
                     "semanticVersion": env!("CARGO_PKG_VERSION")
                 }
+            },
+            "originalUriBaseIds": {
+                "SRCROOT": { "uri": path_to_file_uri(base) }
             },
             "invocations": [{
                 "executionSuccessful": true,
@@ -1264,7 +1392,7 @@ mod tests {
             suggestion: None,
         }];
 
-        let payload = build_sarif(&findings, 0);
+        let payload = build_sarif(&findings, 0, Path::new("."));
         assert_eq!(payload["version"], "2.1.0");
         assert_eq!(
             payload["runs"][0]["tool"]["driver"]["name"],
@@ -1282,6 +1410,68 @@ mod tests {
             payload["runs"][0]["results"][0]["ruleId"],
             "missing-require-auth"
         );
+    }
+
+    #[test]
+    fn sarif_carries_uri_base_id_and_original_uri_base_ids() {
+        let findings = vec![sample_finding("missing-require-auth", Severity::High, 10)];
+        let base = std::env::temp_dir();
+        let payload = build_sarif(&findings, 0, &base);
+
+        let run = &payload["runs"][0];
+        let artifact = &run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"];
+        assert_eq!(artifact["uriBaseId"], "SRCROOT");
+        let original = run["originalUriBaseIds"]["SRCROOT"]["uri"]
+            .as_str()
+            .expect("originalUriBaseIds.SRCROOT.uri should be a string");
+        assert!(
+            original.starts_with("file://"),
+            "SRCROOT uri should be a file:// URI, got {original}"
+        );
+    }
+
+    #[test]
+    fn sarif_uri_is_relative_to_base_when_scanning_subdirectory() {
+        // Simulate a monorepo: <repo>/contracts/token/src/lib.rs scanned from
+        // <repo>/contracts/token with the repo root as the SARIF base.
+        let repo = std::env::temp_dir().join(format!(
+            "soroban-guard-sarif-base-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let scan_root = repo.join("contracts").join("token");
+        fs::create_dir_all(scan_root.join("src")).unwrap();
+        fs::write(scan_root.join("src").join("lib.rs"), "// test\n").unwrap();
+
+        let findings = vec![sample_finding("missing-require-auth", Severity::High, 10)];
+        let payload = build_sarif(&findings, 0, &repo);
+
+        let run = &payload["runs"][0];
+        let artifact = &run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"];
+        assert_eq!(artifact["uriBaseId"], "SRCROOT");
+        assert_eq!(
+            artifact["uri"], "contracts/token/src/lib.rs",
+            "uri should be relative to the repository root, not the scan root"
+        );
+
+        // The SRCROOT base URI must point at the repository root so that
+        // uriBaseId + uri resolve to the real file.
+        let base_uri = run["originalUriBaseIds"]["SRCROOT"]["uri"]
+            .as_str()
+            .unwrap();
+        assert!(base_uri.starts_with("file://"));
+        let base_path = base_uri.trim_start_matches("file://");
+        let resolved = Path::new(base_path).join(artifact["uri"].as_str().unwrap());
+        assert!(
+            resolved.exists(),
+            "uriBaseId + uri should resolve to an existing file, got {}",
+            resolved.display()
+        );
+
+        let _ = fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -1397,7 +1587,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let payload = serde_json::to_string_pretty(&build_sarif(&findings, 1)).unwrap();
+        let payload = serde_json::to_string_pretty(&build_sarif(&findings, 1, Path::new("."))).unwrap();
         write_output(&path, &payload).unwrap();
         assert!(path.exists());
         let contents = fs::read_to_string(&path).unwrap();
