@@ -1,6 +1,7 @@
 //! Flags `initialize`/`init`/`setup` functions in `#[contractimpl]` that do not guard
 //! against being called more than once.
 
+use crate::util::is_storage_mutation_call;
 use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
@@ -95,8 +96,7 @@ impl<'ast> Visit<'ast> for BodyScan {
     }
 
     fn visit_expr_method_call(&mut self, i: &'ast ExprMethodCall) {
-        let method = i.method.to_string();
-        if method == "set" && receiver_chain_contains_storage(&i.receiver) {
+        if is_storage_mutation_call(i) {
             self.has_storage_write = true;
         }
         // A bare `.has()`/`.is_some()`/`.is_none()` call is no longer treated as a guard
@@ -541,5 +541,21 @@ impl C {
 }
 "#);
         assert!(hits.is_empty(), "assert_with_error! with storage guard should silence the finding");
+    }
+
+    /// #1051: an initializer that writes only through `update` can still be re-run.
+    #[test]
+    fn flags_init_with_update_only_write() {
+        let hits = run(r#"
+use soroban_sdk::{contractimpl, Env, Address};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn initialize(env: Env, admin: Address) {
+        env.storage().instance().update(&0, |_old: Option<Address>| admin.clone());
+    }
+}
+"#);
+        assert_eq!(hits.len(), 1);
     }
 }

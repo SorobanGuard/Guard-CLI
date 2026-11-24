@@ -1,6 +1,6 @@
 use crate::util::contractimpl_functions_excluding_test;
+use crate::util::is_storage_mutation_call;
 use crate::util::receiver_chain_contains_events;
-use crate::util::receiver_chain_contains_storage;
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
 use syn::spanned::Spanned;
@@ -65,11 +65,7 @@ struct StorageWriteVisitor {
 
 impl<'ast> Visit<'ast> for StorageWriteVisitor {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if matches!(
-            node.method.to_string().as_str(),
-            "set" | "remove" | "append"
-        ) && receiver_chain_contains_storage(&node.receiver)
-        {
+        if is_storage_mutation_call(node) {
             self.found_write = true;
         }
         visit::visit_expr_method_call(self, node);
@@ -164,6 +160,22 @@ mod tests {
         let check = MissingEventForAdminChangeCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 0);
+        Ok(())
+    }
+
+    /// #1051: an admin change made with `update` still needs an event.
+    #[test]
+    fn flags_update_only_admin_change() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn set_owner(env: Env, new_owner: Address) {
+        env.storage().instance().update(&symbol_short!("owner"), |_old: Option<Address>| new_owner.clone());
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert_eq!(MissingEventForAdminChangeCheck.run(&file, src).len(), 1);
         Ok(())
     }
 }

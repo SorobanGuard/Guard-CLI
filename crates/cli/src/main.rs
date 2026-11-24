@@ -784,7 +784,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         severity: "medium",
         short: "Flags temporary storage and dynamic Symbol keys",
         rule: "Temporary storage or dynamic Symbol keys are risky",
-        long: Some("Reports temporary storage mutations and dynamic Symbol keys that may expire unexpectedly or collide."),
+        long: Some("Reports temporary storage mutations, and dynamic Symbol::new values that flow into a storage key and may collide."),
     },
     CheckMeta {
         name: "missing-ttl-extension",
@@ -966,7 +966,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         severity: "medium",
         short: "Flags functions susceptible to replay attacks",
         rule: "Function susceptible to replay attacks lacks a nonce check",
-        long: Some("Reports replay-sensitive entrypoints that do not consume or verify a nonce."),
+        long: Some("Reports functions that verify signatures themselves, or act for an Address without require_auth, and write storage without checking a nonce. require_auth-protected methods are not reported: the host already provides their replay protection."),
     },
     CheckMeta {
         name: "uninitialized-storage-read",

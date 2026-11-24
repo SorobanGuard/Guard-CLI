@@ -1,11 +1,12 @@
 //! Risky Soroban storage usage: temporary persistence and caller-derived `Symbol` keys.
 
+use crate::util::is_temporary_storage_mutation_call;
 use crate::util::{
     contractimpl_functions_excluding_test, receiver_chain_contains_storage,
     receiver_chain_contains_temporary,
 };
 use crate::{Check, Finding, Severity};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{Expr, ExprCall, ExprMethodCall, File};
@@ -30,25 +31,13 @@ impl Check for UnsafeStoragePatternsCheck {
                 fn_name: fn_name.clone(),
                 known_consts: &known_consts,
                 out: &mut out,
+                dynamic_symbol_locals: HashMap::new(),
+                reported_lines: HashSet::new(),
             };
             v.visit_block(&method.block);
         }
         out
     }
-}
-
-fn is_storage_mutation_call(m: &ExprMethodCall) -> bool {
-    let name = m.method.to_string();
-    // `extend_ttl` / `bump` are TTL operations, not data writes: bumping the TTL of a
-    // temporary entry is the correct thing to do, not a misuse worth flagging.
-    if !matches!(name.as_str(), "set" | "remove" | "append") {
-        return false;
-    }
-    receiver_chain_contains_storage(&m.receiver)
-}
-
-fn is_temporary_storage_mutation(m: &ExprMethodCall) -> bool {
-    is_storage_mutation_call(m) && receiver_chain_contains_temporary(&m.receiver)
 }
 
 fn is_temporary_get_unchecked(m: &ExprMethodCall) -> bool {
@@ -127,10 +116,124 @@ struct StorageVisitor<'a> {
     fn_name: String,
     known_consts: &'a HashSet<String>,
     out: &'a mut Vec<Finding>,
+    /// Local bindings whose value was built from a dynamic `Symbol::new`, mapped to the
+    /// line of that `Symbol::new` call (e.g. `let key = Symbol::new(&env, &name);`).
+    dynamic_symbol_locals: HashMap<String, usize>,
+    /// Lines already reported, so a key used by several storage calls is reported once.
+    reported_lines: HashSet<usize>,
+}
+
+/// Storage methods whose first argument is a key.
+const STORAGE_KEY_METHODS: &[&str] = &[
+    "get",
+    "get_unchecked",
+    "has",
+    "set",
+    "remove",
+    "update",
+    "try_update",
+    "extend_ttl",
+    "bump",
+    "append",
+];
+
+/// First line of a `Symbol::new(&env, <non-literal>)` call anywhere inside `expr`.
+fn find_dynamic_symbol_new(expr: &Expr, known_consts: &HashSet<String>) -> Option<usize> {
+    struct Finder<'a> {
+        known_consts: &'a HashSet<String>,
+        line: Option<usize>,
+    }
+    impl Visit<'_> for Finder<'_> {
+        fn visit_expr_call(&mut self, i: &ExprCall) {
+            if self.line.is_none()
+                && is_symbol_new_path(&i.func)
+                && i.args.len() >= 2
+                && !symbol_new_second_arg_is_string_lit(i, self.known_consts)
+            {
+                self.line = Some(i.span().start().line);
+            }
+            visit::visit_expr_call(self, i);
+        }
+    }
+    let mut finder = Finder {
+        known_consts,
+        line: None,
+    };
+    finder.visit_expr(expr);
+    finder.line
+}
+
+/// Line of the dynamic `Symbol::new` behind the first tracked local referenced in `expr`.
+fn find_dynamic_symbol_local(expr: &Expr, locals: &HashMap<String, usize>) -> Option<usize> {
+    struct Finder<'a> {
+        locals: &'a HashMap<String, usize>,
+        line: Option<usize>,
+    }
+    impl Visit<'_> for Finder<'_> {
+        fn visit_expr_path(&mut self, i: &syn::ExprPath) {
+            if self.line.is_none() {
+                if let Some(ident) = i.path.get_ident() {
+                    self.line = self.locals.get(&ident.to_string()).copied();
+                }
+            }
+            visit::visit_expr_path(self, i);
+        }
+    }
+    let mut finder = Finder { locals, line: None };
+    finder.visit_expr(expr);
+    finder.line
+}
+
+impl StorageVisitor<'_> {
+    /// Line of a dynamic `Symbol::new` that flows into `expr`, directly or through a local.
+    fn dynamic_symbol_origin(&self, expr: &Expr) -> Option<usize> {
+        find_dynamic_symbol_new(expr, self.known_consts)
+            .or_else(|| find_dynamic_symbol_local(expr, &self.dynamic_symbol_locals))
+    }
+
+    fn report_dynamic_symbol_key(&mut self, line: usize) {
+        if !self.reported_lines.insert(line) {
+            return;
+        }
+        self.out.push(Finding {
+            check_name: CHECK_NAME.to_string(),
+            severity: Severity::Medium,
+            file_path: String::new(),
+            line,
+            function_name: self.fn_name.clone(),
+            description: format!(
+                "`Symbol::new` in `{}` builds a storage key from a non-literal string. Keys \
+                 derived from caller input are easier to guess or collide with; prefer \
+                 `symbol_short!` / fixed literals or a namespaced encoding you control.",
+                self.fn_name
+            ),
+            rule_url: Some(
+                "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
+                    .to_string(),
+            ),
+            suggestion: Some(
+                "Use `symbol_short!(\"literal\")` or a named constant for storage keys."
+                    .to_string(),
+            ),
+        });
+    }
 }
 
 impl Visit<'_> for StorageVisitor<'_> {
     fn visit_expr_method_call(&mut self, i: &ExprMethodCall) {
+        // A dynamic `Symbol::new` only matters when it becomes a storage key; function
+        // names for `invoke_contract` and event topics are not storage keys (#1054).
+        if STORAGE_KEY_METHODS.contains(&i.method.to_string().as_str())
+            && receiver_chain_contains_storage(&i.receiver)
+        {
+            if let Some(line) = i
+                .args
+                .first()
+                .and_then(|key| self.dynamic_symbol_origin(key))
+            {
+                self.report_dynamic_symbol_key(line);
+            }
+        }
         if is_temporary_get_unchecked(i) {
             self.out.push(Finding {
                 check_name: CHECK_NAME.to_string(),
@@ -153,7 +256,7 @@ impl Visit<'_> for StorageVisitor<'_> {
                 ),
             });
         }
-        if is_temporary_storage_mutation(i) {
+        if is_temporary_storage_mutation_call(i) {
             self.out.push(Finding {
                 check_name: CHECK_NAME.to_string(),
                 severity: Severity::Medium,
@@ -179,34 +282,21 @@ impl Visit<'_> for StorageVisitor<'_> {
         visit::visit_expr_method_call(self, i);
     }
 
-    fn visit_expr_call(&mut self, i: &ExprCall) {
-        if is_symbol_new_path(&i.func)
-            && i.args.len() >= 2
-            && !symbol_new_second_arg_is_string_lit(i, self.known_consts)
-        {
-            self.out.push(Finding {
-                check_name: CHECK_NAME.to_string(),
-                severity: Severity::Medium,
-                file_path: String::new(),
-                line: i.span().start().line,
-                function_name: self.fn_name.clone(),
-                description: format!(
-                    "`Symbol::new` in `{}` uses a non-literal key string. Keys derived from \
-                     caller input are easier to guess or collide with; prefer `symbol_short!` / \
-                     fixed literals or a namespaced encoding you control.",
-                    self.fn_name
-                ),
-                rule_url: Some(
-                    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium"
-                        .to_string(),
-                ),
-                suggestion: Some(
-                    "Use `symbol_short!(\"literal\")` or a named constant for storage keys."
-                        .to_string(),
-                ),
-            });
+    fn visit_local(&mut self, i: &syn::Local) {
+        // Visit the initializer first so nested storage calls are checked, then record
+        // whether this binding carries a dynamic symbol for later storage-key uses.
+        visit::visit_local(self, i);
+        if let (Some(init), Some(name)) = (&i.init, crate::util::pat_ident_name(&i.pat)) {
+            match self.dynamic_symbol_origin(&init.expr) {
+                Some(line) => {
+                    self.dynamic_symbol_locals.insert(name, line);
+                }
+                None => {
+                    // Shadowing with a clean value clears the taint.
+                    self.dynamic_symbol_locals.remove(&name);
+                }
+            }
         }
-        visit::visit_expr_call(self, i);
     }
 }
 
@@ -467,6 +557,144 @@ impl C {
         )?;
         let hits = UnsafeStoragePatternsCheck.run(&file, "");
         assert!(hits.is_empty());
+        Ok(())
+    }
+
+    /// #1051: an `update` on temporary storage is a temporary-storage write.
+    #[test]
+    fn flags_temporary_update() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn bump_count(env: Env) {
+        env.storage().temporary().update(&symbol_short!("n"), |old: Option<u32>| old.unwrap_or(0) + 1);
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].description.contains("temporary"));
+        Ok(())
+    }
+
+    /// #1054: a dynamic symbol used as an `invoke_contract` function name is not a key.
+    #[test]
+    fn ignores_dynamic_symbol_used_as_function_name() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, String, Symbol, Val, Vec};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn call(env: Env, id: Address, fn_name: String, args: Vec<Val>) {
+        env.invoke_contract::<Val>(&id, &Symbol::new(&env, &fn_name), args);
+        let name = Symbol::new(&env, &fn_name);
+        env.invoke_contract::<Val>(&id, &name, Vec::new(&env));
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert!(hits.is_empty(), "{hits:?}");
+        Ok(())
+    }
+
+    /// #1054: a dynamic symbol used as an event topic is not a key.
+    #[test]
+    fn ignores_dynamic_symbol_used_as_event_topic() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env, String, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn emit(env: Env, kind: String, data: u32) {
+        env.events().publish((Symbol::new(&env, &kind),), data);
+        let topic = Symbol::new(&env, &kind);
+        env.events().publish((topic,), data);
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert!(hits.is_empty(), "{hits:?}");
+        Ok(())
+    }
+
+    /// #1054: a dynamic symbol passed straight into a storage call is still a key.
+    #[test]
+    fn flags_inline_dynamic_symbol_storage_key() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Env, String, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn put(env: Env, tag: String, v: u32) {
+        env.require_auth();
+        env.storage().persistent().set(&Symbol::new(&env, &tag), &v);
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 8);
+        Ok(())
+    }
+
+    /// #1054: taint follows a key built from the symbol and re-bound through locals, and a
+    /// key used by several storage calls is reported once.
+    #[test]
+    fn flags_dynamic_symbol_through_locals_once() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, Address, Env, String, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn put(env: Env, user: Address, tag: String, v: u32) {
+        env.require_auth();
+        let sym = Symbol::new(&env, &tag);
+        let key = (sym, user);
+        if !env.storage().persistent().has(&key) {
+            env.storage().persistent().update(&key, |_old: Option<u32>| v);
+        }
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].line, 8);
+        Ok(())
+    }
+
+    /// #1054: re-binding a name to a clean value clears it.
+    #[test]
+    fn ignores_shadowed_dynamic_symbol() -> Result<(), syn::Error> {
+        let file = parse_file(
+            r#"
+use soroban_sdk::{contractimpl, symbol_short, Env, String, Symbol};
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn put(env: Env, tag: String, v: u32) {
+        env.require_auth();
+        let key = Symbol::new(&env, &tag);
+        env.events().publish((key,), v);
+        let key = symbol_short!("fixed");
+        env.storage().persistent().set(&key, &v);
+    }
+}
+"#,
+        )?;
+        let hits = UnsafeStoragePatternsCheck.run(&file, "");
+        assert!(hits.is_empty(), "{hits:?}");
         Ok(())
     }
 }

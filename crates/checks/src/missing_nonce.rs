@@ -1,10 +1,34 @@
-use crate::util::{contractimpl_functions_excluding_test, receiver_chain_contains_storage};
+//! `missing-nonce`: replay-sensitive code that never reads or checks a nonce.
+//!
+//! Soroban's host already provides replay protection for `Address::require_auth()`:
+//! every `SorobanAuthorizationEntry` carries a nonce and an expiration ledger that the host
+//! verifies and consumes, so a contract normally does not manage its own nonces. This check
+//! therefore only reports the cases where replay protection really is the contract's job:
+//!
+//! 1. a function that verifies a signature itself (`ed25519_verify`, `secp256k1_recover`,
+//!    `secp256r1_verify`) and writes storage, because the host never sees that signature
+//!    and cannot stop it being replayed; and
+//! 2. a public function that acts on behalf of an `Address` parameter (it writes storage)
+//!    without any `require_auth` / `require_auth_for_args` call or auth helper, so nothing
+//!    ties the call to that address's host-managed nonce.
+
+use crate::util::{
+    contractimpl_functions_excluding_test, is_storage_mutation_call,
+    receiver_chain_contains_storage,
+};
 use crate::{Check, Finding, Severity};
 use syn::visit::{self, Visit};
 use syn::FnArg;
 
 const CHECK_NAME: &str = "missing-nonce";
 const NONCE_KEYWORDS: &[&str] = &["nonce", "sequence", "seq_num", "replay"];
+
+/// Host crypto functions whose result a contract uses to authenticate a caller itself.
+const SIGNATURE_VERIFY_METHODS: &[&str] =
+    &["ed25519_verify", "secp256k1_recover", "secp256r1_verify"];
+
+const RULE_URL: &str =
+    "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-nonce-medium";
 
 pub struct MissingNonceCheck;
 
@@ -16,59 +40,93 @@ impl Check for MissingNonceCheck {
     fn run(&self, file: &syn::File, _source: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
         for method in contractimpl_functions_excluding_test(file) {
-            if matches!(method.vis, syn::Visibility::Public(_)) {
-                let has_storage_write = contains_storage_write(&method.block);
-                let has_address_param = contains_address_param(&method.sig.inputs);
-                let has_nonce = contains_nonce_reference(&method.block);
-
-                if has_storage_write && has_address_param && !has_nonce {
-                    let name = method.sig.ident.to_string();
-                    findings.push(Finding {
-                        check_name: CHECK_NAME.to_string(),
-                        severity: Severity::Medium,
-                        file_path: String::new(),
-                        line: method.sig.ident.span().start().line,
-                        function_name: name.clone(),
-                        description:
-                            "State-mutating method with Address parameter lacks nonce/replay protection"
-                                .to_string(),
-                        rule_url: Some(
-                            "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-nonce-medium"
-                                .to_string(),
-                        ),
-                        suggestion: Some(
-                            "Add nonce or sequence number validation to prevent replay attacks"
-                                .to_string(),
-                        ),
-                    });
-                }
+            let mut scan = BodyScan::default();
+            scan.visit_block(&method.block);
+            if !scan.storage_write || contains_nonce_reference(&method.block) {
+                continue;
             }
+
+            let name = method.sig.ident.to_string();
+            let is_public = matches!(method.vis, syn::Visibility::Public(_));
+            let (description, suggestion) = if scan.verifies_signature {
+                (
+                    format!(
+                        "`{name}` verifies a signature itself and writes storage, but never \
+                         checks a nonce. The host's replay protection only covers \
+                         `require_auth`, so the same signed payload can be submitted again."
+                    ),
+                    "Include a per-signer nonce (or a deadline plus a used-payload record) in the \
+                     signed message, check it, and store the consumed value before acting."
+                        .to_string(),
+                )
+            } else if is_public && contains_address_param(&method.sig.inputs) && !scan.has_auth {
+                (
+                    format!(
+                        "`{name}` takes an `Address` and writes storage without `require_auth`, \
+                         so nothing binds the call to that address's host-managed nonce."
+                    ),
+                    "Call `address.require_auth()` (the host then provides replay protection), or \
+                     check and consume an explicit nonce if the call is authorized another way."
+                        .to_string(),
+                )
+            } else {
+                continue;
+            };
+
+            findings.push(Finding {
+                check_name: CHECK_NAME.to_string(),
+                severity: Severity::Medium,
+                file_path: String::new(),
+                line: method.sig.ident.span().start().line,
+                function_name: name,
+                description,
+                rule_url: Some(RULE_URL.to_string()),
+                suggestion: Some(suggestion),
+            });
         }
         findings
     }
 }
 
-fn contains_storage_write(block: &syn::Block) -> bool {
-    let mut visitor = StorageWriteVisitor::default();
-    visit::visit_block(&mut visitor, block);
-    visitor.found_write
-}
-
 #[derive(Default)]
-struct StorageWriteVisitor {
-    found_write: bool,
+struct BodyScan {
+    storage_write: bool,
+    verifies_signature: bool,
+    has_auth: bool,
 }
 
-impl<'ast> Visit<'ast> for StorageWriteVisitor {
+/// `require_auth`, `require_auth_for_args`, and the common helper spellings
+/// (`require_auth_*`, `assert_auth`, `check_auth`).
+fn is_auth_call_name(name: &str) -> bool {
+    name.starts_with("require_auth") || name == "assert_auth" || name == "check_auth"
+}
+
+impl<'ast> Visit<'ast> for BodyScan {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if matches!(
-            node.method.to_string().as_str(),
-            "set" | "remove" | "append" | "push" | "push_back"
-        ) && receiver_chain_contains_storage(&node.receiver)
-        {
-            self.found_write = true;
+        let method = node.method.to_string();
+        if is_storage_mutation_call(node) {
+            self.storage_write = true;
+        }
+        if SIGNATURE_VERIFY_METHODS.contains(&method.as_str()) {
+            self.verifies_signature = true;
+        }
+        if is_auth_call_name(&method) {
+            self.has_auth = true;
         }
         visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(p) = &*node.func {
+            if p.path
+                .segments
+                .last()
+                .is_some_and(|s| is_auth_call_name(&s.ident.to_string()))
+            {
+                self.has_auth = true;
+            }
+        }
+        visit::visit_expr_call(self, node);
     }
 }
 
@@ -368,6 +426,113 @@ mod tests {
         let check = MissingNonceCheck;
         let findings = check.run(&file, src);
         assert_eq!(findings.len(), 1);
+        Ok(())
+    }
+
+    /// #1052: `require_auth` gets replay protection from the host's per-address nonce.
+    #[test]
+    fn ignores_require_auth_protected_transfer() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        env.storage().persistent().set(&from, &amount);
+        env.storage().persistent().set(&to, &amount);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert!(MissingNonceCheck.run(&file, src).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_require_auth_for_args_and_auth_helpers() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn a(env: Env, user: Address, v: u32) {
+        user.require_auth_for_args((v,).into_val(&env));
+        env.storage().instance().set(&user, &v);
+    }
+    pub fn b(env: Env, user: Address, v: u32) {
+        require_auth_admin(&env);
+        env.storage().instance().set(&user, &v);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert!(MissingNonceCheck.run(&file, src).is_empty());
+        Ok(())
+    }
+
+    /// The host cannot protect a signature the contract checks itself, so this is flagged
+    /// even though the function also calls `require_auth`.
+    #[test]
+    fn flags_self_verified_signature_without_nonce() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn claim(env: Env, relayer: Address, pk: BytesN<32>, msg: Bytes, sig: BytesN<64>) {
+        relayer.require_auth();
+        env.crypto().ed25519_verify(&pk, &msg, &sig);
+        env.storage().persistent().set(&pk, &true);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        let findings = MissingNonceCheck.run(&file, src);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("verifies a signature"));
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_self_verified_signature_with_nonce() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn claim(env: Env, pk: BytesN<32>, msg: Bytes, sig: BytesN<64>, nonce: u64) {
+        env.crypto().ed25519_verify(&pk, &msg, &sig);
+        env.storage().persistent().set(&pk, &nonce);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert!(MissingNonceCheck.run(&file, src).is_empty());
+        Ok(())
+    }
+
+    /// #1051: `update` is a storage write.
+    #[test]
+    fn flags_update_only_mutation_without_auth() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn credit(env: Env, user: Address, amount: i128) {
+        env.storage().persistent().update(&user, |old: Option<i128>| old.unwrap_or(0) + amount);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert_eq!(MissingNonceCheck.run(&file, src).len(), 1);
+        Ok(())
+    }
+
+    /// #1051 / #510: a `Vec` push on a value loaded from storage is not itself a write.
+    #[test]
+    fn ignores_vec_push_on_storage_chain() -> Result<(), syn::Error> {
+        let src = r#"
+#[contractimpl]
+impl C {
+    pub fn log(env: Env, user: Address) {
+        env.storage().instance().get::<_, Vec<Address>>(&0).unwrap().push_back(user);
+    }
+}
+        "#;
+        let file = parse_file(src)?;
+        assert!(MissingNonceCheck.run(&file, src).is_empty());
         Ok(())
     }
 }
