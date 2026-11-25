@@ -619,6 +619,9 @@ fn main() {
             println!("Summary:   {}", summary);
             println!("Details:");
             println!("  {}", details);
+            if let Some(url) = check_docs_url(&check_name) {
+                println!("Docs:      {}", url);
+            }
         }
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
@@ -752,6 +755,8 @@ struct CheckMeta {
     /// Long-form explanation for `explain` (`explain_details`); `None` falls back to a
     /// generic string.
     long: Option<&'static str>,
+    /// Full URL to the docs/checks.md section for this check.
+    docs_url: &'static str,
 }
 
 /// Single source of truth for check metadata read by `describe_check`, `describe_rule`,
@@ -764,6 +769,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Missing env.require_auth() before storage writes",
         rule: "Method writes to storage without env.require_auth()",
         long: Some("Reports contract methods that mutate storage without calling require_auth or require_auth_for_args."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-require-auth-high",
     },
     CheckMeta {
         name: "unchecked-arithmetic",
@@ -771,6 +777,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags unchecked arithmetic on contract state (High / Medium / Low per operand)",
         rule: "Wrapping arithmetic operations may overflow",
         long: Some("Reports wrapping +, -, *, and compound arithmetic in contract methods; prefer checked_* or saturating_* APIs. Severity is computed per call site: High for financial-named operands (e.g. amount, balance, price), Low for index-named operands, Medium otherwise."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-arithmetic-high--medium--low",
     },
     CheckMeta {
         name: "unprotected-admin",
@@ -778,6 +785,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags privileged entrypoints without auth",
         rule: "Sensitive admin entrypoints lack an authorization gate",
         long: Some("Reports public admin-like entrypoints such as set_owner, pause, migrate, or upgrade when they lack an auth gate."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-admin-high",
     },
     CheckMeta {
         name: "unsafe-storage-patterns",
@@ -785,6 +793,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags temporary storage and dynamic Symbol keys",
         rule: "Temporary storage or dynamic Symbol keys are risky",
         long: Some("Reports temporary storage mutations and dynamic Symbol keys that may expire unexpectedly or collide."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-storage-patterns-medium",
     },
     CheckMeta {
         name: "missing-ttl-extension",
@@ -792,6 +801,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags persistent storage entries without TTL extension",
         rule: "Persistent entries may expire without TTL bump",
         long: Some("Reports persistent storage writes that do not extend TTL in the same function."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-ttl-extension-low",
     },
     CheckMeta {
         name: "forbidden-std-imports",
@@ -799,6 +809,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags use of std in no_std Soroban contracts",
         rule: "Crate imports std which is forbidden in no_std contracts",
         long: Some("Reports std imports in Soroban contract files because deployable contracts must compile for no_std WASM."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#forbidden-std-imports-high",
     },
     CheckMeta {
         name: "hardcoded-address",
@@ -806,6 +817,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags hardcoded Stellar address literals",
         rule: "Contract contains a hardcoded Stellar address string",
         long: Some("Reports Stellar public-key-shaped string literals embedded directly in source."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#hardcoded-address-medium",
     },
     CheckMeta {
         name: "unsafe-cross-contract-input",
@@ -813,6 +825,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags unvalidated return values from cross-contract calls",
         rule: "Cross-contract call return value used without validation",
         long: Some("Reports invoke_contract return values stored directly without local validation."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-cross-contract-input-high",
     },
     CheckMeta {
         name: "missing-contract-annotation",
@@ -820,6 +833,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags structs missing the #[contract] attribute",
         rule: "Struct missing #[contract] annotation",
         long: Some("Reports contractimpl blocks without a sibling struct annotated with #[contract]."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-contract-annotation-low",
     },
     CheckMeta {
         name: "delegate-call-risk",
@@ -827,6 +841,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags delegate-call patterns that transfer execution control",
         rule: "Delegate-style call pattern can transfer control unexpectedly",
         long: Some("Reports storage-derived cross-contract callees that can redirect execution if storage is poisoned."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#delegate-call-risk-high",
     },
     CheckMeta {
         name: "integer-division-truncation",
@@ -834,6 +849,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags integer division that silently truncates",
         rule: "Integer division silently truncates the remainder",
         long: Some("Reports integer division where truncation may silently change financial or accounting results."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#integer-division-truncation-medium",
     },
     CheckMeta {
         name: "missing-event-emission",
@@ -841,6 +857,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags state-mutating functions with no event emission",
         rule: "State-mutating function emits no events",
         long: Some("Reports state-mutating functions that do not publish events for off-chain indexers."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-event-emission-medium",
     },
     CheckMeta {
         name: "symbol-key-collision",
@@ -848,6 +865,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage keys that share the same Symbol value",
         rule: "Multiple storage keys share the same Symbol value",
         long: Some("Reports duplicate symbol_short! keys in the same impl block."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#symbol-key-collision-medium",
     },
     CheckMeta {
         name: "self-transfer",
@@ -855,6 +873,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token transfers where sender may equal receiver",
         rule: "Token transfer destination may equal the sender",
         long: Some("Reports transfer-like functions that do not guard against sender and recipient being equal."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#self-transfer-medium",
     },
     CheckMeta {
         name: "missing-zero-address-check",
@@ -862,6 +881,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags Address parameters not checked for the zero address",
         rule: "Address argument not validated against the zero address",
         long: Some("Reports Address parameters stored or used without checking for default or zero-address values."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-zero-address-check-medium",
     },
     CheckMeta {
         name: "mutable-global-state",
@@ -869,6 +889,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags mutable global state in contract code",
         rule: "Mutable global state is unsafe and not persisted on-chain",
         long: Some("Reports static mut items, which are unsafe and not valid persistent contract state."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#mutable-global-state-high",
     },
     CheckMeta {
         name: "re-initialization-risk",
@@ -876,6 +897,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags initializer-like functions without re-init guards",
         rule: "Initializer-like function can overwrite critical state",
         long: Some("Reports initializer-like methods that write state without checking whether initialization already happened."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#re-initialization-risk-high",
     },
     CheckMeta {
         name: "unchecked-invoke-return",
@@ -883,6 +905,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags discarded cross-contract call return values",
         rule: "Cross-contract invocation result is discarded",
         long: Some("Reports bare invoke_contract statements whose return values are discarded."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-invoke-return-medium",
     },
     CheckMeta {
         name: "missing-balance-check",
@@ -890,6 +913,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token transfers without balance or authorization checks",
         rule: "Token transfer occurs without a balance or authorization check",
         long: Some("Reports token transfer calls that lack a preceding balance or authorization check."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-balance-check-high",
     },
     CheckMeta {
         name: "unbounded-vec-growth",
@@ -897,6 +921,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage-backed Vec growth without a length cap",
         rule: "Storage-backed Vec can grow without a bound",
         long: Some("Reports storage-backed Vec values pushed and written back without an apparent length cap."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unbounded-vec-growth-medium",
     },
     CheckMeta {
         name: "unsafe-randomness",
@@ -904,6 +929,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags ledger timestamp or sequence as randomness",
         rule: "Ledger data is used as a randomness source",
         long: Some("Reports ledger timestamp or sequence usage as a randomness source."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unsafe-randomness-high",
     },
     CheckMeta {
         name: "unchecked-divisor",
@@ -911,6 +937,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags division by runtime values without zero guards",
         rule: "Division uses a runtime divisor without a zero guard",
         long: Some("Reports division by runtime values without an apparent non-zero guard."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-divisor-high",
     },
     CheckMeta {
         name: "reentrancy-risk",
@@ -918,6 +945,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage writes followed by cross-contract calls",
         rule: "Storage write followed by cross-contract invocation risks reentrancy",
         long: Some("Reports contract methods that write to storage and then perform a cross-contract invocation, leaving state observable to a reentrant callee."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#reentrancy-risk-high",
     },
     CheckMeta {
         name: "panic-in-contract",
@@ -925,6 +953,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags panic!, unwrap, and expect in contract methods",
         rule: "Contract uses panic!, unwrap, or expect which abort the WASM execution",
         long: Some("Reports panic!, unwrap(), expect(), and unreachable!() in contract methods, all of which trap and abort WASM execution."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#panic-in-contract-medium",
     },
     CheckMeta {
         name: "unprotected-upgrade",
@@ -932,6 +961,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags upgrade entrypoints without authorization",
         rule: "Contract upgrade entrypoint lacks an authorization gate",
         long: Some("Reports contract upgrade entrypoints that swap the contract WASM without an authorization gate."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-upgrade-high",
     },
     CheckMeta {
         name: "unprotected-token-mint",
@@ -939,6 +969,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token mint entrypoints without authorization",
         rule: "Token mint entrypoint lacks an authorization gate",
         long: Some("Reports token mint entrypoints that create new supply without an authorization gate."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-token-mint-high",
     },
     CheckMeta {
         name: "unprotected-contract-deployment",
@@ -946,6 +977,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags contract deployment calls without authorization",
         rule: "Contract deployment call lacks an authorization gate",
         long: Some("Reports contract deployment calls that are reachable without an authorization gate."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unprotected-contract-deployment-high",
     },
     CheckMeta {
         name: "unchecked-token-amount",
@@ -953,6 +985,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags token amounts used without validation",
         rule: "Token amount used without validation",
         long: Some("Reports token amount parameters passed to transfers or mints without a positivity or bounds check."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#unchecked-token-amount-medium",
     },
     CheckMeta {
         name: "large-loop",
@@ -960,6 +993,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags loops over unbounded collections",
         rule: "Loop may iterate over an unbounded collection",
         long: Some("Reports loops that iterate over collections whose length is not bounded by a constant or validated input."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#large-loop-medium",
     },
     CheckMeta {
         name: "missing-nonce",
@@ -967,6 +1001,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags functions susceptible to replay attacks",
         rule: "Function susceptible to replay attacks lacks a nonce check",
         long: Some("Reports replay-sensitive entrypoints that do not consume or verify a nonce."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-nonce-medium",
     },
     CheckMeta {
         name: "uninitialized-storage-read",
@@ -974,6 +1009,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags storage reads without initialization checks",
         rule: "Storage value read without checking if it has been initialized",
         long: Some("Reports storage reads that are not guarded by a has() check or a default value."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#uninitialized-storage-read-high",
     },
     CheckMeta {
         name: "missing-event-for-admin-change",
@@ -981,6 +1017,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags admin changes with no event emission",
         rule: "Admin-state change emits no event for off-chain indexers",
         long: Some("Reports functions that change admin or ownership state without publishing an event for off-chain indexers."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-event-for-admin-change-medium",
     },
     CheckMeta {
         name: "missing-input-length-bound",
@@ -988,6 +1025,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags input collections without length bound checks",
         rule: "Input collection used without a length bound check",
         long: Some("Reports input collection parameters used without checking their length against an upper bound."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#missing-input-length-bound-medium",
     },
     CheckMeta {
         name: "auth-after-storage-write",
@@ -995,6 +1033,7 @@ const CHECK_METADATA: &[CheckMeta] = &[
         short: "Flags authorization checks after storage writes",
         rule: "Authorization check occurs after a storage write",
         long: Some("Reports functions that perform a storage write before their require_auth call, so unauthorized callers can still cause state changes."),
+        docs_url: "https://github.com/SorobanGuard/Guard-CLI/blob/main/docs/checks.md#auth-after-storage-write-high",
     },
 ];
 
@@ -1018,6 +1057,10 @@ fn describe_check(name: &str) -> (&'static str, &'static str) {
         .unwrap_or(("low", "Custom detector"))
 }
 
+fn check_docs_url(name: &str) -> Option<&'static str> {
+    check_meta(name).map(|m| m.docs_url)
+}
+
 fn list_checks_json() -> Result<String, serde_json::Error> {
     let checks = default_checks()
         .into_iter()
@@ -1028,6 +1071,7 @@ fn list_checks_json() -> Result<String, serde_json::Error> {
                 "severity": severity,
                 "description": description,
                 "rule": describe_rule(check.name()),
+                "docs_url": check_docs_url(check.name()),
             })
         })
         .collect::<Vec<_>>();
@@ -1762,6 +1806,100 @@ mod tests {
         assert!(!is_relevant_watch_path(Path::new(".git/hooks/check.rs")));
         assert!(is_relevant_watch_path(Path::new("src/lib.rs")));
         assert!(!is_relevant_watch_path(Path::new("src/README.md")));
+    }
+
+    /// Every check's `docs_url` must have a matching anchor in `docs/checks.md`.
+    ///
+    /// The anchor is the fragment portion of the URL (everything after `#`). GitHub
+    /// derives Markdown anchors by lower-casing the heading text, stripping everything
+    /// except letters, digits, hyphens, and spaces, and replacing spaces with hyphens.
+    /// We verify the fragment is present as a heading in the docs file so that the URL
+    /// never silently points at a non-existent section (acceptance criterion for #1070).
+    #[test]
+    fn check_docs_url_anchor_exists_in_docs() {
+        let docs =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/checks.md"))
+                .expect("docs/checks.md should be readable from the workspace");
+
+        // Build the set of anchors that actually exist in the file.
+        // GitHub derives an anchor from a heading by: lower-casing, keeping only
+        // alphanumeric / space / hyphen chars, replacing spaces with hyphens, and
+        // trimming leading/trailing hyphens.
+        let derive_anchor = |heading: &str| -> String {
+            let text = heading.trim_start_matches('#').trim();
+            let raw: String = text
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                .collect::<String>()
+                .to_lowercase()
+                .replace(' ', "-");
+            // GitHub trims leading and trailing hyphens that result from stripped chars.
+            raw.trim_matches('-').to_string()
+        };
+
+        let existing_anchors: std::collections::HashSet<String> = docs
+            .lines()
+            .filter(|l| l.starts_with("## ") || l.starts_with("# "))
+            .map(|l| derive_anchor(l))
+            .collect();
+
+        for meta in CHECK_METADATA {
+            // Extract the fragment from the docs_url (the part after `#`).
+            let fragment = meta
+                .docs_url
+                .split('#')
+                .nth(1)
+                .unwrap_or_else(|| panic!("docs_url for `{}` has no `#` fragment", meta.name));
+
+            assert!(
+                existing_anchors.contains(fragment),
+                "docs_url fragment `#{}` for check `{}` not found in docs/checks.md. \
+                 Available anchors: {:?}",
+                fragment,
+                meta.name,
+                {
+                    let mut v: Vec<&String> = existing_anchors.iter().collect();
+                    v.sort();
+                    v
+                }
+            );
+        }
+    }
+
+    /// `list-checks --json` output must include a `docs_url` field for every check.
+    #[test]
+    fn list_checks_json_includes_docs_url() {
+        let payload: serde_json::Value =
+            serde_json::from_str(&list_checks_json().unwrap()).unwrap();
+        for check in payload["checks"].as_array().unwrap() {
+            let name = check["name"].as_str().unwrap();
+            assert!(
+                check.get("docs_url").is_some(),
+                "check `{name}` is missing docs_url in list-checks --json output"
+            );
+            let url = check["docs_url"].as_str().unwrap_or_default();
+            assert!(
+                url.contains("docs/checks.md#"),
+                "check `{name}` docs_url `{url}` does not point at docs/checks.md"
+            );
+        }
+    }
+
+    /// `explain` output must contain a `Docs:` line for every known check.
+    #[test]
+    fn explain_output_includes_docs_line_for_every_check() {
+        for meta in CHECK_METADATA {
+            // check_docs_url must return Some for every built-in check.
+            let url = check_docs_url(meta.name).unwrap_or_else(|| {
+                panic!("check_docs_url returned None for `{}`", meta.name)
+            });
+            assert!(
+                url.contains("docs/checks.md#"),
+                "docs_url for `{}` does not point at docs/checks.md: `{}`",
+                meta.name,
+                url
+            );
+        }
     }
 
     #[test]
